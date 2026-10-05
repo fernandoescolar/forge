@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Renders Forge's app icon (1024x1024 PNG) without third-party libraries.
 
-A macOS-style rounded square in Dracula's background colours, a bold "F" with a
-purple→pink gradient and an orange spark. Shapes are signed-distance functions,
+A macOS-style rounded square in Forge Dark's greys, a bold "F" glowing from amber to
+ember orange, like metal in a forge, and a warm yellow spark. Shapes are signed-distance functions,
 so edges are anti-aliased.
 
     scripts/make-icon.py out.png
@@ -16,9 +16,9 @@ def rgb(h):
     return tuple(int(h[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
 
-BG_TOP, BG_BOTTOM = rgb("#3a3d4f"), rgb("#1d1e27")
-F_TOP, F_BOTTOM = rgb("#bd93f9"), rgb("#ff79c6")
-SPARK = rgb("#ffb86c")
+BG_TOP, BG_BOTTOM = rgb("#363c47"), rgb("#1b1e24")
+F_TOP, F_BOTTOM = rgb("#ffbe5c"), rgb("#ec6b2d")
+SPARK = rgb("#ffe08a")
 
 
 def sd_round_rect(x, y, cx, cy, hw, hh, r):
