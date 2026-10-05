@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds dist/Forge.app: release binary, Info.plist, icon, bundled example extensions,
+# Builds dist/Forge.app: release binary, Info.plist, icon, the extensions that ship with Forge,
 # signature; then dist/Forge-<version>-<arch>.zip, the file releases and updates use.
 #
 #   scripts/bundle-macos.sh                 # runtime-compiled Metal shaders (no Xcode needed)
@@ -36,10 +36,15 @@ fi
 echo "==> cargo build --release ${features[*]:-} ${target_args[*]:-}"
 cargo build --release -p forge-native ${features[@]+"${features[@]}"} ${target_args[@]+"${target_args[@]}"}
 
-echo "==> building and packing the bundled extensions"
+# The extensions that ship with Forge. The others in extensions/ are examples for extension
+# authors (debug builds load them all).
+BUNDLED_EXTENSIONS=(db-explorer)
+
+echo "==> building and packing the bundled extensions: ${BUNDLED_EXTENSIONS[*]}"
 PACKAGES="$(mktemp -d)"
-for ext in extensions/*/; do
-  name="$(basename "$ext")"
+for name in "${BUNDLED_EXTENSIONS[@]}"; do
+  ext="extensions/$name/"
+  [ -f "${ext}package.json" ] || { echo "error: no extension at $ext" >&2; exit 1; }
   # Extensions with sidecars build them first (`npm run sidecar`), for the app's architecture.
   if node -e "process.exit(require('./${ext}package.json').scripts?.sidecar ? 0 : 1)"; then
     if [ -n "$TARGET" ]; then
