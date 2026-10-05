@@ -1,0 +1,20 @@
+diff --git a/crates/theme_selector/src/theme_selector.rs b/crates/theme_selector/src/theme_selector.rs
+index e35b48d..a739d2b 100644
+--- a/crates/theme_selector/src/theme_selector.rs
++++ b/crates/theme_selector/src/theme_selector.rs
+@@ -174,11 +174,11 @@ impl ThemeSelectorDelegate {
+             })
+             .collect::<Vec<_>>();
+ 
+-        // Sort by dark vs light, then by name.
++        // Alphabetically, light and dark themes together.
+         themes.sort_unstable_by(|a, b| {
+-            a.appearance
+-                .is_light()
+-                .cmp(&b.appearance.is_light())
++            a.name
++                .to_lowercase()
++                .cmp(&b.name.to_lowercase())
+                 .then(a.name.cmp(&b.name))
+         });
+ 

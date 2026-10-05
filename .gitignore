@@ -1,0 +1,14 @@
+/target
+.DS_Store
+*.log
+__pycache__/
+/packages/*/node_modules
+/packages/*/dist
+/packages/forge-api/test/fixture/dist
+/extensions/*/dist
+/dist
+/.claude
+/.serena
+/.vscode
+/vendor
+/.idea

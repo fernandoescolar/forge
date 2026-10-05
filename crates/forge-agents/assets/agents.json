@@ -1,0 +1,16 @@
+// ACP agents shown in Forge's agent panel. Each runs as a subprocess speaking the Agent
+// Client Protocol over stdio and handles its own authentication and models.
+// "env" is a list of [name, value] pairs; "cwd" defaults to the project root.
+{
+  // Show every file the agent writes as a diff and wait for your approval. Diffs you
+  // already approved in a permission request are not asked again.
+  "review_writes": true,
+  // MCP servers every agent session gets (ACP passes them to the agent), e.g.
+  //   { "name": "github", "command": "github-mcp-server", "args": ["stdio"], "env": { "GITHUB_TOKEN": "…" } }
+  "mcp_servers": [],
+  "agents": [
+    { "id": "claude", "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp"] },
+    { "id": "gemini", "command": "gemini", "args": ["--experimental-acp"] },
+    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp"] }
+  ]
+}

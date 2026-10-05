@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      .card { background: var(--forge-surface); border: 1px solid var(--forge-border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+      .muted { color: var(--forge-muted); }
+      button { background: var(--forge-accent); color: var(--forge-bg); border: 0; border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; }
+      code { font-family: ui-monospace, monospace; font-size: 12px; }
+      canvas { width: 100%; height: 120px; }
+    </style>
+  </head>
+  <body>
+    <h1>Webview panel</h1>
+    <p class="muted">Plain HTML/JS running in the system web view, themed with Forge's colours.</p>
+    <div class="card">
+      <div><strong>Workspace</strong></div>
+      <div id="roots" class="muted">Waiting for the extension…</div>
+      <div id="active" class="muted"></div>
+      <p><button id="readme">Open README.md</button></p>
+    </div>
+    <div class="card">
+      <div><strong>DOM-only stuff</strong> <span class="muted">(a canvas chart)</span></div>
+      <canvas id="chart" width="600" height="120"></canvas>
+    </div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      window.forge.onMessage((m) => {
+        if (m.type !== 'state') return;
+        $('roots').innerHTML = m.roots.map((r) => `<code>${r}</code>`).join('<br>') || 'No folders open';
+        $('active').textContent = 'Active file: ' + (m.activeFile ?? 'none');
+      });
+      $('readme').onclick = () => window.forge.postMessage({ type: 'open', path: 'README.md' });
+      window.forge.postMessage({ type: 'hello' });
+
+      const c = $('chart'), g = c.getContext('2d');
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--forge-accent');
+      g.strokeStyle = accent; g.lineWidth = 3; g.beginPath();
+      for (let x = 0; x <= 600; x += 6) g.lineTo(x, 60 + Math.sin(x / 40) * 40 * Math.cos(x / 170));
+      g.stroke();
+    </script>
+  </body>
+</html>

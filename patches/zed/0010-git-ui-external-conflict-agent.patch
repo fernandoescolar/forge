@@ -1,0 +1,61 @@
+diff --git a/crates/git_ui/src/conflict_view.rs b/crates/git_ui/src/conflict_view.rs
+index 36b9306..5c70a2b 100644
+--- a/crates/git_ui/src/conflict_view.rs
++++ b/crates/git_ui/src/conflict_view.rs
+@@ -23,6 +23,16 @@ use zed_actions::agent::{
+     ConflictContent, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
+ };
+ 
++/// Set by an application whose own agents handle `ResolveConflictsWithAgent` and
++/// `ResolveConflictedFilesWithAgent`: the agent buttons show even with Zed's AI disabled.
++pub struct ExternalConflictAgent;
++
++impl gpui::Global for ExternalConflictAgent {}
++
++fn agent_available(cx: &App) -> bool {
++    AgentSettings::get_global(cx).enabled(cx) || cx.has_global::<ExternalConflictAgent>()
++}
++
+ pub(crate) struct ConflictAddon {
+     buffers: HashMap<BufferId, BufferConflicts>,
+ }
+@@ -337,7 +347,7 @@ fn render_conflict_buttons(
+     editor: WeakEntity<Editor>,
+     cx: &mut BlockContext,
+ ) -> AnyElement {
+-    let is_ai_enabled = AgentSettings::get_global(cx).enabled(cx);
++    let is_ai_enabled = agent_available(cx);
+ 
+     h_flex()
+         .id(cx.block_id)
+@@ -568,7 +578,7 @@ impl MergeConflictIndicator {
+         );
+ 
+         let agent_settings = AgentSettings::get_global(cx);
+-        if !agent_settings.enabled(cx)
++        if !agent_available(cx)
+             || !agent_settings.show_merge_conflict_indicator
+             || !conflicts_changed
+         {
+@@ -616,7 +626,7 @@ impl MergeConflictIndicator {
+ impl Render for MergeConflictIndicator {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let agent_settings = AgentSettings::get_global(cx);
+-        if !agent_settings.enabled(cx)
++        if !agent_available(cx)
+             || !agent_settings.show_merge_conflict_indicator
+             || self.conflicted_paths.is_empty()
+             || self.dismissed
+diff --git a/crates/git_ui/src/git_ui.rs b/crates/git_ui/src/git_ui.rs
+index 7038a7a..9a021d6 100644
+--- a/crates/git_ui/src/git_ui.rs
++++ b/crates/git_ui/src/git_ui.rs
+@@ -58,7 +58,7 @@ pub mod text_diff_view;
+ pub mod unstaged_diff;
+ 
+ pub use blame_ui::GitBlameStatus;
+-pub use conflict_view::MergeConflictIndicator;
++pub use conflict_view::{ExternalConflictAgent, MergeConflictIndicator};
+ 
+ pub fn init(cx: &mut App) {
+     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);

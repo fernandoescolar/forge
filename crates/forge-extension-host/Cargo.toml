@@ -1,0 +1,49 @@
+[package]
+name = "forge-extension-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Runs React extensions in QuickJS and renders their UI natively with GPUI"
+
+[dependencies]
+forge-ui = { path = "../forge-ui" }
+settings = { path = "../../vendor/zed/crates/settings" }
+db = { path = "../../vendor/zed/crates/db" }
+anyhow.workspace = true
+async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
+command_palette_hooks = { path = "../../vendor/zed/crates/command_palette_hooks" }
+editor = { path = "../../vendor/zed/crates/editor" }
+fs = { path = "../../vendor/zed/crates/fs" }
+futures = "0.3"
+fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+menu = { path = "../../vendor/zed/crates/menu" }
+paths = { path = "../../vendor/zed/crates/paths" }
+project = { path = "../../vendor/zed/crates/project" }
+rquickjs = "0.14"
+schemars = { version = "1.0", features = ["indexmap2"] }
+serde.workspace = true
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+smol = "2.0"
+tempfile.workspace = true
+task = { path = "../../vendor/zed/crates/task" }
+text = { path = "../../vendor/zed/crates/text" }
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }
+tempfile.workspace = true

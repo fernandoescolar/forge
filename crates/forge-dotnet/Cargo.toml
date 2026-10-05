@@ -1,0 +1,51 @@
+[package]
+name = "forge-dotnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = ".NET in Forge: solution explorer, NuGet package manager and project file editing"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+collections = { path = "../../vendor/zed/crates/collections" }
+db = { path = "../../vendor/zed/crates/db" }
+dotnet-model = { path = "../dotnet-model" }
+editor = { path = "../../vendor/zed/crates/editor" }
+git = { path = "../../vendor/zed/crates/git" }
+file_icons = { path = "../../vendor/zed/crates/file_icons" }
+forge-tests = { path = "../forge-tests" }
+fs = { path = "../../vendor/zed/crates/fs" }
+forge-ui = { path = "../forge-ui" }
+futures.workspace = true
+fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+http_client = { path = "../../vendor/zed/crates/http_client" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+lsp = { path = "../../vendor/zed/crates/lsp" }
+menu = { path = "../../vendor/zed/crates/menu" }
+paths = { path = "../../vendor/zed/crates/paths" }
+picker = { path = "../../vendor/zed/crates/picker" }
+project = { path = "../../vendor/zed/crates/project" }
+schemars = "1.0"
+serde.workspace = true
+serde_json.workspace = true
+settings = { path = "../../vendor/zed/crates/settings" }
+task = { path = "../../vendor/zed/crates/task" }
+text = { path = "../../vendor/zed/crates/text" }
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+tempfile.workspace = true
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

@@ -1,0 +1,38 @@
+[package]
+name = "forge-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Git integration for Forge: changes, history graph, blame, git init"
+
+[dependencies]
+anyhow.workspace = true
+db = { path = "../../vendor/zed/crates/db" }
+editor = { path = "../../vendor/zed/crates/editor" }
+forge-ui = { path = "../forge-ui" }
+git = { path = "../../vendor/zed/crates/git" }
+git_hosting_providers = { path = "../../vendor/zed/crates/git_hosting_providers" }
+git_ui = { path = "../../vendor/zed/crates/git_ui" }
+log = "0.4"
+gpui = { path = "../../vendor/zed/crates/gpui" }
+language = { path = "../../vendor/zed/crates/language" }
+multi_buffer = { path = "../../vendor/zed/crates/multi_buffer" }
+project = { path = "../../vendor/zed/crates/project" }
+settings = { path = "../../vendor/zed/crates/settings" }
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+tempfile.workspace = true
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+serde_json.workspace = true
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }

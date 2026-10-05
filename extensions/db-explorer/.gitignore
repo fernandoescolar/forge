@@ -1,0 +1,4 @@
+sidecar/target/
+bin/
+dist/
+*.forgeext

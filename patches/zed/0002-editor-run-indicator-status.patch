@@ -1,0 +1,69 @@
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
+index 420da52..a5029d2 100644
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -41,6 +41,7 @@ mod mouse_context_menu;
+ pub mod movement;
+ mod persistence;
+ mod runnables;
++pub use runnables::{RunIndicatorStatus, RunnableTaskStatus};
+ mod rust_analyzer_ext;
+ pub mod scroll;
+ mod selections_collection;
+@@ -288,7 +289,7 @@ use crate::{
+         InlineValueCache,
+         inlay_hints::{LspInlayHintData, inlay_hint_settings},
+     },
+-    runnables::{ResolvedTasks, RunnableData, RunnableTaskStatus, RunnableTasks},
++    runnables::{ResolvedTasks, RunnableData, RunnableTasks},
+     scroll::{ScrollOffset, ScrollPixelOffset},
+     selections_collection::resolve_selections_wrapping_blocks,
+     semantic_tokens::SemanticTokenState,
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+index 4e96f08..6cb2346 100644
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -2815,7 +2815,12 @@ impl EditorElement {
+                         .get((display_row.0.saturating_sub(gutter.range.start.0)) as usize)
+                         .and_then(|row_info| Some((row_info.buffer_id?, row_info.buffer_row?)))
+                         .and_then(|(buffer_id, buffer_row)| {
+-                            editor.runnable_task_status(buffer_id, buffer_row)
++                            editor.runnable_task_status(buffer_id, buffer_row).or_else(|| {
++                                let hook = cx.try_global::<crate::RunIndicatorStatus>()?.clone();
++                                let buffer = editor.buffer().read(cx).buffer(buffer_id)?;
++                                let path = buffer.read(cx).file()?.as_local()?.abs_path(cx);
++                                (hook.0)(&path, buffer_row, cx)
++                            })
+                         });
+ 
+                     gutter.layout_item(
+diff --git a/crates/editor/src/runnables.rs b/crates/editor/src/runnables.rs
+index 7ccecf1..9099c90 100644
+--- a/crates/editor/src/runnables.rs
++++ b/crates/editor/src/runnables.rs
+@@ -112,7 +112,7 @@ impl RunnableData {
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(crate) enum RunnableTaskStatus {
++pub enum RunnableTaskStatus {
+     Running,
+     Passed,
+     Failed,
+@@ -129,6 +129,16 @@ impl From<workspace::tasks::ScheduledTaskResult> for RunnableTaskStatus {
+     }
+ }
+ 
++/// Lets the application embedding the editor give run indicators a status (e.g. the
++/// result of the last test run there) when the editor has none of its own. Called with
++/// the file's absolute path and the indicator's 0-based row.
++#[derive(Clone)]
++pub struct RunIndicatorStatus(
++    pub Arc<dyn Fn(&std::path::Path, BufferRow, &App) -> Option<RunnableTaskStatus> + Send + Sync>,
++);
++
++impl gpui::Global for RunIndicatorStatus {}
++
+ #[derive(Clone, Debug)]
+ pub struct RunnableTasks {
+     pub templates: Vec<(TaskSourceKind, TaskTemplate)>,

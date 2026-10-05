@@ -1,0 +1,10 @@
+name = "HTTP"
+grammar = "http"
+path_suffixes = ["http", "rest"]
+line_comments = ["# "]
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false },
+]
+tab_size = 2

@@ -1,0 +1,32 @@
+[package]
+name = "forge-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "GitHub pull requests in Forge through the gh CLI"
+
+[dependencies]
+anyhow.workspace = true
+editor = { path = "../../vendor/zed/crates/editor" }
+forge-ui = { path = "../forge-ui" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+multi_buffer = { path = "../../vendor/zed/crates/multi_buffer" }
+project = { path = "../../vendor/zed/crates/project" }
+serde_json.workspace = true
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+futures.workspace = true
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+serde_json.workspace = true
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <g fill="#000">
+    <rect x="230" y="152" width="170" height="720" rx="36"/>
+    <rect x="230" y="152" width="520" height="170" rx="36"/>
+    <rect x="230" y="440" width="420" height="150" rx="36"/>
+    <path d="M820 470 C829 528 851 550 909 559 C851 568 829 590 820 648 C811 590 789 568 731 559 C789 550 811 528 820 470 Z"/>
+  </g>
+</svg>

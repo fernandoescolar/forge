@@ -1,0 +1,71 @@
+// Forge colour palette. Forge expands this into a full Zed theme and reloads it on save.
+//
+//   ui        – chrome and editor surfaces
+//   syntax    – any Zed syntax scope; more specific scopes inherit from their prefix
+//               ("string" also colours "string.escape" unless that is set too).
+//               A value is "#rrggbb[aa]" or { "color", "font_style": "italic", "font_weight": 700 }
+//   terminal  – the 8 ANSI colours (bright/dim variants are derived)
+//   overrides – raw Zed theme keys for anything not covered above, e.g. "editor.wrap_guide"
+{
+  "name": "Forge Dark",
+  "appearance": "dark",
+  "ui": {
+    "window": "#0e1014",
+    "editor": "#13161c",
+    "surface": "#1b1f27",
+    "border": "#262b35",
+    "text": "#e6e9ef",
+    "muted": "#9aa3b2",
+    "faint": "#5b6475",
+    "accent": "#ff8a3d",
+    "selection": "#ff8a3d33",
+    "active_line": "#1a1e26",
+    "error": "#ff5f6d",
+    "warning": "#ffc857",
+    "success": "#7ee787",
+    "info": "#5cc8ff"
+  },
+  "syntax": {
+    "keyword": { "color": "#ff7a59", "font_weight": 600 },
+    "function": "#5cc8ff",
+    "type": "#c792ea",
+    "constructor": "#c792ea",
+    "enum": "#c792ea",
+    "variant": "#f78c6c",
+    "string": "#a5e075",
+    "string.escape": "#7fdbca",
+    "string.regex": "#7fdbca",
+    "number": "#f7c862",
+    "boolean": "#f78c6c",
+    "constant": "#f78c6c",
+    "comment": { "color": "#6a7385", "font_style": "italic" },
+    "comment.doc": { "color": "#7d8799", "font_style": "italic" },
+    "variable": "#e6e9ef",
+    "variable.special": "#ff7ab2",
+    "property": "#82aaff",
+    "attribute": "#ffcb6b",
+    "preproc": "#ff9cf5",
+    "namespace": "#7fdbca",
+    "label": "#ffcb6b",
+    "operator": "#89ddff",
+    "punctuation": "#8b95a7",
+    "punctuation.special": "#ff7ab2",
+    "tag": "#ff6b8b",
+    "title": { "color": "#ff8a3d", "font_weight": 700 },
+    "link_uri": "#5cc8ff",
+    "link_text": "#82aaff",
+    "emphasis": { "color": "#e6e9ef", "font_style": "italic" },
+    "emphasis.strong": { "color": "#e6e9ef", "font_weight": 700 }
+  },
+  "terminal": {
+    "black": "#1b1f27",
+    "red": "#ff5f6d",
+    "green": "#7ee787",
+    "yellow": "#ffc857",
+    "blue": "#5cc8ff",
+    "magenta": "#c792ea",
+    "cyan": "#7fdbca",
+    "white": "#e6e9ef"
+  },
+  "overrides": {}
+}

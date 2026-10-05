@@ -1,0 +1,308 @@
+diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
+index 918607c..c2633a1 100644
+--- a/crates/workspace/src/dock.rs
++++ b/crates/workspace/src/dock.rs
+@@ -8,7 +8,7 @@ use client::proto;
+ use db::kvp::KeyValueStore;
+ 
+ use gpui::{
+-    Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
++    Action, Anchor, AnyView, App, Axis, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
+     Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
+     Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
+     px,
+@@ -280,12 +280,28 @@ impl From<&dyn PanelHandle> for AnyView {
+ 
+ /// A container with a fixed [`DockPosition`] adjacent to a certain widown edge.
+ /// Can contain multiple panels and show/hide itself with all contents.
++/// The divider before panel `index` of a dock's panel group, being dragged.
++#[derive(Clone)]
++struct DraggedGroupDivider {
++    index: usize,
++}
++
++impl Render for DraggedGroupDivider {
++    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++        gpui::Empty
++    }
++}
++
+ pub struct Dock {
+     position: DockPosition,
+     panel_entries: Vec<PanelEntry>,
+     workspace: WeakEntity<Workspace>,
+     is_open: bool,
+     active_panel_index: Option<usize>,
++    /// Panels shown together: activating one shows the whole group.
++    panel_groups: Vec<Vec<EntityId>>,
++    /// How much of its group's space each grouped panel takes (relative; 1 by default).
++    panel_weights: std::collections::HashMap<EntityId, f32>,
+     focus_handle: FocusHandle,
+     focus_follows_mouse: FocusFollowsMouse,
+     restoration: DockRestoreState,
+@@ -452,6 +468,8 @@ impl Dock {
+                 workspace: workspace.downgrade(),
+                 panel_entries: Default::default(),
+                 active_panel_index: None,
++                panel_groups: Vec::new(),
++                panel_weights: Default::default(),
+                 is_open: false,
+                 focus_handle: focus_handle.clone(),
+                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
+@@ -585,14 +603,111 @@ impl Dock {
+     fn set_open_internal(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+         if open != self.is_open {
+             self.is_open = open;
+-            if let Some(active_panel) = self.active_panel_entry() {
+-                active_panel.panel.set_active(open, window, cx);
++            for ix in self.shown_entries() {
++                self.panel_entries[ix].panel.set_active(open, window, cx);
+             }
+ 
+             cx.notify();
+         }
+     }
+ 
++    /// Groups of panels shown together (in this dock, in order): when one of them is
++    /// activated, the dock shows all of them, split along the dock.
++    pub fn set_panel_groups(&mut self, groups: Vec<Vec<EntityId>>, window: &mut Window, cx: &mut Context<Self>) {
++        let before = self.shown_entries();
++        self.panel_groups = groups.into_iter().filter(|group| group.len() > 1).collect();
++        let after = self.shown_entries();
++        self.activate_changes(&before, &after, window, cx);
++        cx.notify();
++    }
++
++    pub fn panel_groups(&self) -> &[Vec<EntityId>] {
++        &self.panel_groups
++    }
++
++    /// How much of its group's space each panel takes, relative to the others (only
++    /// panels whose share was changed are listed).
++    pub fn panel_weights(&self) -> &std::collections::HashMap<EntityId, f32> {
++        &self.panel_weights
++    }
++
++    pub fn set_panel_weights(&mut self, weights: std::collections::HashMap<EntityId, f32>, cx: &mut Context<Self>) {
++        if self.panel_weights != weights {
++            self.panel_weights = weights;
++            cx.notify();
++        }
++    }
++
++    fn panel_weight(&self, id: EntityId) -> f32 {
++        self.panel_weights.get(&id).copied().unwrap_or(1.0)
++    }
++
++    /// Moves the divider before `index` in the group `ids` to `fraction` of the group's
++    /// length, between the two panels it separates (each keeps a minimum).
++    fn resize_group(&mut self, ids: &[EntityId], index: usize, fraction: f32, cx: &mut Context<Self>) {
++        const MIN: f32 = 0.06;
++        if index == 0 || index >= ids.len() {
++            return;
++        }
++        let weights: Vec<f32> = ids.iter().map(|id| self.panel_weight(*id)).collect();
++        let total: f32 = weights.iter().sum();
++        let before: f32 = weights[..index - 1].iter().sum();
++        let through: f32 = weights[..=index].iter().sum();
++        let boundary = (fraction * total).clamp(before + MIN * total, through - MIN * total);
++        if before + MIN * total > through - MIN * total {
++            return;
++        }
++        self.panel_weights.insert(ids[index - 1], boundary - before);
++        self.panel_weights.insert(ids[index], through - boundary);
++        cx.notify();
++    }
++
++    fn reset_group_weights(&mut self, ids: &[EntityId], cx: &mut Context<Self>) {
++        for id in ids {
++            self.panel_weights.remove(id);
++        }
++        cx.notify();
++    }
++
++    /// The panels on screen: the active one and those grouped with it.
++    pub fn shown_panels(&self) -> Vec<Arc<dyn PanelHandle>> {
++        if !self.is_open {
++            return Vec::new();
++        }
++        self.shown_entries().into_iter().map(|ix| self.panel_entries[ix].panel.clone()).collect()
++    }
++
++    /// Indices of the active panel and the panels grouped with it, in group order.
++    fn shown_entries(&self) -> Vec<usize> {
++        let Some(active) = self.active_panel_index.filter(|ix| *ix < self.panel_entries.len()) else {
++            return Vec::new();
++        };
++        let active_id = self.panel_entries[active].panel.panel_id();
++        let Some(group) = self.panel_groups.iter().find(|group| group.contains(&active_id)) else {
++            return vec![active];
++        };
++        group
++            .iter()
++            .filter_map(|id| self.panel_entries.iter().position(|entry| entry.panel.panel_id() == *id))
++            .collect()
++    }
++
++    fn activate_changes(&self, before: &[usize], after: &[usize], window: &mut Window, cx: &mut Context<Self>) {
++        if !self.is_open {
++            return;
++        }
++        for ix in before.iter().filter(|ix| !after.contains(ix)) {
++            if let Some(entry) = self.panel_entries.get(*ix) {
++                entry.panel.set_active(false, window, cx);
++            }
++        }
++        for ix in after.iter().filter(|ix| !before.contains(ix)) {
++            if let Some(entry) = self.panel_entries.get(*ix) {
++                entry.panel.set_active(true, window, cx);
++            }
++        }
++    }
++
+     pub fn set_panel_zoomed(
+         &mut self,
+         panel: &AnyView,
+@@ -949,13 +1064,27 @@ impl Dock {
+         cx: &mut Context<Self>,
+     ) {
+         if Some(panel_ix) != self.active_panel_index {
+-            if let Some(active_panel) = self.active_panel_entry() {
+-                active_panel.panel.set_active(false, window, cx);
++            let before = self.shown_entries();
++            if self.panel_groups.is_empty() {
++                if let Some(active_panel) = self.active_panel_entry() {
++                    active_panel.panel.set_active(false, window, cx);
++                }
+             }
+ 
+             self.active_panel_index = Some(panel_ix);
+-            if let Some(active_panel) = self.active_panel_entry() {
+-                active_panel.panel.set_active(true, window, cx);
++            if self.panel_groups.is_empty() {
++                if let Some(active_panel) = self.active_panel_entry() {
++                    active_panel.panel.set_active(true, window, cx);
++                }
++            } else {
++                // Panels the group keeps on screen stay active.
++                let after = self.shown_entries();
++                for ix in before.iter().filter(|ix| !after.contains(ix)) {
++                    self.panel_entries[*ix].panel.set_active(false, window, cx);
++                }
++                for ix in after.iter().filter(|ix| !before.contains(ix)) {
++                    self.panel_entries[*ix].panel.set_active(true, window, cx);
++                }
+             }
+ 
+             cx.notify();
+@@ -1270,6 +1399,7 @@ impl Dock {
+ impl Render for Dock {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let dispatch_context = Self::dispatch_context();
++        let shown: Vec<Arc<dyn PanelHandle>> = self.shown_panels();
+         if let Some(entry) = self.visible_entry() {
+             let position = self.position;
+             let create_resize_handle = || {
+@@ -1351,19 +1481,89 @@ impl Render for Dock {
+                     DockPosition::Right => this.border_l_1(),
+                     DockPosition::Bottom => this.border_t_1(),
+                 })
+-                .child(
+-                    div()
+-                        .map(|this| match self.position().axis() {
+-                            Axis::Horizontal => this.w_full().h_full(),
+-                            Axis::Vertical => this.h_full().w_full(),
+-                        })
+-                        .child(
+-                            entry
+-                                .panel
+-                                .to_any()
+-                                .cached(StyleRefinement::default().v_flex().size_full()),
+-                        ),
+-                )
++                .when(shown.len() <= 1, |this| {
++                    this.child(
++                        div()
++                            .map(|this| match self.position().axis() {
++                                Axis::Horizontal => this.w_full().h_full(),
++                                Axis::Vertical => this.h_full().w_full(),
++                            })
++                            .child(
++                                entry
++                                    .panel
++                                    .to_any()
++                                    .cached(StyleRefinement::default().v_flex().size_full()),
++                            ),
++                    )
++                })
++                // A group: its panels share the dock, side panels top to bottom, the
++                // bottom dock left to right, with a divider to drag between each two.
++                .when(shown.len() > 1, |this| {
++                    let border = cx.theme().colors().border;
++                    let along_dock = self.position().axis() == Axis::Horizontal;
++                    let ids: Vec<EntityId> = shown.iter().map(|panel| panel.panel_id()).collect();
++                    let move_ids = ids.clone();
++                    this.child(
++                        div()
++                            .size_full()
++                            .flex()
++                            .map(|this| if along_dock { this.flex_col() } else { this.flex_row() })
++                            .on_drag_move(cx.listener(move |dock, e: &DragMoveEvent<DraggedGroupDivider>, _, cx| {
++                                let (position, start, length) = if along_dock {
++                                    (e.event.position.y, e.bounds.origin.y, e.bounds.size.height)
++                                } else {
++                                    (e.event.position.x, e.bounds.origin.x, e.bounds.size.width)
++                                };
++                                if length > px(0.) {
++                                    let fraction = f32::from(position - start) / f32::from(length);
++                                    dock.resize_group(&move_ids, e.drag(cx).index, fraction.clamp(0., 1.), cx);
++                                }
++                            }))
++                            .children(shown.iter().enumerate().map(|(ix, panel)| {
++                                let weight = self.panel_weight(ids[ix]);
++                                let reset_ids = ids.clone();
++                                let section = div()
++                                    .relative()
++                                    .flex_basis(px(0.))
++                                    .flex_shrink(1.)
++                                    .flex_grow(weight)
++                                    .min_w_0()
++                                    .min_h_0()
++                                    .overflow_hidden()
++                                    .when(ix > 0, |this| {
++                                        if along_dock { this.border_t_1() } else { this.border_l_1() }.border_color(border)
++                                    })
++                                    .child(panel.to_any().cached(StyleRefinement::default().v_flex().size_full()))
++                                    .when(ix > 0, |this| {
++                                        let handle = div()
++                                            .id(("dock-group-divider", ix))
++                                            .debug_selector(move || format!("dock-group-divider-{ix}"))
++                                            .absolute()
++                                            .occlude()
++                                            .on_drag(DraggedGroupDivider { index: ix }, |divider, _, _, cx| {
++                                                cx.stop_propagation();
++                                                cx.new(|_| divider.clone())
++                                            })
++                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
++                                            .on_mouse_up(
++                                                MouseButton::Left,
++                                                cx.listener(move |dock, e: &MouseUpEvent, _, cx| {
++                                                    if e.click_count == 2 {
++                                                        dock.reset_group_weights(&reset_ids, cx);
++                                                        cx.stop_propagation();
++                                                    }
++                                                }),
++                                            );
++                                        this.child(if along_dock {
++                                            handle.top(-RESIZE_HANDLE_SIZE / 2.).left_0().w_full().h(RESIZE_HANDLE_SIZE).cursor_row_resize()
++                                        } else {
++                                            handle.left(-RESIZE_HANDLE_SIZE / 2.).top_0().h_full().w(RESIZE_HANDLE_SIZE).cursor_col_resize()
++                                        })
++                                    });
++                                section
++                            })),
++                    )
++                })
+                 .when(self.resizable(cx), |this| {
+                     this.child(create_resize_handle())
+                 })

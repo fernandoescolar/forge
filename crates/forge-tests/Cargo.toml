@@ -1,0 +1,40 @@
+[package]
+name = "forge-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Test explorer panel for Forge (.NET via dotnet test)"
+
+[dependencies]
+anyhow.workspace = true
+editor = { path = "../../vendor/zed/crates/editor" }
+forge-languages = { path = "../forge-languages" }
+forge-ui = { path = "../forge-ui" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+project = { path = "../../vendor/zed/crates/project" }
+regex = "1.5"
+roxmltree = "0.20"
+serde_json.workspace = true
+settings = { path = "../../vendor/zed/crates/settings" }
+smol = "2.0"
+task = { path = "../../vendor/zed/crates/task" }
+dap = { path = "../../vendor/zed/crates/dap" }
+tempfile.workspace = true
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+futures.workspace = true
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+serde_json.workspace = true
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

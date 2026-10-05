@@ -1,0 +1,26 @@
+{
+  "name": "db-explorer",
+  "displayName": "Database Explorer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browse SQL Server, PostgreSQL, MySQL/MariaDB and SQLite databases: tables, views, rows you can edit, and your own queries",
+  "forge": {
+    "entry": "src/extension.tsx",
+    "main": "dist/extension.js",
+    "sidecars": ["forge-sql"],
+    "settings": {
+      "title": "Database Explorer",
+      "properties": {
+        "dbExplorer.pageSize": { "type": "integer", "default": 200, "minimum": 10, "maximum": 5000, "title": "Page size", "description": "Rows shown per page when a table is open." },
+        "dbExplorer.maxRows": { "type": "integer", "default": 1000, "minimum": 1, "maximum": 100000, "title": "Query row limit", "description": "Rows kept from each result of a query you run." },
+        "dbExplorer.confirmChanges": { "type": "boolean", "default": true, "title": "Confirm before saving", "description": "Ask before saving changes to rows and before deleting them." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ../../packages/forge-api/bin/forge-ext.mjs build .",
+    "watch": "node ../../packages/forge-api/bin/forge-ext.mjs watch .",
+    "sidecar": "scripts/build-sidecar.sh",
+    "package": "scripts/build-sidecar.sh && node ../../packages/forge-api/bin/forge-ext.mjs pack ."
+  }
+}

@@ -1,0 +1,97 @@
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
+index 420da52..4024b5f 100644
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -118,7 +118,7 @@ pub use git::{
+ pub(crate) use git::{DiffHunkKey, StoredReviewComment};
+ use git::{DiffReviewDragState, DiffReviewOverlay, InlineBlamePopover};
+ pub(crate) use git::{DisplayDiffHunk, PhantomDiffReviewIndicator};
+-pub use hover_popover::hover_markdown_style;
++pub use hover_popover::{DiagnosticPopoverAction, hover_markdown_style};
+ pub use inlays::Inlay;
+ pub use inline_input::InlineInputState;
+ pub(crate) use inline_input::{InlineInputHistoryDirection, InlineInputPreview};
+diff --git a/crates/editor/src/hover_popover.rs b/crates/editor/src/hover_popover.rs
+index f3d0c6c..32c3489 100644
+--- a/crates/editor/src/hover_popover.rs
++++ b/crates/editor/src/hover_popover.rs
+@@ -27,7 +27,7 @@ use std::{
+ use std::{ops::Range, sync::Arc, time::Duration};
+ use std::{path::PathBuf, rc::Rc};
+ use theme_settings::ThemeSettings;
+-use ui::{CopyButton, Scrollbars, WithScrollbar, prelude::*, theme_is_transparent};
++use ui::{CopyButton, Scrollbars, Tooltip, WithScrollbar, prelude::*, theme_is_transparent};
+ use url::Url;
+ use util::TryFutureExt;
+ use workspace::{OpenOptions, OpenVisible, Workspace};
+@@ -1349,6 +1349,17 @@ impl InfoPopover {
+     }
+ }
+ 
++/// An extra button in the diagnostic popover, under Copy, set by the host app. Called with
++/// the editor and the diagnostic's range.
++#[derive(Clone)]
++pub struct DiagnosticPopoverAction {
++    pub icon: IconName,
++    pub tooltip: SharedString,
++    pub on_click: Rc<dyn Fn(&mut Editor, Range<Anchor>, &mut Window, &mut Context<Editor>)>,
++}
++
++impl gpui::Global for DiagnosticPopoverAction {}
++
+ pub struct DiagnosticPopover {
+     pub(crate) local_diagnostic: DiagnosticEntry<Anchor>,
+     markdown: Entity<Markdown>,
+@@ -1452,15 +1463,43 @@ impl DiagnosticPopover {
+                                 ),
+                             ),
+                     )
+-                    .child(div().absolute().top_1().right_1().child({
+-                        let message = self
+-                            .local_diagnostic
+-                            .diagnostic
+-                            .message
+-                            .as_shared_string()
+-                            .clone();
+-                        CopyButton::new("copy-diagnostic", message).tooltip_label("Copy Diagnostic")
+-                    }))
++                    .child(
++                        v_flex()
++                            .absolute()
++                            .top_1()
++                            .right_1()
++                            .gap_0p5()
++                            .child({
++                                let message = self
++                                    .local_diagnostic
++                                    .diagnostic
++                                    .message
++                                    .as_shared_string()
++                                    .clone();
++                                CopyButton::new("copy-diagnostic", message)
++                                    .tooltip_label("Copy Diagnostic")
++                            })
++                            .children(cx.try_global::<DiagnosticPopoverAction>().cloned().map(
++                                |action| {
++                                    let range = self.local_diagnostic.range.clone();
++                                    let editor = cx.entity().downgrade();
++                                    IconButton::new("diagnostic-action", action.icon)
++                                        .icon_size(IconSize::Small)
++                                        .icon_color(Color::Muted)
++                                        .tooltip(Tooltip::text(action.tooltip.clone()))
++                                        .on_click(move |_, window, cx| {
++                                            let range = range.clone();
++                                            let on_click = action.on_click.clone();
++                                            editor
++                                                .update(cx, |editor, cx| {
++                                                    hide_hover(editor, cx);
++                                                    on_click(editor, range, window, cx)
++                                                })
++                                                .ok();
++                                        })
++                                },
++                            )),
++                    )
+                     .custom_scrollbars(
+                         Scrollbars::for_settings::<EditorSettingsScrollbarProxy>()
+                             .tracked_scroll_handle(&self.scroll_handle),

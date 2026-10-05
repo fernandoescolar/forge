@@ -1,0 +1,97 @@
+[package]
+name = "forge-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[features]
+# Compile Metal shaders at startup so building doesn't require a full Xcode install.
+# Release builds should disable this (`--no-default-features`) on a machine with Xcode.
+default = ["runtime-shaders"]
+runtime-shaders = ["gpui_platform/runtime_shaders"]
+
+[dependencies]
+forge-ui = { path = "../forge-ui" }
+forge-languages = { path = "../forge-languages" }
+forge-tests = { path = "../forge-tests" }
+forge-run = { path = "../forge-run" }
+forge-http = { path = "../forge-http" }
+forge-github = { path = "../forge-github" }
+forge-update = { path = "../forge-update" }
+forge-output = { path = "../forge-output" }
+forge-git = { path = "../forge-git" }
+forge-dotnet = { path = "../forge-dotnet" }
+git = { path = "../../vendor/zed/crates/git" }
+git_ui = { path = "../../vendor/zed/crates/git_ui" }
+platform_title_bar = { path = "../../vendor/zed/crates/platform_title_bar" }
+chrono = "0.4"
+command_palette_hooks = { path = "../../vendor/zed/crates/command_palette_hooks" }
+diagnostics = { path = "../../vendor/zed/crates/diagnostics" }
+multi_buffer = { path = "../../vendor/zed/crates/multi_buffer" }
+outline = { path = "../../vendor/zed/crates/outline" }
+schemars = { version = "1.0", features = ["indexmap2"] }
+serde.workspace = true
+theme_selector = { path = "../../vendor/zed/crates/theme_selector" }
+forge-agents = { path = "../forge-agents" }
+forge-extension-host = { path = "../forge-extension-host" }
+anyhow.workspace = true
+uuid.workspace = true
+url.workspace = true
+assets = { path = "../../vendor/zed/crates/assets" }
+client = { path = "../../vendor/zed/crates/client" }
+command_palette = { path = "../../vendor/zed/crates/command_palette" }
+dap_adapters = { path = "../../vendor/zed/crates/dap_adapters" }
+db = { path = "../../vendor/zed/crates/db" }
+debugger_ui = { path = "../../vendor/zed/crates/debugger_ui" }
+editor = { path = "../../vendor/zed/crates/editor" }
+file_icons = { path = "../../vendor/zed/crates/file_icons" }
+language_model = { path = "../../vendor/zed/crates/language_model" }
+file_finder = { path = "../../vendor/zed/crates/file_finder" }
+fs = { path = "../../vendor/zed/crates/fs" }
+go_to_line = { path = "../../vendor/zed/crates/go_to_line" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
+gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
+language = { path = "../../vendor/zed/crates/language" }
+languages = { path = "../../vendor/zed/crates/languages", features = ["load-grammars"] }
+menu = { path = "../../vendor/zed/crates/menu" }
+node_runtime = { path = "../../vendor/zed/crates/node_runtime" }
+paths = { path = "../../vendor/zed/crates/paths" }
+project = { path = "../../vendor/zed/crates/project" }
+project_panel = { path = "../../vendor/zed/crates/project_panel" }
+release_channel = { path = "../../vendor/zed/crates/release_channel" }
+reqwest_client = { path = "../../vendor/zed/crates/reqwest_client" }
+search = { path = "../../vendor/zed/crates/search" }
+session = { path = "../../vendor/zed/crates/session" }
+settings = { path = "../../vendor/zed/crates/settings" }
+terminal_view = { path = "../../vendor/zed/crates/terminal_view" }
+theme = { path = "../../vendor/zed/crates/theme" }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+ui = { path = "../../vendor/zed/crates/ui" }
+watch = { path = "../../vendor/zed/crates/watch" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+zed_actions = { path = "../../vendor/zed/crates/zed_actions" }
+log = "0.4"
+futures = "0.3"
+env_logger = "0.11"
+semver = "1"
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+
+[dev-dependencies]
+gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
+tempfile.workspace = true
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+language = { path = "../../vendor/zed/crates/language", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

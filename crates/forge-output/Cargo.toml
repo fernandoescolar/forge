@@ -1,0 +1,22 @@
+[package]
+name = "forge-output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Output panel (app and language server logs) and language server status for Forge"
+
+[dependencies]
+chrono = "0.4"
+editor = { path = "../../vendor/zed/crates/editor" }
+env_logger = "0.11"
+forge-ui = { path = "../forge-ui" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+lsp = { path = "../../vendor/zed/crates/lsp" }
+project = { path = "../../vendor/zed/crates/project" }
+settings = { path = "../../vendor/zed/crates/settings" }
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+workspace = { path = "../../vendor/zed/crates/workspace" }

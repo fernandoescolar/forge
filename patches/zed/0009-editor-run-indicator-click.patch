@@ -1,0 +1,49 @@
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
+index 5c91431..add6ba1 100644
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -41,7 +41,7 @@ mod mouse_context_menu;
+ pub mod movement;
+ mod persistence;
+ mod runnables;
+-pub use runnables::{RunIndicatorStatus, RunnableTaskStatus};
++pub use runnables::{RunIndicatorClick, RunIndicatorStatus, RunnableTaskStatus};
+ mod rust_analyzer_ext;
+ pub mod scroll;
+ mod selections_collection;
+diff --git a/crates/editor/src/runnables.rs b/crates/editor/src/runnables.rs
+index 9099c90..f7da6d7 100644
+--- a/crates/editor/src/runnables.rs
++++ b/crates/editor/src/runnables.rs
+@@ -139,6 +139,16 @@ pub struct RunIndicatorStatus(
+ 
+ impl gpui::Global for RunIndicatorStatus {}
+ 
++/// Lets the application embedding the editor handle a click on a run indicator itself
++/// (e.g. send an HTTP request instead of running a task). Called with the file's absolute
++/// path and the indicator's 0-based row; returning `true` means it was handled.
++#[derive(Clone)]
++pub struct RunIndicatorClick(
++    pub Arc<dyn Fn(&std::path::Path, BufferRow, &mut Window, &mut App) -> bool + Send + Sync>,
++);
++
++impl gpui::Global for RunIndicatorClick {}
++
+ #[derive(Clone, Debug)]
+ pub struct RunnableTasks {
+     pub templates: Vec<(TaskSourceKind, TaskTemplate)>,
+@@ -692,6 +702,14 @@ impl Editor {
+                 };
+ 
+                 window.focus(&editor.focus_handle(cx), cx);
++                if let Some(hook) = cx.try_global::<RunIndicatorClick>().cloned() {
++                    let snapshot = editor.display_snapshot(cx);
++                    let buffer_row = DisplayPoint::new(row, 0).to_point(&snapshot).row;
++                    let path = editor.buffer().read(cx).as_singleton().and_then(|buffer| Some(buffer.read(cx).file()?.as_local()?.abs_path(cx)));
++                    if path.is_some_and(|path| (hook.0)(&path, buffer_row, window, cx)) {
++                        return;
++                    }
++                }
+                 editor.toggle_code_actions(
+                     &ToggleCodeActions {
+                         deployed_from: Some(CodeActionSource::RunMenu(row)),

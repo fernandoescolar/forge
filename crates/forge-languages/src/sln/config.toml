@@ -1,0 +1,11 @@
+name = "Solution"
+grammar = "sln"
+path_suffixes = ["sln"]
+modeline_aliases = ["sln"]
+line_comments = ["# "]
+brackets = [
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]
+tab_size = 4
+hard_tabs = true

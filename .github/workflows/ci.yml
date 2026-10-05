@@ -1,0 +1,38 @@
+# Builds Forge and runs its tests (Rust crates and the extension API) on every push and
+# pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply Forge's patches to Zed
+        run: scripts/apply-zed-patches.sh
+      - name: Extension API
+        working-directory: packages/forge-api
+        run: npm ci && npm test
+      - name: Rust tests
+        run: cargo test --workspace

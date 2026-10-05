@@ -1,0 +1,44 @@
+[package]
+name = "forge-languages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Languages Forge ships built in on top of Zed's: C# with OmniSharp"
+
+[dependencies]
+forge-ui = { path = "../forge-ui" }
+anyhow.workspace = true
+async-trait.workspace = true
+collections = { path = "../../vendor/zed/crates/collections" }
+dap = { path = "../../vendor/zed/crates/dap" }
+editor = { path = "../../vendor/zed/crates/editor" }
+futures.workspace = true
+gpui = { path = "../../vendor/zed/crates/gpui" }
+http_client = { path = "../../vendor/zed/crates/http_client" }
+language = { path = "../../vendor/zed/crates/language" }
+language_core = { path = "../../vendor/zed/crates/language_core" }
+log = "0.4"
+lsp = { path = "../../vendor/zed/crates/lsp" }
+project = { path = "../../vendor/zed/crates/project" }
+serde.workspace = true
+serde_json.workspace = true
+serde_json_lenient = "0.2"
+shlex = "1.3"
+regex = "1.5"
+rust-embed = { version = "8.11", features = ["include-exclude"] }
+smol = "2.0"
+task = { path = "../../vendor/zed/crates/task" }
+streaming-iterator = "0.1"
+toml = "0.8"
+tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+tree-sitter-c-sharp = "0.23"
+tree-sitter-language = "0.1"
+tree-sitter-xml = "0.7"
+util = { path = "../../vendor/zed/crates/util" }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

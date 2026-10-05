@@ -1,0 +1,65 @@
+[package]
+name = "forge-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Native ACP agent panel for Forge"
+
+[dependencies]
+base64 = "0.22"
+forge-ui = { path = "../forge-ui" }
+settings = { path = "../../vendor/zed/crates/settings" }
+db = { path = "../../vendor/zed/crates/db" }
+acp-client = { path = "../acp-client" }
+anyhow.workspace = true
+async-trait.workspace = true
+buffer_diff = { path = "../../vendor/zed/crates/buffer_diff" }
+editor = { path = "../../vendor/zed/crates/editor" }
+file_icons = { path = "../../vendor/zed/crates/file_icons" }
+fs = { path = "../../vendor/zed/crates/fs" }
+futures = "0.3"
+git_ui = { path = "../../vendor/zed/crates/git_ui" }
+zed_actions = { path = "../../vendor/zed/crates/zed_actions" }
+fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
+imara-diff = "0.1.8"
+ide-api = { path = "../ide-api" }
+language = { path = "../../vendor/zed/crates/language" }
+log = "0.4"
+lsp = { path = "../../vendor/zed/crates/lsp" }
+markdown = { path = "../../vendor/zed/crates/markdown" }
+multi_buffer = { path = "../../vendor/zed/crates/multi_buffer" }
+menu = { path = "../../vendor/zed/crates/menu" }
+picker = { path = "../../vendor/zed/crates/picker" }
+paths = { path = "../../vendor/zed/crates/paths" }
+project = { path = "../../vendor/zed/crates/project" }
+serde.workspace = true
+task = { path = "../../vendor/zed/crates/task" }
+text = { path = "../../vendor/zed/crates/text" }
+terminal = { path = "../../vendor/zed/crates/terminal" }
+terminal_view = { path = "../../vendor/zed/crates/terminal_view" }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+theme = { path = "../../vendor/zed/crates/theme" }
+tokio.workspace = true
+ui = { path = "../../vendor/zed/crates/ui" }
+url.workspace = true
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+chrono = "0.4"
+tempfile.workspace = true
+
+[dev-dependencies]
+editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+release_channel = { path = "../../vendor/zed/crates/release_channel" }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
+semver = "1"
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }
+tempfile.workspace = true

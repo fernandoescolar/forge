@@ -1,0 +1,14 @@
+[package]
+name = "jsonrpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+ide-api = { path = "../ide-api" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,113 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="ddafbf58-0873-4fa9-911d-c9164a41e6ac" name="@host" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-10-02T14:10:33.9581410+02:00" queuing="2026-10-02T14:10:33.9581410+02:00" start="2026-10-02T14:10:33.6347190+02:00" finish="2026-10-02T14:10:33.9602780+02:00" />
+  <TestSettings name="default" id="e7d0795b-3677-43cf-b055-06790e3a0a75">
+    <Deployment runDeploymentRoot="_host_2026-10-02_14_10_33" />
+  </TestSettings>
+  <Results>
+    <UnitTestResult executionId="a5d5ca13-576c-4f83-8aa5-03151e703e53" testId="c8f17782-5be3-9e9e-d06f-73cb14f37278" testName="Demo.Tests.MathTests.Doubles(x: 1, expected: 2)" computerName="host" duration="00:00:00.0003439" startTime="2026-10-02T14:10:33.9129710+02:00" endTime="2026-10-02T14:10:33.9130630+02:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="a5d5ca13-576c-4f83-8aa5-03151e703e53" />
+    <UnitTestResult executionId="78c1a493-35db-4e4f-8db7-470e403457b3" testId="c97cbe8f-f134-78a1-15ca-0574a571692c" testName="Demo.Tests.MathTests.Adds" computerName="host" duration="00:00:00.0000208" startTime="2026-10-02T14:10:33.9136700+02:00" endTime="2026-10-02T14:10:33.9136900+02:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="78c1a493-35db-4e4f-8db7-470e403457b3" />
+    <UnitTestResult executionId="83bf4a4f-a360-4d45-9981-e8fe1d017df8" testId="e82fc491-bd1b-6d6c-fe7b-ee093fdafa4d" testName="Demo.Tests.MathTests.Skipped" computerName="host" duration="00:00:00.0010000" startTime="2026-10-02T14:10:33.9137310+02:00" endTime="2026-10-02T14:10:33.9138130+02:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="NotExecuted" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="83bf4a4f-a360-4d45-9981-e8fe1d017df8">
+      <Output>
+        <ErrorInfo>
+          <Message>not today</Message>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="731cb8a4-7f35-4fd7-9018-c7099aec9e55" testId="1ba47214-3268-0aad-f83f-4a9cb53dba8f" testName="Demo.Tests.MathTests.Fails" computerName="host" duration="00:00:00.0034019" startTime="2026-10-02T14:10:33.9000780+02:00" endTime="2026-10-02T14:10:33.9083240+02:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Failed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="731cb8a4-7f35-4fd7-9018-c7099aec9e55">
+      <Output>
+        <ErrorInfo>
+          <Message>Assert.Equal() Failure: Values differ
+Expected: 5
+Actual:   4</Message>
+          <StackTrace>   at Demo.Tests.MathTests.Fails() in /repo/Demo.Tests/MathTests.cs:line 9
+   at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="86e1e3d5-4f9c-4671-af7d-2d93df1b9227" testId="6cee21f4-c9db-b190-ef1a-f1ec8b4becf7" testName="Demo.Tests.MathTests.Doubles(x: 2, expected: 5)" computerName="host" duration="00:00:00.0001315" startTime="2026-10-02T14:10:33.9134150+02:00" endTime="2026-10-02T14:10:33.9134410+02:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Failed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="86e1e3d5-4f9c-4671-af7d-2d93df1b9227">
+      <Output>
+        <ErrorInfo>
+          <Message>Assert.Equal() Failure: Values differ
+Expected: 5
+Actual:   4</Message>
+          <StackTrace>   at Demo.Tests.MathTests.Doubles(Int32 x, Int32 expected) in /repo/Demo.Tests/MathTests.cs:line 14
+   at InvokeStub_MathTests.Doubles(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithFewArgs(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Demo.Tests.MathTests.Fails" storage="/repo/demo.tests/bin/debug/net10.0/demo.tests.dll" id="1ba47214-3268-0aad-f83f-4a9cb53dba8f">
+      <Execution id="731cb8a4-7f35-4fd7-9018-c7099aec9e55" />
+      <TestMethod codeBase="/repo/Demo.Tests/bin/Debug/net10.0/Demo.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Demo.Tests.MathTests" name="Fails" />
+    </UnitTest>
+    <UnitTest name="Demo.Tests.MathTests.Adds" storage="/repo/demo.tests/bin/debug/net10.0/demo.tests.dll" id="c97cbe8f-f134-78a1-15ca-0574a571692c">
+      <Execution id="78c1a493-35db-4e4f-8db7-470e403457b3" />
+      <TestMethod codeBase="/repo/Demo.Tests/bin/Debug/net10.0/Demo.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Demo.Tests.MathTests" name="Adds" />
+    </UnitTest>
+    <UnitTest name="Demo.Tests.MathTests.Doubles(x: 2, expected: 5)" storage="/repo/demo.tests/bin/debug/net10.0/demo.tests.dll" id="6cee21f4-c9db-b190-ef1a-f1ec8b4becf7">
+      <Execution id="86e1e3d5-4f9c-4671-af7d-2d93df1b9227" />
+      <TestMethod codeBase="/repo/Demo.Tests/bin/Debug/net10.0/Demo.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Demo.Tests.MathTests" name="Doubles" />
+    </UnitTest>
+    <UnitTest name="Demo.Tests.MathTests.Skipped" storage="/repo/demo.tests/bin/debug/net10.0/demo.tests.dll" id="e82fc491-bd1b-6d6c-fe7b-ee093fdafa4d">
+      <Execution id="83bf4a4f-a360-4d45-9981-e8fe1d017df8" />
+      <TestMethod codeBase="/repo/Demo.Tests/bin/Debug/net10.0/Demo.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Demo.Tests.MathTests" name="Skipped" />
+    </UnitTest>
+    <UnitTest name="Demo.Tests.MathTests.Doubles(x: 1, expected: 2)" storage="/repo/demo.tests/bin/debug/net10.0/demo.tests.dll" id="c8f17782-5be3-9e9e-d06f-73cb14f37278">
+      <Execution id="a5d5ca13-576c-4f83-8aa5-03151e703e53" />
+      <TestMethod codeBase="/repo/Demo.Tests/bin/Debug/net10.0/Demo.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Demo.Tests.MathTests" name="Doubles" />
+    </UnitTest>
+  </TestDefinitions>
+  <TestEntries>
+    <TestEntry testId="c8f17782-5be3-9e9e-d06f-73cb14f37278" executionId="a5d5ca13-576c-4f83-8aa5-03151e703e53" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="c97cbe8f-f134-78a1-15ca-0574a571692c" executionId="78c1a493-35db-4e4f-8db7-470e403457b3" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="e82fc491-bd1b-6d6c-fe7b-ee093fdafa4d" executionId="83bf4a4f-a360-4d45-9981-e8fe1d017df8" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="1ba47214-3268-0aad-f83f-4a9cb53dba8f" executionId="731cb8a4-7f35-4fd7-9018-c7099aec9e55" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="6cee21f4-c9db-b190-ef1a-f1ec8b4becf7" executionId="86e1e3d5-4f9c-4671-af7d-2d93df1b9227" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+  </TestEntries>
+  <TestLists>
+    <TestList name="Results Not in a List" id="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestList name="All Loaded Results" id="19431567-8539-422a-85d7-44ee4e166bda" />
+  </TestLists>
+  <ResultSummary outcome="Failed">
+    <Counters total="5" executed="4" passed="2" failed="2" error="0" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="0" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+    <Output>
+      <StdOut>[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v3.1.4+50e68bbb8b (64-bit .NET 10.0.10)
+[xUnit.net 00:00:00.03]   Discovering: Demo.Tests
+[xUnit.net 00:00:00.04]   Discovered:  Demo.Tests
+[xUnit.net 00:00:00.05]   Starting:    Demo.Tests
+[xUnit.net 00:00:00.07]       Assert.Equal() Failure: Values differ
+[xUnit.net 00:00:00.07]       Expected: 5
+[xUnit.net 00:00:00.07]       Actual:   4
+[xUnit.net 00:00:00.07]       Stack Trace:
+[xUnit.net 00:00:00.07]         /repo/Demo.Tests/MathTests.cs(9,0): at Demo.Tests.MathTests.Fails()
+[xUnit.net 00:00:00.07]            at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+[xUnit.net 00:00:00.07]            at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+[xUnit.net 00:00:00.07]       Assert.Equal() Failure: Values differ
+[xUnit.net 00:00:00.07]       Expected: 5
+[xUnit.net 00:00:00.07]       Actual:   4
+[xUnit.net 00:00:00.07]       Stack Trace:
+[xUnit.net 00:00:00.07]         /repo/Demo.Tests/MathTests.cs(14,0): at Demo.Tests.MathTests.Doubles(Int32 x, Int32 expected)
+[xUnit.net 00:00:00.07]            at InvokeStub_MathTests.Doubles(Object, Span`1)
+[xUnit.net 00:00:00.07]            at System.Reflection.MethodBaseInvoker.InvokeWithFewArgs(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+[xUnit.net 00:00:00.07]       not today
+[xUnit.net 00:00:00.07]   Finished:    Demo.Tests
+Test 'Demo.Tests.MathTests.Skipped' was skipped in the test run.
+</StdOut>
+    </Output>
+    <RunInfos>
+      <RunInfo computerName="host" outcome="Error" timestamp="2026-10-02T14:10:33.9095490+02:00">
+        <Text>[xUnit.net 00:00:00.07]     Demo.Tests.MathTests.Fails [FAIL]</Text>
+      </RunInfo>
+      <RunInfo computerName="host" outcome="Error" timestamp="2026-10-02T14:10:33.9136040+02:00">
+        <Text>[xUnit.net 00:00:00.07]     Demo.Tests.MathTests.Doubles(x: 2, expected: 5) [FAIL]</Text>
+      </RunInfo>
+      <RunInfo computerName="host" outcome="Warning" timestamp="2026-10-02T14:10:33.9140330+02:00">
+        <Text>[xUnit.net 00:00:00.07]     Demo.Tests.MathTests.Skipped [SKIP]</Text>
+      </RunInfo>
+    </RunInfos>
+  </ResultSummary>
+</TestRun>

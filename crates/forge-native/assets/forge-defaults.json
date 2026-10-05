@@ -1,0 +1,32 @@
+// Forge's default settings. Every setting not listed here keeps its built-in default.
+// Users override any of these in ~/Library/Application Support/Forge/config/settings.json.
+{
+  // Forge's own palettes, following the system appearance. Dracula is built in too;
+  // every config/palettes/*.json becomes a selectable theme.
+  "theme": { "mode": "system", "dark": "Forge Dark", "light": "Forge Light" },
+  // The platform UI font (SF Pro on macOS) for chrome; the code font stays monospace.
+  "ui_font_family": ".SystemUIFont",
+  "buffer_font_family": "Hack Nerd Font Mono",
+  "buffer_font_features": { "calt": true },
+  "icon_theme": "Forge",
+  // Agents come in through ACP (Agents › Threads); the built-in AI features are off.
+  "disable_ai": true,
+  "telemetry": { "diagnostics": false, "metrics": false },
+  "auto_update": false,
+  // Closing the last window quits Forge, and that window reopens next time.
+  "on_last_window_closed": "quit_app",
+  "buffer_font_size": 14,
+  "ui_font_size": 15,
+  "tab_size": 4,
+  "cursor_blink": false,
+  "current_line_highlight": "all",
+  "relative_line_numbers": "disabled",
+  "show_whitespaces": "selection",
+  "indent_guides": { "enabled": true, "coloring": "indent_aware" },
+  "scrollbar": { "show": "auto" },
+  // Same density as the Solution Explorer, and VS Code-style git letters (M, U, A, D).
+  "project_panel": { "entry_spacing": "standard", "indent_size": 12, "git_status_indicator": true },
+  "terminal": { "font_family": "Hack Nerd Font Mono", "font_size": 13, "blinking": "off" },
+  // OmniSharp sends parameter-name and inferred-type hints (see forge-languages/src/omnisharp.rs).
+  "languages": { "C#": { "inlay_hints": { "enabled": true } } }
+}

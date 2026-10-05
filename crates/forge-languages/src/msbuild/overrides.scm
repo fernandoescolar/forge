@@ -1,0 +1,2 @@
+(Comment) @comment
+(AttValue) @string

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hardened runtime exceptions for Developer ID builds. None so far: Forge runs no JIT code
+     (QuickJS interprets extensions), loads no third-party libraries, and the hardened runtime
+     doesn't restrict the programs it starts (shells, dotnet, language servers, debuggers).
+     Add an exception here only when a signed build shows it is needed. -->
+<dict/>
+</plist>

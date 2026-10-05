@@ -1,0 +1,78 @@
+// Dracula (https://draculatheme.com/contribute#color-palette) as a Forge palette.
+// Copy this file to make your own: every file in config/palettes/ becomes a theme,
+// selected with "theme": "<name>" in settings.json. Saving reloads it live.
+//
+//   ui        – chrome and editor surfaces
+//   syntax    – any syntax scope; more specific scopes inherit from their prefix
+//               ("string" also colours "string.special" unless that is set too).
+//               A value is "#rrggbb[aa]" or { "color", "font_style": "italic", "font_weight": 700 }
+//   terminal  – the 8 ANSI colours (bright/dim variants are derived)
+//   overrides – raw theme keys for anything not covered above
+{
+  "name": "Dracula",
+  "appearance": "dark",
+  "ui": {
+    "window": "#21222c",
+    "editor": "#282a36",
+    "surface": "#343746",
+    "border": "#191a21",
+    "text": "#f8f8f2",
+    "muted": "#a0a4c0",
+    "faint": "#6272a4",
+    "accent": "#bd93f9",
+    "selection": "#44475acc",
+    "active_line": "#2e303e",
+    "error": "#ff5555",
+    "warning": "#ffb86c",
+    "success": "#50fa7b",
+    "info": "#8be9fd"
+  },
+  "syntax": {
+    "keyword": "#ff79c6",
+    "operator": "#ff79c6",
+    "preproc": "#ff79c6",
+    "tag": "#ff79c6",
+    "function": "#50fa7b",
+    "attribute": { "color": "#50fa7b", "font_style": "italic" },
+    "type": { "color": "#8be9fd", "font_style": "italic" },
+    "constructor": "#8be9fd",
+    "enum": { "color": "#8be9fd", "font_style": "italic" },
+    "label": { "color": "#8be9fd", "font_style": "italic" },
+    "namespace": "#f8f8f2",
+    "variant": "#bd93f9",
+    "string": "#f1fa8c",
+    "string.escape": "#ff79c6",
+    "string.regex": "#ff5555",
+    "string.special.symbol": "#bd93f9",
+    "number": "#bd93f9",
+    "boolean": "#bd93f9",
+    "constant": "#bd93f9",
+    "comment": "#6272a4",
+    "comment.doc": "#7282b4",
+    "variable": "#f8f8f2",
+    "variable.special": { "color": "#bd93f9", "font_style": "italic" },
+    "property": "#f8f8f2",
+    "punctuation": "#f8f8f2",
+    "punctuation.special": "#ff79c6",
+    "punctuation.list_marker": "#8be9fd",
+    "title": { "color": "#bd93f9", "font_weight": 700 },
+    "link_uri": "#8be9fd",
+    "link_text": "#ff79c6",
+    "text.literal": "#f1fa8c",
+    "emphasis": { "color": "#f1fa8c", "font_style": "italic" },
+    "emphasis.strong": { "color": "#ffb86c", "font_weight": 700 },
+    "diff.plus": "#50fa7b",
+    "diff.minus": "#ff5555"
+  },
+  "terminal": {
+    "black": "#21222c",
+    "red": "#ff5555",
+    "green": "#50fa7b",
+    "yellow": "#f1fa8c",
+    "blue": "#bd93f9",
+    "magenta": "#ff79c6",
+    "cyan": "#8be9fd",
+    "white": "#f8f8f2"
+  },
+  "overrides": {}
+}

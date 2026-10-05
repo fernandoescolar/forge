@@ -1,0 +1,107 @@
+diff --git a/crates/debugger_ui/src/debugger_panel.rs b/crates/debugger_ui/src/debugger_panel.rs
+index e980e0a..85669bf 100644
+--- a/crates/debugger_ui/src/debugger_panel.rs
++++ b/crates/debugger_ui/src/debugger_panel.rs
+@@ -1224,7 +1224,7 @@ impl DebugPanel {
+                             .read(cx)
+                             .project_path_for_absolute_path(path, cx)
+                             .context(
+-                                "Couldn't get project path for .zed/debug.json in active worktree",
++                                "Couldn't get project path for .forge/debug.json in active worktree",
+                             )
+                     })??;
+ 
+diff --git a/crates/debugger_ui/src/new_process_modal.rs b/crates/debugger_ui/src/new_process_modal.rs
+index 2254f2b..c7ad32c 100644
+--- a/crates/debugger_ui/src/new_process_modal.rs
++++ b/crates/debugger_ui/src/new_process_modal.rs
+@@ -1068,7 +1068,7 @@ impl DebugDelegate {
+                     };
+ 
+                     match path.components().next_back() {
+-                        Some(".zed") => {
++                        Some(".forge") => {
+                             path.push(RelPath::from_unix_str("debug.json").unwrap());
+                         }
+                         Some(".vscode") => {
+@@ -1165,7 +1165,7 @@ impl DebugDelegate {
+                         id: _,
+                         directory_in_worktree: dir,
+                         id_base: _,
+-                    } => dir.ends_with(RelPath::from_unix_str(".zed").unwrap()),
++                    } => dir.ends_with(RelPath::from_unix_str(".forge").unwrap()),
+                     _ => false,
+                 });
+ 
+diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
+index 9c16f1d..7917c9a 100644
+--- a/crates/paths/src/paths.rs
++++ b/crates/paths/src/paths.rs
+@@ -483,9 +483,9 @@ pub fn devcontainer_dir() -> &'static PathBuf {
+     DEVCONTAINER_DIR.get_or_init(|| data_dir().join("devcontainer"))
+ }
+ 
+-/// Returns the relative path to a `.zed` folder within a project.
++/// Returns the relative path to a `.forge` folder within a project.
+ pub fn local_settings_folder_name() -> &'static str {
+-    ".zed"
++    ".forge"
+ }
+ 
+ /// Returns the relative path to a `.vscode` folder within a project.
+@@ -496,14 +496,14 @@ pub fn local_vscode_folder_name() -> &'static str {
+ /// Returns the relative path to a `settings.json` file within a project.
+ pub fn local_settings_file_relative_path() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+-        LazyLock::new(|| RelPath::from_unix_str(".zed/settings.json").unwrap());
++        LazyLock::new(|| RelPath::from_unix_str(".forge/settings.json").unwrap());
+     *CACHED
+ }
+ 
+ /// Returns the relative path to a `tasks.json` file within a project.
+ pub fn local_tasks_file_relative_path() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+-        LazyLock::new(|| RelPath::from_unix_str(".zed/tasks.json").unwrap());
++        LazyLock::new(|| RelPath::from_unix_str(".forge/tasks.json").unwrap());
+     *CACHED
+ }
+ 
+@@ -523,10 +523,10 @@ pub fn task_file_name() -> &'static str {
+ }
+ 
+ /// Returns the relative path to a `debug.json` file within a project.
+-/// .zed/debug.json
++/// .forge/debug.json
+ pub fn local_debug_file_relative_path() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+-        LazyLock::new(|| RelPath::from_unix_str(".zed/debug.json").unwrap());
++        LazyLock::new(|| RelPath::from_unix_str(".forge/debug.json").unwrap());
+     *CACHED
+ }
+ 
+diff --git a/crates/ui/src/components/notification/alert_modal.rs b/crates/ui/src/components/notification/alert_modal.rs
+index 0a82a30..3a61ead 100644
+--- a/crates/ui/src/components/notification/alert_modal.rs
++++ b/crates/ui/src/components/notification/alert_modal.rs
+@@ -216,7 +216,7 @@ impl Component for AlertModal {
+                             )
+                             .child(
+                                 "Untrusted workspaces are opened in Restricted Mode to protect your system.
+-Review .zed/settings.json for any extensions or commands configured by this project.",
++Review .forge/settings.json for any extensions or commands configured by this project.",
+                             )
+                             .child(
+                                 v_flex()
+diff --git a/crates/workspace/src/security_modal.rs b/crates/workspace/src/security_modal.rs
+index 928bb59..e4772bb 100644
+--- a/crates/workspace/src/security_modal.rs
++++ b/crates/workspace/src/security_modal.rs
+@@ -193,7 +193,7 @@ impl Render for SecurityModal {
+                             )
+                             .child(
+                                 Label::new(
+-                                    "Review .zed/settings.json for any extensions or commands configured by this project.",
++                                    "Review .forge/settings.json for any extensions or commands configured by this project.",
+                                 )
+                                 .color(Color::Muted),
+                             ),

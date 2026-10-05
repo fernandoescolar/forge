@@ -1,0 +1,35 @@
+[package]
+name = "forge-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "UI pieces shared by Forge crates: panel drag & drop, dock persistence"
+
+[dependencies]
+fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
+picker = { path = "../../vendor/zed/crates/picker" }
+db = { path = "../../vendor/zed/crates/db" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+anyhow = "1"
+log = "0.4"
+paths = { path = "../../vendor/zed/crates/paths" }
+schemars = "1.0"
+serde.workspace = true
+serde_json.workspace = true
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+settings = { path = "../../vendor/zed/crates/settings" }
+theme = { path = "../../vendor/zed/crates/theme" }
+ui = { path = "../../vendor/zed/crates/ui" }
+# debug-embed: Zed's development builds read their assets (settings, keymaps, icons) from
+# the checkout they find above the executable, which for Forge is forge-ide, not
+# vendor/zed. Embedding them in debug builds too, as release builds do, keeps tests and
+# `cargo run` working. Every Forge crate depends on forge-ui, so the feature applies to all.
+util = { path = "../../vendor/zed/crates/util", features = ["debug-embed"] }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["signal"] }
+
+[dev-dependencies]
+futures = "0.3"

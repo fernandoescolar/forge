@@ -1,0 +1,17 @@
+[package]
+name = "forge-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Forge updates itself from its GitHub releases"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+gpui = { path = "../../vendor/zed/crates/gpui" }
+http_client = { path = "../../vendor/zed/crates/http_client" }
+log = "0.4"
+serde_json.workspace = true
+tempfile.workspace = true
+workspace = { path = "../../vendor/zed/crates/workspace" }

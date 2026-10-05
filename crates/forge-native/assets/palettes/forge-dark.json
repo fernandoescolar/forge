@@ -1,0 +1,71 @@
+// Forge colour palette. Forge expands this into a full theme and reloads it on save.
+//
+//   ui        – chrome and editor surfaces
+//   syntax    – any syntax scope; more specific scopes inherit from their prefix
+//               ("string" also colours "string.escape" unless that is set too).
+//               A value is "#rrggbb[aa]" or { "color", "font_style": "italic", "font_weight": 700 }
+//   terminal  – the 8 ANSI colours (bright/dim variants are derived)
+//   overrides – raw theme keys for anything not covered above, e.g. "editor.wrap_guide"
+{
+  "name": "Forge Dark",
+  "appearance": "dark",
+  "ui": {
+    "window": "#21252b",
+    "editor": "#282c34",
+    "surface": "#2f343e",
+    "border": "#3b4048",
+    "text": "#c3c9d4",
+    "muted": "#8b929e",
+    "faint": "#5f6672",
+    "accent": "#e8925f",
+    "selection": "#3e4451",
+    "active_line": "#2c313c",
+    "error": "#e06c75",
+    "warning": "#e5c07b",
+    "success": "#98c379",
+    "info": "#61afef"
+  },
+  "syntax": {
+    "keyword": "#c678dd",
+    "function": "#61afef",
+    "type": "#e5c07b",
+    "constructor": "#e5c07b",
+    "enum": "#e5c07b",
+    "variant": "#d19a66",
+    "string": "#98c379",
+    "string.escape": "#56b6c2",
+    "string.regex": "#56b6c2",
+    "number": "#d19a66",
+    "boolean": "#d19a66",
+    "constant": "#d19a66",
+    "comment": { "color": "#7f848e", "font_style": "italic" },
+    "comment.doc": { "color": "#868c97", "font_style": "italic" },
+    "variable": "#c3c9d4",
+    "variable.special": "#e5c07b",
+    "property": "#e06c75",
+    "attribute": "#d19a66",
+    "preproc": "#c678dd",
+    "namespace": "#e5c07b",
+    "label": "#e06c75",
+    "operator": "#56b6c2",
+    "punctuation": "#abb2bf",
+    "punctuation.special": "#be5046",
+    "tag": "#e06c75",
+    "title": { "color": "#e06c75", "font_weight": 700 },
+    "link_uri": "#56b6c2",
+    "link_text": "#61afef",
+    "emphasis": { "color": "#c3c9d4", "font_style": "italic" },
+    "emphasis.strong": { "color": "#c3c9d4", "font_weight": 700 }
+  },
+  "terminal": {
+    "black": "#3f4451",
+    "red": "#e06c75",
+    "green": "#98c379",
+    "yellow": "#e5c07b",
+    "blue": "#61afef",
+    "magenta": "#c678dd",
+    "cyan": "#56b6c2",
+    "white": "#d7dae0"
+  },
+  "overrides": {}
+}

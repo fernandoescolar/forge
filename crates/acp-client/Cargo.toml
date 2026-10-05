@@ -1,0 +1,18 @@
+[package]
+name = "acp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dashmap.workspace = true
+ide-api = { path = "../ide-api" }
+jsonrpc = { path = "../jsonrpc" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,22 @@
+{
+  "name": "workspace-notes",
+  "displayName": "Workspace Notes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example Forge extension: a React panel rendered natively with GPUI",
+  "forge": {
+    "entry": "src/extension.tsx",
+    "main": "dist/extension.js",
+    "settings": {
+      "title": "Workspace Notes",
+      "properties": {
+        "notes.title": { "type": "string", "default": "Notes", "description": "The heading of the Notes panel." },
+        "notes.showWorkspace": { "type": "boolean", "default": true, "title": "Show workspace", "description": "Show the project's folders and the active file under the notes." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ../../packages/forge-api/bin/forge-ext.mjs build .",
+    "watch": "node ../../packages/forge-api/bin/forge-ext.mjs watch ."
+  }
+}

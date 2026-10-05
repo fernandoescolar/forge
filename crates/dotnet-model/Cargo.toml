@@ -1,0 +1,24 @@
+[package]
+name = "dotnet-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = ".NET solutions, MSBuild projects and NuGet for Forge, without any UI"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+globset = "0.4"
+handlebars = "4.5"
+log = "0.4"
+parking_lot.workspace = true
+regex = "1.5"
+roxmltree = "0.20"
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
