@@ -17,7 +17,21 @@ Forge is the opinionated IDE for real-world .NET, Go, Rust and JavaScript develo
 
 ## Install and update
 
-Forge runs on macOS 13 or later, on Apple silicon and Intel. Download `Forge-<version>-<arch>.zip` (`aarch64` for Apple silicon, `x86_64` for Intel) from the [releases page](https://github.com/fernandoescolar/forge/releases), unzip it and move **Forge.app** to Applications. Until Forge is signed with an Apple Developer ID, macOS asks before opening it the first time: if it says it can't check the app, open System Settings › Privacy & Security and click *Open Anyway* (or run `xattr -dr com.apple.quarantine /Applications/Forge.app`). Updates install without asking again. Release builds keep themselves up to date: they look for a new version at startup and every few hours, install it and offer to restart; Forge › *Check for Updates…* looks right away.
+Forge runs on macOS 13 or later, on Apple silicon and Intel. To install it, or update it by hand, run this in a terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
+```
+
+It downloads the latest release for your Mac from the [releases page](https://github.com/fernandoescolar/forge/releases), checks its signature, quits Forge if it is running, puts Forge.app in Applications (`~/Applications` if you can't write to Applications) and adds a `forge` command to `~/.local/bin`: `forge .` opens the current folder, `forge file.cs` a file, whether Forge is running or not. `FORGE_VERSION=0.0.2` installs a given version.
+
+To install from the zip instead, download `Forge-<version>-<arch>.zip` (`aarch64` for Apple silicon, `x86_64` for Intel), unzip it and move **Forge.app** to Applications. Until Forge is signed with an Apple Developer ID, macOS quarantines what the browser downloads, and a quarantined Forge doesn't start (not even after *Open Anyway* in System Settings › Privacy & Security). Take it out of quarantine once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Forge.app
+```
+
+Release builds keep themselves up to date: they look for a new version at startup and every few hours, install it and offer to restart; Forge › *Check for Updates…* looks right away.
 
 Forge uses the tools you already have, found through your shell's `PATH`:
 

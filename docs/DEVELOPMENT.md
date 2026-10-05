@@ -64,7 +64,7 @@ crates/
 packages/forge-api/      @forge/api: reconciler, components, runtime, the forge-ext tool
 extensions/              workspace-notes and webview-demo (examples), db-explorer (ships with Forge)
 patches/zed/             Forge's changes to Zed, applied by scripts/apply-zed-patches.sh
-scripts/                 patches, packaging (bundle-macos.sh), icon
+scripts/                 patches, packaging (bundle-macos.sh), the installer (install.sh), icon
 tools/                   the mock ACP agent used by tests
 .github/workflows/       CI and releases
 vendor/zed/              Zed, as a git submodule pinned to a release tag
