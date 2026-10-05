@@ -592,6 +592,13 @@ mod tests {
     use super::*;
     use gpui::{Bounds, Modifiers, MouseButton, Pixels, Point, TestAppContext, VisualTestContext};
 
+    /// Each test gets its own database: hidden panels, groups and their sizes are saved
+    /// there, and tests running in parallel must not see each other's.
+    fn test_app_state(cx: &mut App) -> Arc<workspace::AppState> {
+        cx.set_global(db::AppDatabase::test_new());
+        workspace::AppState::test(cx)
+    }
+
     fn center(b: Bounds<Pixels>) -> Point<Pixels> {
         b.center()
     }
@@ -601,7 +608,7 @@ mod tests {
     #[gpui::test]
     async fn clicking_the_open_panel_button_hides_its_dock(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let params = cx.update(workspace::AppState::test);
+        let params = cx.update(test_app_state);
         cx.update(|cx| {
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
             gpui_tokio::init(cx);
@@ -640,7 +647,7 @@ mod tests {
     #[gpui::test]
     async fn hides_and_shows_a_panel(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let params = cx.update(workspace::AppState::test);
+        let params = cx.update(test_app_state);
         cx.update(|cx| {
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
             gpui_tokio::init(cx);
@@ -677,7 +684,7 @@ mod tests {
     #[gpui::test]
     async fn shows_panels_together(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let params = cx.update(workspace::AppState::test);
+        let params = cx.update(test_app_state);
         cx.update(|cx| {
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
             gpui_tokio::init(cx);
@@ -737,7 +744,7 @@ mod tests {
     #[gpui::test]
     async fn dropping_a_button_on_another_groups_them(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let params = cx.update(workspace::AppState::test);
+        let params = cx.update(test_app_state);
         cx.update(|cx| {
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
             gpui_tokio::init(cx);
@@ -783,7 +790,7 @@ mod tests {
     #[gpui::test]
     async fn dragging_a_dock_icon_moves_the_panel(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let params = cx.update(workspace::AppState::test);
+        let params = cx.update(test_app_state);
         cx.update(|cx| {
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
             gpui_tokio::init(cx);
