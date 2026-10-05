@@ -6,6 +6,7 @@
 #   FORGE_PRECOMPILED_SHADERS=1 scripts/bundle-macos.sh   # needs full Xcode (`xcrun metal`)
 #   FORGE_SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh
 #   FORGE_NOTARY_PROFILE=forge scripts/bundle-macos.sh    # also notarizes and staples
+#   FORGE_TARGET=x86_64-apple-darwin scripts/bundle-macos.sh   # for another architecture
 #
 # Signing with an identity uses the hardened runtime and scripts/Forge.entitlements.
 # Notarizing needs a notarytool keychain profile, created once with
@@ -19,22 +20,33 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)"/\1/')"
 # The app's own version fields take numbers only (0.0.1 for 0.0.1-beta); the zip keeps it all.
 BUNDLE_VERSION="${VERSION%%-*}"
 APP="$ROOT/dist/Forge.app"
+# The architecture to build for: this Mac's, or FORGE_TARGET (Apple silicon builds Intel too).
+TARGET="${FORGE_TARGET:-}"
+target_args=()
+BINARY="target/release/forge"
+if [ -n "$TARGET" ]; then
+  target_args=(--target "$TARGET")
+  BINARY="target/$TARGET/release/forge"
+fi
 
 features=()
 if [ "${FORGE_PRECOMPILED_SHADERS:-0}" = "1" ]; then
   features=(--no-default-features)
 fi
-echo "==> cargo build --release ${features[*]:-}"
-cargo build --release -p forge-native ${features[@]+"${features[@]}"}
+echo "==> cargo build --release ${features[*]:-} ${target_args[*]:-}"
+cargo build --release -p forge-native ${features[@]+"${features[@]}"} ${target_args[@]+"${target_args[@]}"}
 
 echo "==> building and packing the bundled extensions"
 PACKAGES="$(mktemp -d)"
 for ext in extensions/*/; do
   name="$(basename "$ext")"
-  # Extensions with sidecars build them first (`npm run sidecar`), for this Mac's architecture
-  # like the app.
+  # Extensions with sidecars build them first (`npm run sidecar`), for the app's architecture.
   if node -e "process.exit(require('./${ext}package.json').scripts?.sidecar ? 0 : 1)"; then
-    (cd "$ext" && npm run --silent sidecar -- --host-only)
+    if [ -n "$TARGET" ]; then
+      (cd "$ext" && npm run --silent sidecar -- --target "$TARGET")
+    else
+      (cd "$ext" && npm run --silent sidecar -- --host-only)
+    fi
   fi
   node packages/forge-api/bin/forge-ext.mjs pack "$ext" -o "$PACKAGES/$name.forgeext" >/dev/null
 done
@@ -42,7 +54,7 @@ done
 echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/extensions"
-cp target/release/forge "$APP/Contents/MacOS/forge"
+cp "$BINARY" "$APP/Contents/MacOS/forge"
 # Each extension as its package holds it: what it needs at run time, sidecars included.
 for package in "$PACKAGES"/*.forgeext; do
   name="$(basename "$package" .forgeext)"
@@ -113,7 +125,11 @@ fi
 codesign --verify --deep --strict "$APP"
 
 # Named like Rust's std::env::consts::ARCH, which forge-update looks for.
-ARCH="$(uname -m | sed 's/^arm64$/aarch64/')"
+if [ -n "$TARGET" ]; then
+  ARCH="${TARGET%%-*}"
+else
+  ARCH="$(uname -m | sed 's/^arm64$/aarch64/')"
+fi
 ZIP="$ROOT/dist/Forge-$VERSION-$ARCH.zip"
 if [ -n "${FORGE_NOTARY_PROFILE:-}" ]; then
   [ "$IDENTITY" != "-" ] || { echo "error: notarizing needs FORGE_SIGN_IDENTITY (a Developer ID)" >&2; exit 1; }

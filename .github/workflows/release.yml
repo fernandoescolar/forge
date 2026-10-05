@@ -6,24 +6,45 @@
 #   MACOS_CERTIFICATE_PASSWORD  its password
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
 # Without them the app is ad-hoc signed (Gatekeeper will ask before opening it).
+#
+# Both architectures build on Apple silicon runners (Intel is cross-compiled: the Intel
+# runners take twice as long). A tag can only reuse build caches saved on main, so pushes to
+# main that change Zed or the dependencies build too, without publishing anything, to keep
+# that cache warm: a release then compiles little more than Forge's own crates.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - vendor/**
+      - patches/**
+      - extensions/*/sidecar/**
+      - .github/workflows/release.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
     strategy:
       matrix:
-        runner: [macos-15, macos-15-intel]
-    runs-on: ${{ matrix.runner }}
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-15
     env:
+      FORGE_TARGET: ${{ matrix.target }}
       FORGE_UPDATE_REPOSITORY: ${{ github.repository }}
       FORGE_PRECOMPILED_SHADERS: "1"
+      # No debug info in release builds made here: much less to compile, link and cache.
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,8 +53,15 @@ jobs:
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          # Only main's caches can be restored by the next tag.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Take the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
         # v1.2.3 or v1.2.3-beta.1 becomes Forge's version (the app's, the zip's, what the
         # updater compares), whatever Cargo.toml says.
         run: |
@@ -47,6 +75,7 @@ jobs:
       - name: Apply Forge's patches to Zed
         run: scripts/apply-zed-patches.sh
       - name: Signing identity
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -76,12 +105,14 @@ jobs:
       - name: Build the app
         run: scripts/bundle-macos.sh
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: forge-${{ matrix.runner }}
+          name: forge-${{ matrix.target }}
           path: dist/Forge-*.zip
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
