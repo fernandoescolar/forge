@@ -51,6 +51,9 @@ impl ZedTerminals {
     pub fn new(project: &Entity<Project>, registry: TerminalRegistry, cx: &mut App) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<Request>();
         let project = project.downgrade();
+        // The thread owns the registry. This loop lives as long as the agent does, so it must
+        // not keep the registry (and every terminal in it) alive after the thread is gone.
+        let registry = Rc::downgrade(&registry.0);
         cx.spawn(async move |cx: &mut AsyncApp| {
             let mut running: HashMap<String, Running> = HashMap::new();
             let mut next_id = 1u64;
@@ -62,7 +65,9 @@ impl ZedTerminals {
                         let limit = request.output_byte_limit;
                         let result = spawn(&project, request, false, cx).await.map(|terminal| {
                             let exit = cx.update(|cx| terminal.read(cx).wait_for_completed_task(cx)).shared();
-                            registry.0.borrow_mut().insert(id.clone(), terminal.clone());
+                            if let Some(registry) = registry.upgrade() {
+                                registry.borrow_mut().insert(id.clone(), terminal.clone());
+                            }
                             running.insert(id.clone(), Running { terminal, exit, output_byte_limit: limit });
                             id
                         });
