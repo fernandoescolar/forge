@@ -6,9 +6,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZED="$ROOT/vendor/zed"
 shopt -s nullglob
-for patch in "$ROOT"/patches/zed/*.patch; do
+PATCHES=("$ROOT"/patches/zed/*.patch)
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+# Copies the files the patches touch from vendor/zed to a fresh scratch dir.
+reset_scratch() {
+    rm -rf "$SCRATCH" && mkdir -p "$SCRATCH"
+    sed -n 's|^diff --git a/.* b/||p' "${PATCHES[@]}" | sort -u | while read -r file; do
+        if [[ -f "$ZED/$file" ]]; then
+            mkdir -p "$SCRATCH/$(dirname "$file")" && cp "$ZED/$file" "$SCRATCH/$file"
+        fi
+    done
+}
+
+# Later patches can change hunks of earlier ones, so a patch can't be checked on its own:
+# find the longest prefix of patches that reverse-applies as a stack, newest first, on a copy.
+applied=${#PATCHES[@]}
+while (( applied > 0 )); do
+    reset_scratch
+    ok=1
+    for (( i = applied - 1; i >= 0; i-- )); do
+        git -C "$SCRATCH" apply --reverse "${PATCHES[i]}" 2>/dev/null || { ok=0; break; }
+    done
+    (( ok )) && break
+    applied=$(( applied - 1 ))
+done
+
+for (( i = 0; i < ${#PATCHES[@]}; i++ )); do
+    patch="${PATCHES[i]}"
     name="$(basename "$patch")"
-    if git -C "$ZED" apply --reverse --check "$patch" 2>/dev/null; then
+    if (( i < applied )); then
         echo "already applied: $name"
     elif git -C "$ZED" apply --check "$patch" 2>/dev/null; then
         git -C "$ZED" apply "$patch"
