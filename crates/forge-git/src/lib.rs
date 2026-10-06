@@ -1,12 +1,14 @@
 //! Git in Forge: Zed's git panel, blame and file history, plus a History panel (the commit
-//! graph), a three-pane merge editor, an offer to `git init` folders that aren't repositories yet and a background
-//! fetch, so the title bar can show commits waiting on the server.
+//! graph), a three-pane merge editor, creating tags, an offer to `git init` folders that
+//! aren't repositories yet and a background fetch, so the title bar can show commits
+//! waiting on the server.
 
 mod auto_fetch;
 pub mod conflicts;
 pub mod history;
 pub mod init;
 pub mod merge_editor;
+pub mod tags;
 
 pub use history::HistoryPanel;
 
@@ -19,6 +21,7 @@ pub fn init(cx: &mut gpui::App) {
     init::init(cx);
     auto_fetch::init(cx);
     merge_editor::init(cx);
+    tags::init(cx);
 }
 
 #[cfg(test)]

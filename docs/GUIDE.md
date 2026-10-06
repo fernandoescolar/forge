@@ -193,6 +193,8 @@ While the agent works, the thread **follows it**: the file it reads or writes op
 
 Git › *Changes* is the Git panel (stage, commit, push), *History* the commit graph.
 
+**Tags.** Git › *Create Tag…* tags the current commit (HEAD); to tag another one, right-click it in the History panel (or in the Git panel's commit list) and choose *Create Tag…*. Give it a name and, optionally, a message, which makes it an annotated tag. Tick *Push it to …* to send it to the branch's remote (`origin` when the branch tracks none) right away; Forge asks for credentials the way it does for a push.
+
 **Merge conflicts.** Each conflict in the editor has *Use ours*, *Use theirs*, *Use both* and *Resolve with Agent*, which asks a thread to settle that conflict. While the project has conflicts, the status bar offers to resolve all of them with the agent (also Git › *Resolve Conflicts with the Agent*). The agent edits the files; you stage and commit.
 
 **The merge editor** (Git › Merge Conflicts › *Open Merge Editor…*, on the active file or a conflicted one you pick) shows a file with conflicts in three panes: yours and theirs on top, each with the conflicts resolved to that side and highlighted, and the result below, which is the file itself. *Accept Yours*, *Accept Theirs* and *Accept Both* resolve the conflict at the cursor; the arrows move between conflicts, and the top panes follow. You can also edit the result by hand. *Mark as Resolved* saves it and, when git has the file as conflicted, stages it.

@@ -34,6 +34,7 @@ Keep each patch small and generic (a hook, not Forge logic), one concern per fil
 | `0008-theme-selector-alphabetical.patch` | The theme selector lists themes alphabetically instead of dark ones first. |
 | `0009-editor-run-indicator-click.patch` | `RunIndicatorClick`: the application can handle a click on a run indicator itself (forge-http sends the `.http` request on that line instead of running a task). |
 | `0010-git-ui-external-conflict-agent.patch` | `ExternalConflictAgent`: with it set, the conflict buttons' *Resolve with Agent* and the status bar's merge conflict indicator show although Zed's AI is disabled; Forge's threads answer their actions. |
+| `0011-git-ui-commit-context-menu-extension.patch` | `git_ui::CommitContextMenuExtension`: a global hook that adds entries to the commit context menu (History graph, Git panel); Forge adds *Create Tag…*. |
 
 Things Forge does without patches, so they don't come back as patches:
 

@@ -8,13 +8,16 @@ description = "Git integration for Forge: changes, history graph, blame, git ini
 
 [dependencies]
 anyhow.workspace = true
+askpass = { path = "../../vendor/zed/crates/askpass" }
 db = { path = "../../vendor/zed/crates/db" }
 editor = { path = "../../vendor/zed/crates/editor" }
 forge-ui = { path = "../forge-ui" }
 git = { path = "../../vendor/zed/crates/git" }
 git_hosting_providers = { path = "../../vendor/zed/crates/git_hosting_providers" }
 git_ui = { path = "../../vendor/zed/crates/git_ui" }
+git_ui_core = { path = "../../vendor/zed/crates/git_ui_core" }
 log = "0.4"
+menu = { path = "../../vendor/zed/crates/menu" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 language = { path = "../../vendor/zed/crates/language" }
 multi_buffer = { path = "../../vendor/zed/crates/multi_buffer" }

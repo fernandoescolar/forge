@@ -1,0 +1,59 @@
+diff --git a/crates/git_ui/src/commit_context_menu.rs b/crates/git_ui/src/commit_context_menu.rs
+index d7c8142..af6455f 100644
+--- a/crates/git_ui/src/commit_context_menu.rs
++++ b/crates/git_ui/src/commit_context_menu.rs
+@@ -22,6 +22,18 @@ actions!(
+ const COMMIT_TAG_LIST_WIDTH_IN_REMS: Rems = rems(10.);
+ const CUSTOM_GIT_COMMANDS_DOCS_SLUG: &str = "tasks#custom-git-commands";
+ 
++/// Entries an application adds to the commit context menu (Git Graph, Git panel), after
++/// the built-in ones: called with the menu, the commit, its repository and the workspace,
++/// it returns the menu.
++#[derive(Clone)]
++pub struct CommitContextMenuExtension(
++    pub std::sync::Arc<
++        dyn Fn(ContextMenu, Oid, Option<WeakEntity<Repository>>, WeakEntity<Workspace>, &mut Window, &mut App) -> ContextMenu,
++    >,
++);
++
++impl gpui::Global for CommitContextMenuExtension {}
++
+ pub(crate) struct CommitContextMenuData {
+     pub(crate) sha: Oid,
+     pub(crate) tag_names: Vec<SharedString>,
+@@ -55,7 +67,9 @@ pub(crate) fn commit_context_menu(
+         None => format!("Commit {sha_short}"),
+     };
+ 
+-    ContextMenu::build(window, cx, move |context_menu, _, _| {
++    let extension = cx.try_global::<CommitContextMenuExtension>().cloned();
++
++    ContextMenu::build(window, cx, move |context_menu, window, cx| {
+         context_menu
+             .context(focus_handle)
+             .header(header)
+@@ -139,6 +153,12 @@ pub(crate) fn commit_context_menu(
+                     );
+                 })
+             })
++            .map(|menu| match &extension {
++                Some(extension) => {
++                    (extension.0)(menu, sha, repository.clone(), workspace.clone(), window, cx)
++                }
++                None => menu,
++            })
+             .map(|mut menu| {
+                 menu = menu.separator().header("Custom Commands");
+ 
+diff --git a/crates/git_ui/src/git_ui.rs b/crates/git_ui/src/git_ui.rs
+index 9a021d6..4e9eae4 100644
+--- a/crates/git_ui/src/git_ui.rs
++++ b/crates/git_ui/src/git_ui.rs
+@@ -36,6 +36,7 @@ use crate::{
+ pub mod branch_diff;
+ pub mod branch_picker;
+ mod commit_context_menu;
++pub use commit_context_menu::CommitContextMenuExtension;
+ mod commit_modal;
+ pub mod commit_tooltip;
+ pub mod commit_view;

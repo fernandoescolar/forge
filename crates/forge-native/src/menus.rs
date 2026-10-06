@@ -490,6 +490,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Fetch", git::Fetch),
             MenuItem::separator(),
             MenuItem::action("Switch Branch…", zed_actions::git::Branch),
+            MenuItem::action("Create Tag…", forge_git::tags::CreateTag),
             MenuItem::action("Stash All", git::StashAll),
             MenuItem::action("Pop Stash", git::StashPop),
             MenuItem::separator(),

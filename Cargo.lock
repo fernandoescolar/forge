@@ -3676,6 +3676,7 @@ name = "forge-git"
 version = "0.0.1-beta"
 dependencies = [
  "anyhow",
+ "askpass",
  "db",
  "editor",
  "forge-ui",
@@ -3683,9 +3684,11 @@ dependencies = [
  "git",
  "git_hosting_providers",
  "git_ui",
+ "git_ui_core",
  "gpui",
  "language",
  "log",
+ "menu",
  "multi_buffer",
  "project",
  "remote_connection",
