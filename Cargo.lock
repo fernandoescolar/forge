@@ -3888,15 +3888,21 @@ name = "forge-run"
 version = "0.0.1-beta"
 dependencies = [
  "anyhow",
+ "async-net",
+ "async-tungstenite",
  "dap",
  "db",
  "editor",
  "forge-languages",
  "forge-tests",
+ "futures",
  "gpui",
+ "log",
  "project",
+ "serde",
  "serde_json",
  "settings",
+ "smol",
  "task",
  "tempfile",
  "terminal",
@@ -3905,6 +3911,7 @@ dependencies = [
  "theme_settings",
  "toml 0.8.23",
  "util",
+ "uuid",
  "workspace",
 ]
 
@@ -3966,12 +3973,18 @@ name = "forge-update"
 version = "0.0.1-beta"
 dependencies = [
  "anyhow",
+ "editor",
  "futures",
  "gpui",
  "http_client",
  "log",
+ "project",
  "serde_json",
+ "settings",
  "tempfile",
+ "theme",
+ "theme_settings",
+ "util",
  "workspace",
 ]
 
@@ -12594,8 +12607,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-c-sharp"
 version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
 dependencies = [
  "cc",
  "tree-sitter-language",

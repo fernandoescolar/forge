@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Applies Forge's changes to Zed (patches/zed/*.patch) to the vendor/zed submodule.
+# Builds the patched grammars (scripts/patch-grammars.sh), then applies Forge's changes to
+# Zed (patches/zed/*.patch) to the vendor/zed submodule.
 # Safe to run repeatedly: patches already applied are skipped.
 #   scripts/apply-zed-patches.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZED="$ROOT/vendor/zed"
 shopt -s nullglob
+"$ROOT/scripts/patch-grammars.sh"
 for patch in "$ROOT"/patches/zed/*.patch; do
     name="$(basename "$patch")"
     if git -C "$ZED" apply --reverse --check "$patch" 2>/dev/null; then

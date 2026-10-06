@@ -32,7 +32,7 @@ To install from the zip instead, download `Forge-<version>-<arch>.zip` (`aarch64
 xattr -dr com.apple.quarantine /Applications/Forge.app
 ```
 
-Release builds keep themselves up to date: they look for a new version at startup and every few hours, install it and offer to restart; Forge › *Check for Updates…* looks right away.
+Release builds keep themselves up to date: they look for a new version at startup and every few hours and install it in the background. Then a dialog asks whether to restart now: *Restart Now* asks about unsaved changes, if there are any, and opens the new version with the projects you had open; *Later* keeps working with the current one, and the update applies the next time Forge starts. Forge › *Check for Updates…* looks right away (or asks again about an update that is waiting).
 
 Forge uses the tools you already have, found through your shell's `PATH`:
 
@@ -47,7 +47,8 @@ Forge uses the tools you already have, found through your shell's `PATH`:
 
 ## Getting started
 
-- **Open a folder:** File › Open (⌘O), drop it on the Dock icon, or run `forge <path>` in a terminal. File › *Open Recent…* (⌥⌘O) picks one of your recent projects. Forge reopens the windows and files you had open when you quit.
+- **Open a folder:** File › Open (⌘O) asks for a folder (or files) and opens it in a new window; the window you asked from closes if it had nothing open. You can also drop a folder on the Dock icon, or run `forge <path>` in a terminal. File › *Open Recent…* (⌥⌘O) picks one of your recent projects. File › *New Window* opens an empty window on the welcome page, with the docks laid out like the window you were in.
+- **Coming back:** when you quit (or close the last window), Forge remembers its windows: their projects, tabs and docks. The next start reopens them as they were, also when you start it with a folder (`forge <path>`), which then opens in its own window or brings forward the one that already shows it. A window you close while others stay open is forgotten.
 - **Find anything:** ⌘P opens files, ⌘⇧P runs any command, ⌘F finds in the open file and ⌘⇧F searches the project (see [Search and replace](#search-and-replace)).
 - **Run and debug:** pick what to run in the title bar, then Run or Debug (see [Run and debug](#run-and-debug)).
 - **Get around:** the status bar shows errors and warnings, what the language servers and agents are doing, the debug session, merge conflicts and your branch's pull request; each one opens what it is about.
@@ -119,6 +120,8 @@ When you save a palette, its theme reloads. Syntax scopes inherit from their pre
 ## Run and debug
 
 Pick what to run in the title bar (.NET apps and tests, Rust, Go, `package.json` scripts and Python programs), then Run or Debug. Scripts run with the package manager the project uses (its `packageManager` field or lockfile: npm, pnpm, Yarn or Bun). Python programs are the top-level files of a project with an `if __name__ == "__main__":` block, packages with a `__main__.py`, and Django's `manage.py runserver`; they run with the project's `.venv` (or `venv`) when it has one. A .NET app with several launch profiles in `Properties/launchSettings.json` gets a target per profile; Run and Debug both apply its environment variables, URLs and arguments; the flame button runs a .NET app with hot reload (see [.NET](#net)). The last test result stays next to it.
+
+File-based .NET apps (a single `.cs` that opens with `#:` directives, run with `dotnet run --file`) are targets too, with a target per profile of their `app.run.json`, and debug like any other app. **Aspire** app hosts, a project or a single-file `apphost.cs` with `#:sdk Aspire.AppHost.Sdk`, come first in the list. Forge also finds them in the `.aspire` folder and wherever the Aspire CLI is set up to look (`appHost.path` in `aspire.config.json`, or `appHostPath` in `.aspire/settings.json`), and takes a single-file app host's profiles from `aspire.config.json` when it has no `apphost.run.json`. While one runs, the title bar shows a button that opens its dashboard already signed in (also Run › Open Aspire Dashboard). Debug runs the app host in a terminal and each of its .NET projects (and file-based apps) under the debugger, as Aspire asks for them: breakpoints work in every service, their output still reaches the dashboard, and Stop ends the app host and all of them. Containers and other resources run as usual.
 
 Debugging uses each language's debugger: CodeLLDB for Rust, Delve for Go, debugpy for Python, the JavaScript debugger for Node, and netcoredbg for .NET. Set breakpoints in the gutter; the debugger opens in its panel when a session starts. Projects can add their own tasks and debug scenarios in `.forge/tasks.json` and `.forge/debug.json`.
 

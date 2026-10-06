@@ -16,6 +16,7 @@ mod statusbar;
 mod theme;
 mod titlebar;
 mod welcome;
+mod windows;
 
 use ::theme::ActiveTheme as _;
 use anyhow::Context as _;
@@ -149,6 +150,7 @@ fn main() {
         forge_git::init(cx);
         forge_dotnet::init(cx);
         menus::init(cx);
+        windows::init(cx);
         open_editors::init(cx);
         docks::init(cx);
         settings_view::init(cx);
@@ -172,12 +174,18 @@ fn main() {
         cx.set_quit_mode(QuitMode::LastWindowClosed);
         add_panels_to_new_workspaces(cx);
 
-        if paths.is_empty() {
-            // Launched from Finder/Dock without a project: the windows of the last session,
-            // as they were; otherwise an empty window (⌘O opens a folder).
+        // The windows of the last session come back as they were (projects, tabs, docks),
+        // however Forge is started. Then the folders or files it was started with open, in a
+        // window of their own (or the restored window that already shows them). With nothing
+        // to restore or open, an empty window on the welcome page (⌘O opens a folder).
+        {
             let app_state = app_state.clone();
             cx.spawn(async move |cx| {
-                if !restore_last_session(&app_state, cx).await {
+                let restored = restore_last_session(&app_state, cx).await;
+                if !paths.is_empty() {
+                    let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), own_window(), cx));
+                    open.await.context("failed to open the initial window").log_err();
+                } else if !restored {
                     let open = cx.update(|cx| {
                         workspace::open_new(OpenOptions::default(), app_state.clone(), cx, |ws, window, cx| welcome::show(ws, window, cx))
                     });
@@ -185,17 +193,11 @@ fn main() {
                 }
             })
             .detach();
-        } else {
-            let open = workspace::open_paths(&paths, app_state.clone(), OpenOptions::default(), cx);
-            cx.spawn(async move |_| {
-                open.await.context("failed to open the initial window").log_err();
-            })
-            .detach();
         }
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(paths) = open_rx.next().await {
-                let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), OpenOptions::default(), cx));
+                let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), own_window(), cx));
                 open.await.with_context(|| format!("failed to open {paths:?}")).log_err();
             }
         })
@@ -208,6 +210,12 @@ fn main() {
 /// closed), each with its tabs, splits and docks; `restore_on_startup` in settings.json
 /// chooses that, only the last project ("last_workspace") or nothing ("empty_tab"). Returns
 /// whether any window opened.
+/// Opening folders or files from outside (the command line, the Dock, Open With): in a window
+/// of their own, or the one that already shows them; never added to another window's sidebar.
+fn own_window() -> OpenOptions {
+    OpenOptions { add_dirs_to_sidebar: false, ..OpenOptions::default() }
+}
+
 async fn restore_last_session(app_state: &Arc<AppState>, cx: &mut gpui::AsyncApp) -> bool {
     use settings::Settings as _;
     use workspace::{RestoreOnStartupBehavior, WorkspaceSettings};
@@ -322,7 +330,7 @@ fn load_keymap(cx: &mut App) {
 }
 
 /// Mirrors Zed's `initialize_panels`, restricted to the panels Forge ships.
-fn add_panels_to_new_workspaces(cx: &mut App) {
+pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else { return };
         // Forge shows its own welcome page instead of Zed's.
@@ -367,6 +375,7 @@ fn add_panels_to_new_workspaces(cx: &mut App) {
                     entries.extend(forge_extension_host::panel::add_panels(host, workspace, window, cx));
                 }
                 docks::install(workspace, entries, host, window, cx);
+                windows::apply_pending_layout(workspace, window, cx);
                 statusbar::install(workspace, window, cx);
                 let empty = workspace.visible_worktrees(cx).next().is_none() && workspace.active_pane().read(cx).items_len() == 0;
                 if empty {

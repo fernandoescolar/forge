@@ -76,10 +76,15 @@ impl ForgeWelcome {
         Self { focus_handle: cx.focus_handle(), workspace: workspace.weak_handle(), recent: None }
     }
 
+    /// Opening a project looks at every item of the workspace (for unsaved changes), this
+    /// page among them, which is busy handling the click: open right after it.
     fn open_recent(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace
-            .update(cx, |ws, cx| ws.open_workspace_for_paths(workspace::OpenMode::Activate, paths, window, cx).detach_and_log_err(cx))
-            .ok();
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |ws, cx| ws.open_workspace_for_paths(workspace::OpenMode::Activate, paths, window, cx).detach_and_log_err(cx))
+                .ok();
+        });
     }
 
     fn render_recent(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -291,8 +296,58 @@ impl Item for ForgeWelcome {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    /// Forge as a window starts it: Forge's panels, docks and title bar on every workspace.
+    pub(crate) fn init_forge(cx: &mut TestAppContext) -> std::sync::Arc<workspace::AppState> {
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(::theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            language_model::init(cx);
+            workspace::init(params.clone(), cx);
+            project_panel::init(cx);
+            terminal_view::init(cx);
+            forge_agents::init(cx);
+            forge_extension_host::panel::init(cx);
+            forge_extension_host::install::init(cx);
+            forge_git::init(cx);
+            forge_dotnet::init(cx);
+            crate::menus::init(cx);
+            crate::open_editors::init(cx);
+            crate::docks::init(cx);
+            forge_tests::panel::init(cx);
+            forge_run::init(cx);
+            forge_output::init(cx);
+            debugger_ui::init(cx);
+            crate::titlebar::init(cx);
+            crate::add_panels_to_new_workspaces(cx);
+            workspace::AppState::set_global(params.clone(), cx);
+        });
+        params
+    }
+
+    /// A new window's welcome page opens a recent project in that window.
+    #[gpui::test]
+    async fn opens_a_recent_project_from_a_new_window(cx: &mut TestAppContext) {
+        let params = init_forge(cx);
+        params.fs.as_fake().insert_tree("/proj", serde_json::json!({ "a.txt": "hi" })).await;
+        let project = project::Project::test(params.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        workspace.update_in(cx, |ws, window, cx| show(ws, window, cx));
+        cx.run_until_parked();
+        let page = workspace.read_with(cx, |ws, cx| ws.active_pane().read(cx).items_of_type::<ForgeWelcome>().next()).unwrap();
+        page.update_in(cx, |page, window, cx| page.open_recent(vec!["/proj".into()], window, cx));
+        cx.run_until_parked();
+        let shown = window.read_with(cx, |mw, cx| mw.workspace().read(cx).visible_worktrees(cx).map(|t| t.read(cx).abs_path().to_path_buf()).collect::<Vec<_>>()).unwrap();
+        assert_eq!(shown, [PathBuf::from("/proj")], "the window shows the project");
+
+    }
 
     #[test]
     fn recent_entries_are_formatted_for_people() {

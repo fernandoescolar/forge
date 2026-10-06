@@ -204,9 +204,9 @@ impl ForgeTitleBar {
     /// [target ▾] ▶ 🐞 ■
     fn run_controls(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let controller = self.controller(cx)?;
-        let (target, targets, state) = {
+        let (target, targets, state, dashboard) = {
             let c = controller.read(cx);
-            (c.selected().cloned(), c.targets().to_vec(), c.state(cx))
+            (c.selected().cloned(), c.targets().to_vec(), c.state(cx), c.dashboard_url().is_some())
         };
         if targets.is_empty() {
             return None;
@@ -280,6 +280,14 @@ impl ForgeTitleBar {
                         .tooltip(Tooltip::for_action_title("Debug", &forge_run::Debug))
                         .on_click(Self::dispatch(Box::new(forge_run::Debug))),
                 )
+                .when(dashboard, |el| {
+                    el.child(
+                        IconButton::new("aspire-dashboard", IconName::ArrowUpRight)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::for_action_title("Open the Aspire Dashboard", &forge_run::OpenDashboard))
+                            .on_click(Self::dispatch(Box::new(forge_run::OpenDashboard))),
+                    )
+                })
                 .child(
                     IconButton::new("stop", IconName::Stop)
                         .icon_size(IconSize::Small)

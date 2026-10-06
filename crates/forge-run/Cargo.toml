@@ -8,18 +8,25 @@ description = "Run targets and run/debug/stop controls for Forge"
 
 [dependencies]
 anyhow.workspace = true
+async-net = "2"
+async-tungstenite = "0.33"
 dap = { path = "../../vendor/zed/crates/dap" }
 db = { path = "../../vendor/zed/crates/db" }
 forge-languages = { path = "../forge-languages" }
 forge-tests = { path = "../forge-tests" }
+futures.workspace = true
+log = "0.4"
 gpui = { path = "../../vendor/zed/crates/gpui" }
 project = { path = "../../vendor/zed/crates/project" }
+serde.workspace = true
+smol = "2"
 serde_json.workspace = true
 task = { path = "../../vendor/zed/crates/task" }
 terminal = { path = "../../vendor/zed/crates/terminal" }
 terminal_view = { path = "../../vendor/zed/crates/terminal_view" }
 toml = "0.8"
 util = { path = "../../vendor/zed/crates/util" }
+uuid.workspace = true
 workspace = { path = "../../vendor/zed/crates/workspace" }
 
 [dev-dependencies]

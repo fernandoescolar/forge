@@ -303,9 +303,11 @@ const RUN_LOCATOR_NAME: &str = "dotnet-run-locator";
 /// Carries the launch profile's arguments (JSON) from the scenario to the launch.
 const LAUNCH_ARGS_ENV: &str = "FORGE_LAUNCH_ARGS";
 
-/// Debugs `dotnet run --project X [--launch-profile P]`: builds the project, asks MSBuild
-/// for the program it produced and launches that under netcoredbg, with the launch
-/// profile's environment and arguments (which `dotnet run` would have applied).
+/// Debugs `dotnet run --project X [--launch-profile P | --no-launch-profile] [-- args]` (or
+/// `--file X.cs`, a file-based app): builds the project, asks MSBuild for the program it
+/// produced and launches that under netcoredbg, with the launch profile's environment and
+/// arguments (which `dotnet run` would have applied). The task's environment wins over the
+/// profile's, and arguments after `--` replace the profile's.
 pub struct DotnetRunLocator;
 
 #[async_trait]
@@ -323,17 +325,19 @@ impl DapLocator for DotnetRunLocator {
         if build_config.command != "dotnet" || build_config.args.first()? != "run" {
             return None;
         }
-        let project = build_config
-            .args
-            .iter()
-            .skip_while(|arg| *arg != "--project")
-            .nth(1)
-            .map(|arg| unquote(arg).to_string());
-        let profile_name = build_config.args.iter().skip_while(|arg| *arg != "--launch-profile").nth(1).map(|arg| unquote(arg).to_string());
-        let profile = project
-            .as_deref()
-            .and_then(|p| Path::new(p).parent())
-            .and_then(|dir| crate::launch_settings::profile(dir, profile_name.as_deref()));
+        let separator = build_config.args.iter().position(|arg| arg == "--");
+        let (options, program_args) = match separator {
+            Some(at) => (&build_config.args[..at], Some(&build_config.args[at + 1..])),
+            None => (&build_config.args[..], None),
+        };
+        let after = |switch: &str| options.iter().skip_while(|arg| *arg != switch).nth(1).map(|arg| unquote(arg).to_string());
+        let project = after("--project").or_else(|| after("--file"));
+        let profile_name = after("--launch-profile");
+        let profile = if options.iter().any(|arg| arg == "--no-launch-profile") {
+            None
+        } else {
+            project.as_deref().and_then(|p| crate::launch_settings::profile(Path::new(p), profile_name.as_deref()))
+        };
         let mut build = build_config.clone();
         build.label = format!("dotnet build {}", project.as_deref().unwrap_or_default());
         build.args = ["build".to_string()].into_iter().chain(project).collect();
@@ -344,6 +348,10 @@ impl DapLocator for DotnetRunLocator {
             if !profile.args.is_empty() {
                 build.env.insert(LAUNCH_ARGS_ENV.into(), serde_json::to_string(&profile.args).unwrap_or_default());
             }
+        }
+        if let Some(args) = program_args {
+            let args: Vec<&str> = args.iter().map(|arg| unquote(arg)).collect();
+            build.env.insert(LAUNCH_ARGS_ENV.into(), serde_json::to_string(&args).unwrap_or_default());
         }
         Some(DebugScenario {
             adapter: adapter.0.clone(),
@@ -359,8 +367,11 @@ impl DapLocator for DotnetRunLocator {
 
     async fn run(&self, build_config: SpawnInTerminal, _: BackgroundExecutor) -> Result<DebugRequest> {
         let project = build_config.args.get(1).map(|arg| PathBuf::from(unquote(arg)));
+        let file_based = project.as_deref().is_some_and(|p| p.extension().is_some_and(|e| e == "cs"));
         let mut command = new_command("dotnet");
-        command.arg("msbuild");
+        // `dotnet msbuild` can't load a `.cs`; `dotnet build` evaluates it into its own
+        // project, built where the SDK keeps file-based apps, and reports that program.
+        command.arg(if file_based { "build" } else { "msbuild" });
         if let Some(project) = &project {
             command.arg(project);
         }
@@ -372,8 +383,9 @@ impl DapLocator for DotnetRunLocator {
         if let Some(cwd) = &build_config.cwd {
             command.current_dir(cwd);
         }
-        let output = forge_ui::process::spawn_unblocked(command).context("failed to run `dotnet msbuild`")?.output().await.context("`dotnet msbuild` failed")?;
-        anyhow::ensure!(output.status.success(), "`dotnet msbuild -getProperty:TargetPath` failed: {}", String::from_utf8_lossy(&output.stdout));
+        let tool = if file_based { "dotnet build" } else { "dotnet msbuild" };
+        let output = forge_ui::process::spawn_unblocked(command).with_context(|| format!("failed to run `{tool}`"))?.output().await.with_context(|| format!("`{tool}` failed"))?;
+        anyhow::ensure!(output.status.success(), "`{tool} -getProperty:TargetPath` failed: {}", String::from_utf8_lossy(&output.stdout));
         let program = target_path(&String::from_utf8_lossy(&output.stdout)).context("MSBuild reported no TargetPath")?;
         let cwd = project.as_deref().and_then(Path::parent).map(Path::to_path_buf).or(build_config.cwd.clone());
         let mut env = build_config.env;
@@ -483,6 +495,12 @@ mod tests {
         };
         assert_eq!(task_template.args, ["build", "/p/App.csproj"]);
         assert!(futures::executor::block_on(DotnetRunLocator.create_scenario(&template, "", &adapter)).is_none(), "tests are not runs");
+        let file = TaskTemplate { command: "dotnet".into(), args: vec!["run".into(), "--file".into(), "\"/p/apphost.cs\"".into()], ..TaskTemplate::default() };
+        let scenario = futures::executor::block_on(DotnetRunLocator.create_scenario(&file, "dotnet run apphost.cs", &adapter)).unwrap();
+        let Some(BuildTaskDefinition::Template { task_template, .. }) = scenario.build else {
+            panic!("expected a build template");
+        };
+        assert_eq!(task_template.args, ["build", "/p/apphost.cs"], "file-based apps build from their file");
         assert_eq!(target_path("/p/bin/App.dll\n").as_deref(), Some("/p/bin/App.dll"));
     }
 
@@ -511,5 +529,20 @@ mod tests {
         let seed = build_env(vec!["run".into(), "--project".into(), quoted, "--launch-profile".into(), "\"seed\"".into()]);
         assert_eq!(seed.get("MODE").map(String::as_str), Some("seed"));
         assert_eq!(seed.get(LAUNCH_ARGS_ENV).map(String::as_str), Some(r#"["--seed","3"]"#));
+
+        // A file-based app's profiles are in its `app.run.json`.
+        std::fs::write(dir.path().join("apphost.run.json"), r#"{"profiles": {"https": {"commandName": "Project", "applicationUrl": "https://localhost:17000"}}}"#).unwrap();
+        let file = format!("\"{}\"", dir.path().join("apphost.cs").display());
+        let apphost = build_env(vec!["run".into(), "--file".into(), file]);
+        assert_eq!(apphost.get("ASPNETCORE_URLS").map(String::as_str), Some("https://localhost:17000"));
+
+        // How Aspire runs a project: without a profile, or with its own arguments.
+        let quoted = format!("\"{}\"", project.display());
+        let bare = build_env(vec!["run".into(), "--project".into(), quoted.clone(), "--no-launch-profile".into()]);
+        assert!(!bare.contains_key("ASPNETCORE_URLS"));
+        let replaced = build_env(vec!["run".into(), "--project".into(), quoted.clone(), "--launch-profile".into(), "seed".into(), "--".into(), "--port".into(), "\"8 0\"".into()]);
+        assert_eq!(replaced.get(LAUNCH_ARGS_ENV).map(String::as_str), Some(r#"["--port","8 0"]"#));
+        let none = build_env(vec!["run".into(), "--project".into(), quoted, "--launch-profile".into(), "seed".into(), "--".into()]);
+        assert_eq!(none.get(LAUNCH_ARGS_ENV).map(String::as_str), Some("[]"), "an empty list still replaces the profile's");
     }
 }

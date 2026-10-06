@@ -1,0 +1,26 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -166,6 +166,8 @@
+   rules: {
+     compilation_unit: $ => seq(
+       optional($.shebang_directive),
++      // Forge: file-based apps' `#:sdk`, `#:package`, `#:property`… (tree-sitter-c-sharp#431).
++      repeat($.ignored_directive),
+       repeat($._top_level_item),
+     ),
+ 
+@@ -2137,6 +2139,14 @@
+     ),
+ 
+     shebang_directive: _ => token(seq('#!', /.*/)),
++
++    // Forge: `#:name argument`, which the compiler skips and `dotnet run` reads. Only at the
++    // top of a file, after an optional `#!` line, as Roslyn allows.
++    ignored_directive: $ => seq(
++      field('name', alias(token(seq('#:', /[A-Za-z]*/)), $.directive_name)),
++      optional(field('argument', alias(token(prec(-1, /[^\s][^\n\r]*/)), $.directive_argument))),
++      /\r?\n/,
++    ),
+ 
+     comment: _ => token(choice(
+       seq('//', /[^\n\r]*/),

@@ -106,6 +106,11 @@
 
 (preproc_arg) @string
 
+; File-based apps: `#!/usr/bin/env dotnet`, then `#:sdk`, `#:package`, `#:property`…
+(shebang_directive) @preproc
+(ignored_directive name: (directive_name) @preproc)
+(ignored_directive argument: (directive_argument) @string)
+
 ; Punctuation
 
 [

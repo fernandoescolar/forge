@@ -329,9 +329,9 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Quit Forge", crate::Quit),
         ]),
         Menu::new("File").items([
+            MenuItem::action("New Window", workspace::NewWindow),
             MenuItem::submenu(Menu::new("New").items([
                 MenuItem::action("File", workspace::NewFile),
-                MenuItem::action("Window", workspace::NewWindow),
                 MenuItem::separator(),
                 MenuItem::action(".NET Solution…", forge_dotnet::explorer::NewSolution),
                 MenuItem::action(".NET Project…", forge_dotnet::explorer::NewProject),
@@ -458,6 +458,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Run", forge_run::Run),
             MenuItem::action("Debug", forge_run::Debug),
             MenuItem::action("Run with Hot Reload", forge_run::Watch),
+            MenuItem::action("Open Aspire Dashboard", forge_run::OpenDashboard),
             MenuItem::action("Stop", forge_run::Stop),
             MenuItem::action("Select What to Run…", SelectRunTarget),
             MenuItem::separator(),

@@ -139,6 +139,40 @@ mod tests {
         assert!(grammar.runnable_config.is_some(), "runnables loaded");
     }
 
+    /// File-based apps (`dotnet run app.cs`) open with `#!` and `#:` directives: they parse
+    /// (the grammar is patched, see patches/tree-sitter-c-sharp) and are coloured
+    /// without throwing off the code that follows.
+    #[test]
+    fn csharp_file_based_app_header() {
+        use streaming_iterator::StreamingIterator as _;
+
+        let source = "#!/usr/bin/env dotnet\n#:sdk Aspire.AppHost.Sdk@13.6.0\n#:package Aspire.Hosting.Redis@13.6.0\n\nusing System;\nvar builder = DistributedApplication.CreateBuilder(args);\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{}", tree.root_node().to_sexp());
+
+        let highlights = String::from_utf8(LanguageDir::get("csharp/highlights.scm").unwrap().data.into_owned()).unwrap();
+        let query = tree_sitter::Query::new(&tree_sitter_c_sharp::LANGUAGE.into(), &highlights).unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut captured = Vec::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures.iter().filter(|c| c.node.start_position().row < 3) {
+                captured.push((query.capture_names()[capture.index as usize].to_string(), source[capture.node.byte_range()].to_string()));
+            }
+        }
+        for expected in [
+            ("preproc", "#!/usr/bin/env dotnet"),
+            ("preproc", "#:sdk"),
+            ("string", "Aspire.AppHost.Sdk@13.6.0"),
+            ("preproc", "#:package"),
+            ("string", "Aspire.Hosting.Redis@13.6.0"),
+        ] {
+            assert!(captured.iter().any(|(name, text)| name == expected.0 && text == expected.1), "{expected:?} not in {captured:?}");
+        }
+    }
+
     #[test]
     fn msbuild_and_solution_queries_compile() {
         let msbuild = Language::new(load_config("msbuild"), Some(tree_sitter_xml::LANGUAGE_XML.into()))

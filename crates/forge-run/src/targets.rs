@@ -1,6 +1,6 @@
-//! What can be run in a workspace: .NET apps and test projects, Rust binaries, Go `main`
-//! packages, `package.json` scripts and Python programs, found from their manifests and
-//! sources without building anything.
+//! What can be run in a workspace: Aspire app hosts, .NET apps (projects and file-based
+//! apps) and test projects, Rust binaries, Go `main` packages, `package.json` scripts and
+//! Python programs, found from their manifests and sources without building anything.
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,9 @@ use task::TaskTemplate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// An Aspire app host (a project, or a file-based `apphost.cs`): runs the app's
+    /// resources and their dashboard.
+    Aspire,
     DotnetApp,
     DotnetTests,
     Cargo,
@@ -22,6 +25,7 @@ pub enum Kind {
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
+            Kind::Aspire => "Aspire",
             Kind::DotnetApp => ".NET",
             Kind::DotnetTests => "Tests",
             Kind::Cargo => "Rust",
@@ -34,7 +38,7 @@ impl Kind {
     /// The debug adapter Forge uses for this kind of target.
     pub fn debug_adapter(self) -> &'static str {
         match self {
-            Kind::DotnetApp | Kind::DotnetTests => "netcoredbg",
+            Kind::Aspire | Kind::DotnetApp | Kind::DotnetTests => "netcoredbg",
             Kind::Cargo => "CodeLLDB",
             Kind::Go => "Delve",
             Kind::Node => "JavaScript",
@@ -47,8 +51,8 @@ impl Kind {
 pub struct RunTarget {
     pub kind: Kind,
     pub name: String,
-    /// `.csproj`, `Cargo.toml`, the Go package folder, `package.json` or the Python file or
-    /// package folder; with `entry`, the target's id.
+    /// `.csproj` (or the `.cs` of a file-based app), `Cargo.toml`, the Go package folder,
+    /// `package.json` or the Python file or package folder; with `entry`, the target's id.
     pub manifest: PathBuf,
     /// Where the commands run.
     pub dir: PathBuf,
@@ -65,7 +69,7 @@ impl RunTarget {
     pub fn id(&self) -> String {
         let manifest = self.manifest.to_string_lossy();
         match &self.entry {
-            Some(entry) if matches!(self.kind, Kind::Node | Kind::DotnetApp) => format!("{manifest}#{entry}"),
+            Some(entry) if matches!(self.kind, Kind::Node | Kind::DotnetApp | Kind::Aspire) => format!("{manifest}#{entry}"),
             _ => manifest.into_owned(),
         }
     }
@@ -74,8 +78,9 @@ impl RunTarget {
     pub fn task(&self) -> TaskTemplate {
         let quoted = |path: &Path| format!("\"{}\"", path.display());
         let (command, args): (&str, Vec<String>) = match self.kind {
-            Kind::DotnetApp => {
-                let mut args = vec!["run".into(), "--project".into(), quoted(&self.manifest)];
+            Kind::DotnetApp | Kind::Aspire => {
+                let switch = if self.is_file_based() { "--file" } else { "--project" };
+                let mut args = vec!["run".into(), switch.into(), quoted(&self.manifest)];
                 if let Some(framework) = &self.framework {
                     args.extend(["--framework".into(), framework.clone()]);
                 }
@@ -103,10 +108,15 @@ impl RunTarget {
         }
     }
 
+    /// A .NET file-based app: a single `.cs` file with `#:` directives, no project.
+    pub fn is_file_based(&self) -> bool {
+        matches!(self.kind, Kind::DotnetApp | Kind::Aspire) && self.manifest.extension().is_some_and(|e| e == "cs")
+    }
+
     /// `dotnet watch`: runs a .NET app and applies code changes to it while it runs (hot
     /// reload), restarting it when they can't be applied. `None` for other targets.
     pub fn watch_task(&self) -> Option<TaskTemplate> {
-        if self.kind != Kind::DotnetApp {
+        if self.kind != Kind::DotnetApp || self.is_file_based() {
             return None;
         }
         let mut task = self.task();
@@ -123,10 +133,25 @@ const SKIPPED_DIRS: &[&str] = &["bin", "obj", "target", "node_modules", "vendor"
 /// Run targets under `root`, grouped by kind (test projects last) and sorted by name.
 pub fn discover(root: &Path) -> Vec<RunTarget> {
     let mut targets = Vec::new();
+    // The sources of a project are not file-based apps: don't read them.
+    let mut project_dirs: Vec<PathBuf> = Vec::new();
     walk(root, 0, &mut |dir, files| {
+        if files.iter().any(|f| f.extension().is_some_and(|e| e == "csproj")) {
+            project_dirs.push(dir.to_path_buf());
+        }
+        let in_project = project_dirs.iter().any(|p| dir.starts_with(p));
+        // The app host the Aspire CLI is set up with, wherever it is.
+        for apphost in aspire_cli_apphosts(dir) {
+            match apphost.extension().and_then(|e| e.to_str()) {
+                Some("csproj") => targets.extend(dotnet_targets(&apphost)),
+                Some("cs") => targets.extend(file_based_targets(&apphost)),
+                _ => {}
+            }
+        }
         for file in files {
             match file.extension().and_then(|e| e.to_str()) {
                 Some("csproj") => targets.extend(dotnet_targets(file)),
+                Some("cs") if !in_project => targets.extend(file_based_targets(file)),
                 _ if file.file_name().is_some_and(|n| n == "Cargo.toml") => targets.extend(cargo_target(dir, file)),
                 _ if file.file_name().is_some_and(|n| n == "package.json") => targets.extend(node_targets(root, dir, file)),
                 _ => {}
@@ -147,15 +172,22 @@ pub fn discover(root: &Path) -> Vec<RunTarget> {
             targets.extend(python_targets(root, dir, files));
         }
     });
+    // An app host found both by walking and through the Aspire CLI's settings.
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|t| seen.insert(t.id()));
     let order = |kind: Kind| match kind {
-        Kind::DotnetApp => 0,
-        Kind::Cargo => 1,
-        Kind::Go => 2,
-        Kind::Node => 3,
-        Kind::Python => 4,
-        Kind::DotnetTests => 5,
+        Kind::Aspire => 0,
+        Kind::DotnetApp => 1,
+        Kind::Cargo => 2,
+        Kind::Go => 3,
+        Kind::Node => 4,
+        Kind::Python => 5,
+        Kind::DotnetTests => 6,
     };
-    targets.sort_by(|a, b| (order(a.kind), &a.name).cmp(&(order(b.kind), &b.name)));
+    // By name, but an app's launch profiles keep their file order: the first one is what
+    // `dotnet run` (and `aspire run`) use, so it is the one selected by default.
+    let app = |t: &RunTarget| t.name.split(" · ").next().unwrap_or_default().to_string();
+    targets.sort_by(|a, b| (order(a.kind), app(a)).cmp(&(order(b.kind), app(b))));
     targets
 }
 
@@ -172,7 +204,8 @@ fn walk(dir: &Path, depth: usize, visit: &mut dyn FnMut(&Path, &[PathBuf])) {
     dirs.sort();
     for sub in dirs {
         let name = sub.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name) {
+        // Hidden folders are skipped, but the Aspire CLI's `.aspire` may hold the app host.
+        if (!name.starts_with('.') || name == ".aspire") && !SKIPPED_DIRS.contains(&name) {
             walk(&sub, depth + 1, visit);
         }
     }
@@ -181,7 +214,11 @@ fn walk(dir: &Path, depth: usize, visit: &mut dyn FnMut(&Path, &[PathBuf])) {
 /// A project's target, or one per launch profile when it has several.
 fn dotnet_targets(project: &Path) -> Vec<RunTarget> {
     let Some(target) = dotnet_target(project) else { return vec![] };
-    let profiles = if target.kind == Kind::DotnetApp { forge_languages::launch_settings::profiles(&target.dir) } else { vec![] };
+    let profiles = if target.kind != Kind::DotnetTests { forge_languages::launch_settings::profiles(project) } else { vec![] };
+    with_profiles(target, profiles)
+}
+
+fn with_profiles(target: RunTarget, profiles: Vec<forge_languages::launch_settings::LaunchProfile>) -> Vec<RunTarget> {
     if profiles.len() < 2 {
         return vec![target];
     }
@@ -196,6 +233,8 @@ fn dotnet_target(project: &Path) -> Option<RunTarget> {
     let lower = text.to_ascii_lowercase();
     let kind = if forge_tests::discovery::is_test_project(project) {
         Kind::DotnetTests
+    } else if ["aspire.apphost.sdk", "<isaspirehost>true", "\"aspire.hosting.apphost\""].iter().any(|marker| lower.contains(marker)) {
+        Kind::Aspire
     } else if lower.contains("<outputtype>exe") || lower.contains("<outputtype>winexe") || ["microsoft.net.sdk.web", "microsoft.net.sdk.worker", "microsoft.net.sdk.blazorwebassembly"].iter().any(|sdk| lower.contains(sdk)) {
         Kind::DotnetApp
     } else {
@@ -213,10 +252,59 @@ fn dotnet_target(project: &Path) -> Option<RunTarget> {
         name: project.file_stem()?.to_string_lossy().into_owned(),
         manifest: project.to_path_buf(),
         dir: project.parent()?.to_path_buf(),
-        framework: framework.filter(|_| kind == Kind::DotnetApp),
+        framework: framework.filter(|_| kind != Kind::DotnetTests),
         program: None,
         entry: None,
     })
+}
+
+/// The app hosts the Aspire CLI is pointed at from `dir`: `appHost.path` in
+/// `aspire.config.json` (relative to it), and `appHostPath` in the older
+/// `.aspire/settings.json` (relative to `.aspire`).
+fn aspire_cli_apphosts(dir: &Path) -> Vec<PathBuf> {
+    use forge_languages::launch_settings::{aspire_config_apphost, normalize};
+    let legacy = || {
+        let settings = dir.join(".aspire/settings.json");
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).ok()?).ok()?;
+        Some(normalize(&dir.join(".aspire").join(json.get("appHostPath")?.as_str()?)))
+    };
+    [aspire_config_apphost(&dir.join("aspire.config.json")), legacy()].into_iter().flatten().filter(|path| path.is_file()).collect()
+}
+
+/// A file-based app (`dotnet run --file app.cs`), one target per profile of its
+/// `app.run.json`. Its `#:sdk Aspire.AppHost.Sdk` directive makes it an Aspire app host.
+fn file_based_targets(file: &Path) -> Vec<RunTarget> {
+    let Some(directives) = file_directives(file) else { return vec![] };
+    let aspire = directives.iter().any(|d| d.strip_prefix("#:sdk").is_some_and(|sdk| sdk.trim().to_ascii_lowercase().starts_with("aspire.apphost.sdk")));
+    let (Some(name), Some(dir)) = (file.file_name(), file.parent()) else { return vec![] };
+    let target = RunTarget {
+        kind: if aspire { Kind::Aspire } else { Kind::DotnetApp },
+        name: name.to_string_lossy().into_owned(),
+        manifest: file.to_path_buf(),
+        dir: dir.to_path_buf(),
+        framework: None,
+        program: None,
+        entry: None,
+    };
+    with_profiles(target, forge_languages::launch_settings::profiles(file))
+}
+
+/// The `#:` directives that open a file-based app (after an optional `#!` line and
+/// comments), or `None` when the file has none: then it is an ordinary source file.
+fn file_directives(file: &Path) -> Option<Vec<String>> {
+    use std::io::Read as _;
+    let mut head = Vec::new();
+    std::fs::File::open(file).ok()?.take(4096).read_to_end(&mut head).ok()?;
+    let head = String::from_utf8_lossy(&head);
+    let mut directives = Vec::new();
+    for line in head.trim_start_matches('\u{feff}').lines().map(str::trim) {
+        if line.starts_with("#:") {
+            directives.push(line.to_string());
+        } else if !(line.is_empty() || line.starts_with("#!") || line.starts_with("//")) {
+            break;
+        }
+    }
+    (!directives.is_empty()).then_some(directives)
 }
 
 fn cargo_target(dir: &Path, manifest: &Path) -> Option<RunTarget> {
@@ -361,6 +449,12 @@ mod tests {
         write("svc/src/svc/__main__.py", "print('hi')\n");
         write("svc/manage.py", "if __name__ == \"__main__\":\n    pass\n");
         write("loose/script.py", "if __name__ == '__main__':\n    pass\n");
+        write("aspire/Shop.AppHost/Shop.AppHost.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk Name=\"Aspire.AppHost.Sdk\" Version=\"9.5.0\" /><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>");
+        write("single/apphost.cs", "#:sdk Aspire.AppHost.Sdk@13.0.0\n#:package Aspire.Hosting.Redis@13.0.0\n\nvar builder = DistributedApplication.CreateBuilder(args);\n");
+        write("single/apphost.run.json", r#"{"profiles": {"https": {"commandName": "Project"}, "http": {"commandName": "Project"}}}"#);
+        write("scripts/hello.cs", "#!/usr/bin/env dotnet\n// says hello\n#:property LangVersion=latest\nConsole.WriteLine(\"hi\");\n");
+        write("scripts/plain.cs", "namespace X;\n#:not a directive\n");
+        write("src/Api/Tools/Seed.cs", "#:package Bogus@35.0.0\n");
 
         let targets = discover(root.path());
         let cli = targets.iter().find(|t| t.name == "Cli").unwrap();
@@ -372,15 +466,25 @@ mod tests {
         assert_eq!(command("dev"), ("pnpm".to_string(), vec!["run".to_string(), "dev".to_string()]));
         assert_eq!(command("@acme/web › start"), ("yarn".to_string(), vec!["run".to_string(), "start".to_string()]));
         assert_eq!(command("manage.py runserver"), ("python3".to_string(), vec!["-m".to_string(), "manage".to_string(), "runserver".to_string()]));
+        let apphost = targets.iter().find(|t| t.name == "apphost.cs · https").unwrap();
+        assert_eq!(apphost.task().args[1..3], ["--file".to_string(), format!("\"{}\"", root.path().join("single/apphost.cs").display())]);
+        assert_eq!(apphost.task().args[3..], ["--launch-profile".to_string(), "\"https\"".to_string()]);
+        assert!(apphost.watch_task().is_none(), "no hot reload for file-based apps");
+        let shop = targets.iter().find(|t| t.name == "Shop.AppHost").unwrap();
+        assert!(shop.watch_task().is_none(), "nor for app hosts");
         let package = targets.iter().find(|t| t.name == "svc").unwrap();
         assert!(package.dir.ends_with("svc/src"), "runs from the folder that holds the package");
         let found: Vec<_> = targets.into_iter().map(|t| (t.kind, t.name)).collect();
         assert_eq!(
             found,
             [
+                (Kind::Aspire, "Shop.AppHost".to_string()),
+                (Kind::Aspire, "apphost.cs · https".to_string()),
+                (Kind::Aspire, "apphost.cs · http".to_string()),
                 (Kind::DotnetApp, "Api · http".to_string()),
                 (Kind::DotnetApp, "Api · https".to_string()),
                 (Kind::DotnetApp, "Cli".to_string()),
+                (Kind::DotnetApp, "hello.cs".to_string()),
                 (Kind::Cargo, "tool".to_string()),
                 (Kind::Go, "server".to_string()),
                 (Kind::Node, "@acme/web › start".to_string()),
@@ -391,6 +495,42 @@ mod tests {
                 (Kind::DotnetTests, "Lib.Tests".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn finds_app_hosts_where_the_aspire_cli_keeps_them() {
+        let write = |root: &Path, path: &str, text: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let apphost = "#:sdk Aspire.AppHost.Sdk@13.6.0\nvar builder = DistributedApplication.CreateBuilder(args);\n";
+        let names = |root: &Path| discover(root).into_iter().map(|t| (t.kind, t.name)).collect::<Vec<_>>();
+
+        // In the `.aspire` folder.
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), ".aspire/apphost.cs", apphost);
+        write(root.path(), ".hidden/other.cs", "#:property LangVersion=latest\n");
+        assert_eq!(names(root.path()), [(Kind::Aspire, "apphost.cs".to_string())]);
+
+        // Wherever aspire.config.json says, with its profiles.
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), ".infra/host/apphost.cs", apphost);
+        write(
+            root.path(),
+            "aspire.config.json",
+            r#"{"appHost": {"path": ".infra/host/apphost.cs"}, "profiles": {"https": {"applicationUrl": "https://localhost:17000"}, "http": {"applicationUrl": "http://localhost:15000"}}}"#,
+        );
+        assert_eq!(names(root.path()), [(Kind::Aspire, "apphost.cs · https".to_string()), (Kind::Aspire, "apphost.cs · http".to_string())], "in file order");
+        let https = discover(root.path()).into_iter().find(|t| t.name.ends_with("https")).unwrap();
+        let profile = forge_languages::launch_settings::profile(&https.manifest, Some("https")).unwrap();
+        assert!(profile.env.contains(&("ASPNETCORE_URLS".into(), "https://localhost:17000".into())), "the debugger applies it too");
+
+        // The older .aspire/settings.json, pointing at one the walk finds anyway: listed once.
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "src/Shop.AppHost/Shop.AppHost.csproj", "<Project Sdk=\"Aspire.AppHost.Sdk/13.6.0\"></Project>");
+        write(root.path(), ".aspire/settings.json", r#"{"appHostPath": "../src/Shop.AppHost/Shop.AppHost.csproj"}"#);
+        assert_eq!(names(root.path()), [(Kind::Aspire, "Shop.AppHost".to_string())]);
     }
 
     #[test]
