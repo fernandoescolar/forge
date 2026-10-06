@@ -37,13 +37,18 @@ impl Edit {
 
     /// (added, removed) line counts.
     pub fn stats(&self) -> (usize, usize) {
-        let old: Vec<&str> = self.old_text.as_deref().unwrap_or_default().lines().collect();
-        let new: Vec<&str> = self.new_text.lines().collect();
-        // Strip the common prefix/suffix; good enough for a summary badge.
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
-        (new.len() - prefix - suffix, old.len() - prefix - suffix)
+        line_stats(self.old_text.as_deref().unwrap_or_default(), &self.new_text)
     }
+}
+
+/// (added, removed) line counts from `old` to `new`.
+pub fn line_stats(old: &str, new: &str) -> (usize, usize) {
+    let old: Vec<&str> = old.lines().collect();
+    let new: Vec<&str> = new.lines().collect();
+    // Strip the common prefix/suffix; good enough for a summary badge.
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
+    (new.len() - prefix - suffix, old.len() - prefix - suffix)
 }
 
 /// A contiguous change, in line indices of the old and new text.

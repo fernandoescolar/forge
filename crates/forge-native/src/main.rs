@@ -55,7 +55,7 @@ fn main() {
     let data_dir = dirs_data_dir().join("Forge");
     paths::set_custom_data_dir(&data_dir.to_string_lossy());
 
-    let paths = startup_paths(std::env::args().skip(1), std::env::current_dir().ok());
+    let paths = startup_paths(std::env::args().skip(1));
 
     let app = Application::with_platform(gpui_platform::current_platform(false)).with_assets(branding::ForgeAssets);
     let app_db = db::AppDatabase::new();
@@ -258,15 +258,12 @@ async fn restore_last_session(app_state: &Arc<AppState>, cx: &mut gpui::AsyncApp
     restored
 }
 
-/// `forge [PATH...]`: folders become worktrees, files open in editors. With no paths, a
-/// terminal launch opens the current directory; a Finder launch (cwd `/`) opens an empty
-/// window. macOS may add a `-psn_…` argument to GUI launches; it is ignored.
-fn startup_paths(args: impl Iterator<Item = String>, cwd: Option<PathBuf>) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).collect();
-    if paths.is_empty() {
-        paths.extend(cwd.filter(|d| d.as_os_str() != "/"));
-    }
-    paths.into_iter().map(|p| p.canonicalize().unwrap_or(p)).collect()
+/// `forge [PATH...]`: folders become worktrees, files open in editors. With no paths (a
+/// Finder or Dock launch, or `forge` alone in a terminal) nothing opens beyond the windows
+/// of the last session; `forge .` opens the current directory. macOS may add a `-psn_…`
+/// argument to GUI launches; it is ignored.
+fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
+    args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).map(|p| p.canonicalize().unwrap_or(p)).collect()
 }
 
 fn dirs_data_dir() -> PathBuf {
@@ -409,12 +406,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_paths_handle_terminal_and_finder_launches() {
+    fn startup_paths_only_open_what_is_asked() {
         let args = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter();
-        assert_eq!(startup_paths(args(&[]), Some("/".into())), Vec::<PathBuf>::new(), "Finder launch");
-        assert_eq!(startup_paths(args(&["-psn_0_12345"]), Some("/".into())), Vec::<PathBuf>::new());
-        let tmp = std::env::temp_dir().canonicalize().unwrap();
-        assert_eq!(startup_paths(args(&[]), Some(tmp.clone())), vec![tmp.clone()], "terminal launch");
-        assert_eq!(startup_paths(args(&["/nonexistent/x"]), None), vec![PathBuf::from("/nonexistent/x")]);
+        assert_eq!(startup_paths(args(&[])), Vec::<PathBuf>::new(), "no paths: just the last session");
+        assert_eq!(startup_paths(args(&["-psn_0_12345"])), Vec::<PathBuf>::new(), "Finder launch");
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(startup_paths(args(&["."])), vec![cwd], "`forge .`: the current directory");
+        assert_eq!(startup_paths(args(&["/nonexistent/x"])), vec![PathBuf::from("/nonexistent/x")]);
     }
 }

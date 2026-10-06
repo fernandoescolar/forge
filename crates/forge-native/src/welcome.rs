@@ -3,12 +3,12 @@
 use crate::menus;
 use gpui::TaskExt as _;
 use gpui::{
-    Action, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Action, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, WeakEntity, Window, img, px,
 };
 use std::path::{Path, PathBuf};
 use theme::ActiveTheme as _;
-use ui::{Color, Divider, Headline, Icon, IconName, IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex, v_flex};
+use ui::{Color, Divider, Headline, Icon, IconName, IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, WithScrollbar as _, div, h_flex, v_flex};
 use workspace::{
     Workspace,
     item::{Item, ItemEvent},
@@ -21,6 +21,7 @@ pub struct ForgeWelcome {
     workspace: WeakEntity<Workspace>,
     /// Recently opened local projects (`None` while loading).
     recent: Option<Vec<Recent>>,
+    scroll: ScrollHandle,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +74,7 @@ impl ForgeWelcome {
             .ok();
         })
         .detach();
-        Self { focus_handle: cx.focus_handle(), workspace: workspace.weak_handle(), recent: None }
+        Self { focus_handle: cx.focus_handle(), workspace: workspace.weak_handle(), recent: None, scroll: ScrollHandle::new() }
     }
 
     /// Opening a project looks at every item of the workspace (for unsaved changes), this
@@ -221,7 +222,7 @@ impl Render for ForgeWelcome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
         let focus = self.focus_handle.clone();
-        let mut column = v_flex().id("forge-welcome").max_w(px(520.)).w_full().gap_6().p_8().overflow_y_scroll().child(
+        let mut column = v_flex().max_w(px(520.)).w_full().gap_6().p_8().child(
             h_flex()
                 .gap_4()
                 .child(img("images/forge_logo.svg").size(px(64.)))
@@ -255,15 +256,21 @@ impl Render for ForgeWelcome {
             }
             column = column.child(list);
         }
-        let _ = window;
-        h_flex()
+        // The whole page scrolls (scrollbar at its edge); the column stays centred while it fits.
+        v_flex()
             .key_context("ForgeWelcome")
             .track_focus(&self.focus_handle)
             .size_full()
-            .justify_center()
-            .items_center()
             .bg(colors.editor_background)
-            .child(column)
+            .child(
+                div()
+                    .id("forge-welcome")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(h_flex().w_full().min_h_full().justify_center().items_center().child(column)),
+            )
+            .vertical_scrollbar_for(&self.scroll, window, cx)
     }
 }
 

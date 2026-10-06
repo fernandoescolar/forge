@@ -387,6 +387,8 @@ impl Surface {
             .indent_step_size(px(12.))
             .spacing(ui::ListItemSpacing::Dense)
             .toggle(expanded)
+            // Zed shows an open node's chevron only on hover; a tree reads better with it always.
+            .always_show_disclosure_icon(true)
             .on_toggle(move |_, _, cx| on_toggle(cx))
             .toggle_state(selected)
             .start_slot::<AnyElement>(match (loading, icon) {

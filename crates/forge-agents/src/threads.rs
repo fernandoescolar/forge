@@ -13,14 +13,14 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::TaskExt as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight, Global, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
-    Task, actions, div, px, relative,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    FollowMode, ListAlignment, ListState, Task, actions, div, list, px, relative,
 };
 use std::rc::Rc;
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu, Disableable as _, Icon, IconButton, IconName,
-    IconSize, Label, LabelCommon as _, LabelSize, PopoverMenu, Toggleable as _, Tooltip, h_flex, v_flex,
+    IconSize, Label, LabelCommon as _, LabelSize, PopoverMenu, Toggleable as _, Tooltip, WithScrollbar as _, h_flex, v_flex,
 };
 use workspace::{
     Workspace,
@@ -276,7 +276,10 @@ pub struct ThreadView {
     thread: Entity<Thread>,
     workspace: WeakEntity<Workspace>,
     input: Entity<Editor>,
-    scroll: ScrollHandle,
+    /// What the active-file chip showed last: repaint only when it changes.
+    active_shown: Option<(std::path::PathBuf, Option<std::ops::Range<u32>>)>,
+    /// The conversation, a row per turn (see `turns::render_row`).
+    list: ListState,
     focus_handle: FocusHandle,
     include_active: bool,
     /// Images pasted or dropped in the composer, sent with the next message.
@@ -319,17 +322,33 @@ impl ThreadView {
             editor.set_completion_provider(Some(Rc::new(FileMentions::new(project.downgrade()).with_commands(thread.downgrade()))));
             editor
         });
-        let mut subscriptions = vec![cx.subscribe(&input, |_, _, _: &EditorEvent, cx| cx.notify())];
+        // The input repaints itself (and so this view) as you type; nothing else to do here.
+        let mut subscriptions = vec![cx.subscribe(&input, |_, _, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Focused | EditorEvent::Blurred) {
+                cx.notify();
+            }
+        })];
         if let Some(ws) = workspace.weak_handle().upgrade() {
             // Keep the active-file chip current.
-            subscriptions.push(cx.observe(&ws, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.observe(&ws, |this: &mut Self, ws, cx| {
+                let shown = active_context(ws.read(cx), cx).map(|a| (a.path, a.selection.map(|(lines, _)| lines)));
+                if shown != this.active_shown {
+                    this.active_shown = shown;
+                    cx.notify();
+                }
+            }));
         }
         let thread_subscription = Self::subscribe_thread(&thread, window, cx);
         Self {
             thread,
             workspace: workspace.weak_handle(),
             input,
-            scroll: ScrollHandle::new(),
+            active_shown: None,
+            list: {
+                let list = ListState::new(0, ListAlignment::Top, px(1024.));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
             focus_handle: cx.focus_handle(),
             include_active: true,
             images: Vec::new(),
@@ -352,7 +371,8 @@ impl ThreadView {
                 let count = thread.read(cx).entries.len();
                 if count != this.seen_entries {
                     this.seen_entries = count;
-                    this.scroll.scroll_to_bottom();
+                    this.sync_list(cx);
+                    this.list.scroll_to_end();
                 }
                 this.sync_follow(window, cx);
                 this.tick_while_working(cx);
@@ -420,6 +440,27 @@ impl ThreadView {
         self.open_diffs(baselines, None, title, window, cx);
     }
 
+    /// Rolls back the turn that started at the message `user_ix` (only `path` if given),
+    /// asking first when a later turn changed those files again.
+    fn undo_turn(&mut self, user_ix: usize, path: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let later = self.thread.read(cx).later_turns_touching(user_ix, path.as_deref());
+        if later.is_empty() {
+            self.thread.update(cx, |t, cx| t.undo_turn(user_ix, path, cx));
+            return;
+        }
+        let root = self.thread.read(cx).root().clone();
+        let names: Vec<String> = later.iter().map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().into_owned()).collect();
+        let detail = format!("Later turns changed {} again; undoing this turn loses those changes too.", names.join(", "));
+        let answer = window.prompt(gpui::PromptLevel::Warning, "Undo this turn's changes?", Some(&detail), &["Undo", "Cancel"], cx);
+        let thread = self.thread.downgrade();
+        cx.spawn(async move |_, cx| {
+            if answer.await.ok() == Some(0) {
+                thread.update(cx, |t, cx| t.undo_turn(user_ix, path, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     /// A tab beside the thread (split to the right) with each file against `baseline`.
     fn open_diffs(&mut self, baselines: Vec<(std::path::PathBuf, String)>, focus: Option<std::path::PathBuf>, title: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else { return };
@@ -476,13 +517,14 @@ impl ThreadView {
     /// set: each opens in the review tab (its diff against before the agent), and can be
     /// kept or undone; or all at once.
     fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let changes = self.thread.read(cx).changes.clone();
+        // Not the files' contents: this runs on every repaint, keystrokes included.
+        let changes: Vec<(std::path::PathBuf, bool, (usize, usize))> = self.thread.read(cx).changes.iter().map(|c| (c.path.clone(), c.original.is_none(), c.stats())).collect();
         if changes.is_empty() {
             return None;
         }
         let colors = cx.theme().colors().clone();
         let root = self.thread.read(cx).root().clone();
-        let (added, removed) = changes.iter().map(|c| c.stats()).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
+        let (added, removed) = changes.iter().map(|(_, _, stats)| *stats).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
         let count = changes.len();
         let header = h_flex()
             .id("changes-header")
@@ -529,13 +571,12 @@ impl ThreadView {
             }));
         let mut list = v_flex().id("changes-list").max_h(px(220.)).overflow_y_scroll().py_0p5();
         if self.changes_open {
-            for (ix, change) in changes.iter().enumerate() {
-                let (a, r) = change.stats();
-                let shown = change.path.strip_prefix(&root).unwrap_or(&change.path);
+            for (ix, (path, is_new, (a, r))) in changes.iter().enumerate() {
+                let shown = path.strip_prefix(&root).unwrap_or(path);
                 let name = shown.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let dir = shown.parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty());
-                let (open_path, keep_path, undo_path) = (change.path.clone(), change.path.clone(), change.path.clone());
-                let icon = file_icons::FileIcons::get_icon(&change.path, cx).map(Icon::from_path).unwrap_or_else(|| Icon::new(IconName::File));
+                let (open_path, keep_path, undo_path) = (path.clone(), path.clone(), path.clone());
+                let icon = file_icons::FileIcons::get_icon(path, cx).map(Icon::from_path).unwrap_or_else(|| Icon::new(IconName::File));
                 list = list.child(
                     h_flex()
                         .id(("change-row", ix))
@@ -546,9 +587,9 @@ impl ThreadView {
                         .hover(|el| el.bg(colors.element_hover))
                         .tooltip(Tooltip::text("Open its diff"))
                         .child(icon.size(IconSize::Small).color(Color::Muted))
-                        .child(Label::new(name).size(LabelSize::Small).color(if change.original.is_none() { Color::Created } else { Color::Modified }))
+                        .child(Label::new(name).size(LabelSize::Small).color(if *is_new { Color::Created } else { Color::Modified }))
                         .children(dir.map(|d| div().min_w_0().child(Label::new(d).size(LabelSize::XSmall).color(Color::Muted).truncate())))
-                        .when(change.original.is_none(), |el| el.child(Label::new("new").size(LabelSize::XSmall).color(Color::Created)))
+                        .when(*is_new, |el| el.child(Label::new("new").size(LabelSize::XSmall).color(Color::Created)))
                         .child(Label::new(format!("+{a}")).size(LabelSize::XSmall).color(Color::Created))
                         .child(Label::new(format!("−{r}")).size(LabelSize::XSmall).color(Color::Deleted))
                         .child(div().flex_1())
@@ -561,7 +602,7 @@ impl ThreadView {
                         .child(
                             IconButton::new(("change-undo", ix), IconName::Undo)
                                 .icon_size(IconSize::XSmall)
-                                .tooltip(Tooltip::text(if change.original.is_none() { "Undo: delete the file the agent created" } else { "Undo: back to before the agent" }))
+                                .tooltip(Tooltip::text(if *is_new { "Undo: delete the file the agent created" } else { "Undo: back to before the agent" }))
                                 .on_click(cx.listener(move |this, _, _, cx| this.thread.update(cx, |t, cx| t.undo_changes(Some(undo_path.clone()), cx)))),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| this.open_review(Some(open_path.clone()), window, cx))),
@@ -1380,6 +1421,46 @@ fn render_usage(usage: &crate::thread::Usage, cx: &App) -> Option<AnyElement> {
     Some(div().id("thread-usage").px_1().child(chip).tooltip(Tooltip::text(tooltip)).into_any_element())
 }
 
+impl ThreadView {
+    /// Tells the list how many rows the conversation has now; the latest turn (which
+    /// grows as the agent works) is measured again.
+    fn sync_list(&mut self, cx: &App) {
+        let rows = turns::row_count(&self.thread.read(cx).entries);
+        let old = self.list.item_count();
+        if rows > old && old > 0 {
+            self.list.splice(old - 1..old, rows - old + 1);
+        } else if rows != old {
+            self.list.reset(rows);
+        }
+    }
+
+    /// The conversation, or what to ask when it hasn't started.
+    fn render_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_list(cx);
+        if self.list.item_count() == 0 {
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .gap_1()
+                .pt_16()
+                .px_4()
+                .items_center()
+                .child(Icon::from_path("icons/forge_agents.svg").size(IconSize::Medium).color(Color::Accent))
+                .child(Label::new("What should we work on?").size(LabelSize::Large))
+                .child(Label::new("The agent reads and changes your code right here; you review every change before it is written.").color(Color::Muted))
+                .into_any_element();
+        }
+        let list_state = self.list.clone();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(list(self.list.clone(), cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx))).flex_1().min_h_0().w_full())
+            .vertical_scrollbar_for(&list_state, window, cx)
+            .into_any_element()
+    }
+}
+
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
@@ -1390,40 +1471,7 @@ impl Render for ThreadView {
         let follow = self.render_follow(cx);
 
         let working = self.render_working(cx);
-        let entries = self.render_turns(window, cx);
-        let empty = entries.is_empty();
-
-        let document = div()
-            .id("thread-document")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(
-                h_flex().w_full().justify_center().px_4().child(
-                    // `min_w_0`: in a row, a column otherwise grows to its widest line
-                    // instead of wrapping it.
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .max_w(px(880.))
-                        // Room between turns, so each message and its answer read as one.
-                        .gap_8()
-                        .py_6()
-                        .when(empty, |el| {
-                            el.child(
-                                v_flex()
-                                    .gap_1()
-                                    .pt_16()
-                                    .items_center()
-                                    .child(Icon::from_path("icons/forge_agents.svg").size(IconSize::Medium).color(Color::Accent))
-                                    .child(Label::new("What should we work on?").size(LabelSize::Large))
-                                    .child(Label::new("The agent reads and changes your code right here; you review every change before it is written.").color(Color::Muted)),
-                            )
-                        })
-                        .children(entries),
-                ),
-            );
+        let document = self.render_document(window, cx);
 
         h_flex()
             .key_context("ForgeThread")
@@ -1873,6 +1921,18 @@ mod tests {
         assert_eq!(reopened_thread.read_with(cx, |t, _| t.title()), Some("why does this test fail?".into()));
         let view = reopened;
         draw(&view, cx);
+
+        // Deleting it (once confirmed) closes it and drops it from Earlier for good.
+        panel.update_in(cx, |p, window, cx| p.delete_thread(&reopened_thread, window, cx));
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Delete");
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next().is_none()), "its tab is closed");
+        let saved = panel.update(cx, |p, cx| {
+            p.refresh_saved(cx);
+            p.saved().to_vec()
+        });
+        assert!(saved.is_empty(), "the conversation is deleted, not saved");
     }
 
     /// Permission requests the policy allows are answered for the user (and say so); the
@@ -2111,6 +2171,79 @@ mod tests {
         thread.update(cx, |t, cx| t.restore_checkpoint(first, cx));
         cx.run_until_parked();
         assert_eq!(fs.load("/root/a.txt".as_ref()).await.unwrap(), "v1");
+        assert!(thread.read_with(cx, |t, _| t.changes.is_empty()));
+    }
+
+    /// A turn's summary rolls the turn back, or one of its files: they go back as they were
+    /// before that turn (created files go away), later turns warn first, and the changes
+    /// list follows.
+    #[gpui::test]
+    async fn undoes_a_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+            <dyn fs::Fs>::set_global(params.fs.clone(), cx);
+        });
+        let fs = params.fs.as_fake();
+        fs.insert_tree("/root", json!({ "a.txt": "v1" })).await;
+        let project = Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
+        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
+        let message = |text: &str, cx: &mut VisualTestContext| {
+            thread.update(cx, |t, _| {
+                t.entries.push(Entry::User(text.into(), vec![]));
+                t.begin_checkpoint();
+                t.entries.len() - 1
+            })
+        };
+        let write = |path: &str, old: Option<&str>, new: &str, cx: &mut VisualTestContext| {
+            let record = crate::project_fs::WriteRecord { path: path.into(), old_text: old.map(str::to_string), new_text: new.into() };
+            thread.update(cx, |t, cx| t.record_write(record, cx));
+        };
+        let a = std::path::PathBuf::from("/root/a.txt");
+        let b = std::path::PathBuf::from("/root/b.txt");
+
+        let first = message("one", cx);
+        fs.insert_file("/root/a.txt", b"v2".to_vec()).await;
+        write("/root/a.txt", Some("v1"), "v2", cx);
+        let second = message("two", cx);
+        fs.insert_file("/root/a.txt", b"v3".to_vec()).await;
+        write("/root/a.txt", Some("v2"), "v3", cx);
+        fs.insert_file("/root/b.txt", b"new".to_vec()).await;
+        write("/root/b.txt", None, "new", cx);
+        assert_eq!(thread.read_with(cx, |t, _| t.later_turns_touching(first, None)), vec![a.clone()], "the second turn changed a.txt again");
+        assert!(thread.read_with(cx, |t, _| t.later_turns_touching(second, None)).is_empty());
+
+        // One file of the last turn.
+        thread.update(cx, |t, cx| t.undo_turn(second, Some(b.clone()), cx));
+        cx.run_until_parked();
+        assert!(!fs.is_file(&b).await, "created in the turn: removed");
+        assert_eq!(fs.load(&a).await.unwrap(), "v3", "the rest of the turn stays");
+        assert_eq!(thread.read_with(cx, |t, _| t.turn_at(second).map(|c| c.undone.iter().cloned().collect::<Vec<_>>())), Some(vec![b.clone()]));
+
+        // The rest of it.
+        thread.update(cx, |t, cx| t.undo_turn(second, None, cx));
+        cx.run_until_parked();
+        assert_eq!(fs.load(&a).await.unwrap(), "v2");
+        let changes = thread.read_with(cx, |t, _| t.changes.iter().map(|c| (c.path.clone(), c.original.clone(), c.current.clone())).collect::<Vec<_>>());
+        assert_eq!(changes, vec![(a.clone(), Some("v1".into()), "v2".into())], "a.txt still differs from before the agent");
+        assert!(thread.read_with(cx, |t, _| t.later_turns_touching(first, None)).is_empty(), "the later change is undone already");
+
+        // The first turn, from the view: nothing later to warn about, so no prompt.
+        let view = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| ThreadView::new(ws, thread.clone(), window, cx)));
+        view.update_in(cx, |v, window, cx| v.undo_turn(first, None, window, cx));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(fs.load(&a).await.unwrap(), "v1");
         assert!(thread.read_with(cx, |t, _| t.changes.is_empty()));
     }
 

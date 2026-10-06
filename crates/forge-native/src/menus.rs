@@ -93,7 +93,6 @@ pub fn init(cx: &mut App) {
         gpui::KeyBinding::new("cmd--", DecreaseFontSize, None),
         gpui::KeyBinding::new("cmd-0", ResetFontSize, None),
     ]);
-    cx.on_action(|_: &crate::Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -708,6 +707,7 @@ mod tests {
             forge_output::init(cx);
             debugger_ui::init(cx);
             crate::titlebar::init(cx);
+            crate::windows::init(cx);
         });
         let project = project::Project::test(params.fs.clone(), [], cx).await;
         let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));

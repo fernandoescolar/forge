@@ -1,6 +1,7 @@
-//! Opening windows: File › Open asks for folders or files first and opens them in a new
-//! window; File › New Window opens one with the welcome page, laid out like the window it
-//! was opened from.
+//! Opening and closing windows: File › Open asks for folders or files first and opens them
+//! in a new window; File › New Window opens one with the welcome page, laid out like the
+//! window it was opened from. A closed window leaves the session (it doesn't come back
+//! when Forge starts again); quitting keeps every window open then for next time.
 
 use gpui::TaskExt as _;
 use gpui::{App, Global, PathPromptOptions, Window, WindowHandle};
@@ -22,6 +23,43 @@ pub fn init(cx: &mut App) {
         cx.stop_propagation();
         cx.defer(new_window);
     });
+    // The close button closes the window the way Close Window does (as Zed's own setup
+    // does): unsaved changes are asked about, and the window leaves the session. Without
+    // this, the window just goes and comes back the next time Forge starts.
+    cx.observe_new(|_: &mut MultiWorkspace, window, cx| {
+        let Some(window) = window else { return };
+        let handle = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            handle
+                .update(cx, |mw, cx| {
+                    // It closes once ready; not now.
+                    mw.close_window(&workspace::CloseWindow, window, cx);
+                    false
+                })
+                .unwrap_or(true)
+        });
+    })
+    .detach();
+    cx.on_action(|_: &crate::Quit, cx| quit(cx));
+}
+
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quit: each window is saved as it is (unsaved changes asked about, or kept for next time)
+/// and stays in the session, so they all open again next time; then Forge ends.
+fn quit(cx: &mut App) {
+    use std::sync::atomic::Ordering;
+    if QUITTING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let windows: Vec<WindowHandle<MultiWorkspace>> = cx.windows().into_iter().filter_map(|w| w.downcast::<MultiWorkspace>()).collect();
+    cx.spawn(async move |cx| {
+        if workspace::prepare_windows_to_quit(&windows, cx).await {
+            cx.update(|cx| cx.quit());
+        }
+        QUITTING.store(false, Ordering::Release);
+    })
+    .detach();
 }
 
 /// The frontmost Forge window.
@@ -43,7 +81,8 @@ fn open(cx: &mut App) {
         if let Some(from) = from {
             let empty = from.read_with(cx, |mw, cx| is_empty(mw.workspace().read(cx), cx)).unwrap_or(false);
             if empty {
-                from.update(cx, |_, window, _| window.remove_window()).ok();
+                // Closed, not just removed: it leaves the session too.
+                from.update(cx, |mw, window, cx| mw.close_window(&workspace::CloseWindow, window, cx)).ok();
             }
         }
         anyhow::Ok(())

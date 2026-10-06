@@ -786,7 +786,8 @@ impl SolutionExplorer {
                     .spacing(ListItemSpacing::ExtraDense)
                     .toggle_state(selected)
                     .when(row.expandable, |item| {
-                        item.toggle(Some(row.expanded)).on_toggle(cx.listener(move |this, _, _, cx| {
+                        // Zed shows an open node's chevron only on hover; always, here.
+                        item.toggle(Some(row.expanded)).always_show_disclosure_icon(true).on_toggle(cx.listener(move |this, _, _, cx| {
                             this.toggle(&toggle_id, cx);
                         }))
                     })

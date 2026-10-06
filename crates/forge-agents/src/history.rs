@@ -75,10 +75,14 @@ pub fn title_for(entries: &[RecordEntry]) -> String {
     }
 }
 
+/// Where the session `session_id` of `project_root` is saved.
+pub fn session_file(base: &Path, project_root: &Path, session_id: &str) -> PathBuf {
+    project_dir(base, project_root).join(file_name(session_id))
+}
+
 pub fn save(base: &Path, record: &SessionRecord) -> Result<PathBuf> {
-    let dir = project_dir(base, &record.project_root);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(file_name(&record.session_id));
+    let path = session_file(base, &record.project_root, &record.session_id);
+    std::fs::create_dir_all(path.parent().unwrap_or(base))?;
     // Write atomically so a crash never leaves a truncated file.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(record)?)?;
@@ -164,6 +168,7 @@ mod tests {
         assert_eq!(list(base.path(), p1).len(), 2);
         assert_eq!(list(base.path(), p1)[0].session_id, "s-1");
 
+        assert_eq!(session_file(base.path(), p1, "s/2"), f2);
         delete(&f2).unwrap();
         assert_eq!(list(base.path(), p1).len(), 1);
     }

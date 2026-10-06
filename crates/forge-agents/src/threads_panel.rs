@@ -1,6 +1,7 @@
-//! The Threads dock panel: the workspace's threads and where each stands, the files the
-//! active one touched, the project's saved conversations, and "New thread" with the default
-//! agent or any other.
+//! The Threads dock panel: the workspace's threads and where each stands, the project's
+//! saved conversations, and "New thread" with the default agent or any other. Threads and
+//! saved conversations can be deleted. The files a thread changed are shown in the thread
+//! itself, at the end of each turn.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -136,6 +137,39 @@ impl ThreadsPanel {
         cx.notify();
     }
 
+    /// Closes `thread` and deletes its conversation for good, once the user confirms.
+    pub fn delete_thread(&mut self, thread: &Entity<Thread>, window: &mut Window, cx: &mut Context<Self>) {
+        let title = thread.read(cx).title().unwrap_or_else(|| "New thread".into());
+        let thread = thread.clone();
+        self.confirm_delete(&title, window, cx, move |this, window, cx| {
+            thread.update(cx, |t, cx| t.delete_conversation(cx));
+            this.close_thread(&thread, window, cx);
+        });
+    }
+
+    /// Deletes a saved conversation for good, once the user confirms.
+    pub fn delete_saved(&mut self, summary: &SessionSummary, window: &mut Window, cx: &mut Context<Self>) {
+        let file = summary.file.clone();
+        self.confirm_delete(&summary.title, window, cx, move |this, _, cx| {
+            if let Err(e) = history::delete(&file) {
+                log::error!("{e:#}");
+            }
+            this.refresh_saved(cx);
+            cx.notify();
+        });
+    }
+
+    fn confirm_delete(&self, title: &str, window: &mut Window, cx: &mut Context<Self>, delete: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static) {
+        let detail = format!("“{title}” will be deleted for good: it won't be listed under Earlier. The files the agent changed stay as they are.");
+        let answer = window.prompt(gpui::PromptLevel::Warning, "Delete this thread?", Some(&detail), &["Delete", "Cancel"], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                this.update_in(cx, |this, window, cx| delete(this, window, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     fn new_thread(&self, agent: Option<usize>, window: &mut Window, cx: &mut App) {
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |ws, cx| {
@@ -194,7 +228,6 @@ impl ThreadsPanel {
     fn render_threads(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors().clone();
         let active = self.active_thread(cx);
-        let root = self.root(cx);
         let threads = self.store.read(cx).threads().to_vec();
         if threads.is_empty() {
             return v_flex()
@@ -212,7 +245,6 @@ impl ThreadsPanel {
             let (summary, color) = t.summary();
             let agent = t.agent_label();
             let selected = active.as_ref() == Some(thread);
-            let files = if selected { t.touched_files() } else { Vec::new() };
             let target = thread.clone();
             let workspace = self.workspace.clone();
             list = list.child(
@@ -241,39 +273,28 @@ impl ThreadsPanel {
                             .child(Label::new(format!("{summary} · {agent}")).size(LabelSize::XSmall).color(Color::Muted)),
                     )
                     .child({
+                        let delete = thread.clone();
+                        IconButton::new(("delete-thread", i), IconName::Trash)
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text("Delete thread"))
+                            .visible_on_hover(format!("thread-row-{i}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.delete_thread(&delete, window, cx);
+                            }))
+                    })
+                    .child({
                         let close = thread.clone();
                         IconButton::new(("close-thread", i), IconName::Close)
                             .icon_size(IconSize::XSmall)
                             .tooltip(Tooltip::text("Close thread (it stays under Earlier)"))
                             .visible_on_hover(format!("thread-row-{i}"))
-                            .on_click(cx.listener(move |this, _, window, cx| this.close_thread(&close, window, cx)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_thread(&close, window, cx);
+                            }))
                     }),
             );
-            for (j, (path, added, removed)) in files.into_iter().enumerate() {
-                let shown = root.as_ref().and_then(|r| path.strip_prefix(r).ok()).unwrap_or(&path).to_string_lossy().into_owned();
-                let workspace = self.workspace.clone();
-                list = list.child(
-                    h_flex()
-                        .id(("touched", i * 1000 + j))
-                        .justify_between()
-                        .gap_2()
-                        .pl_6()
-                        .pr_2()
-                        .py_0p5()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|el| el.bg(colors.element_hover))
-                        .tooltip(Tooltip::text(shown.clone()))
-                        .on_click(move |_, window, cx| open_file(&workspace, path.clone(), window, cx))
-                        .child(h_flex().gap_1().min_w_0().child(Icon::new(IconName::File).size(IconSize::XSmall).color(Color::Muted)).child(Label::new(file_name(&shown)).size(LabelSize::XSmall).truncate()))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Label::new(format!("+{added}")).size(LabelSize::XSmall).color(Color::Created))
-                                .child(Label::new(format!("−{removed}")).size(LabelSize::XSmall).color(Color::Deleted)),
-                        ),
-                );
-            }
         }
         list.into_any_element()
     }
@@ -286,31 +307,39 @@ impl ThreadsPanel {
         let now = history::now();
         let mut list = v_flex().gap_0p5().child(div().pt_4().px_2().pb_1().child(Label::new("EARLIER").size(LabelSize::XSmall).color(Color::Muted)));
         for (i, summary) in self.saved.iter().enumerate() {
-            let open = summary.clone();
+            let (open, delete) = (summary.clone(), summary.clone());
             list = list.child(
-                v_flex()
+                h_flex()
                     .id(("saved", i))
+                    .items_start()
+                    .gap_2()
                     .px_2()
                     .py_1()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|el| el.bg(colors.element_hover))
+                    .group(format!("saved-row-{i}"))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_saved(&open, window, cx)))
-                    .child(Label::new(summary.title.clone()).size(LabelSize::Small).color(Color::Muted).truncate())
-                    .child(Label::new(format!("{} · {}", summary.agent_id, history::relative_time(summary.updated_at, now))).size(LabelSize::XSmall).color(Color::Muted)),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Label::new(summary.title.clone()).size(LabelSize::Small).color(Color::Muted).truncate())
+                            .child(Label::new(format!("{} · {}", summary.agent_id, history::relative_time(summary.updated_at, now))).size(LabelSize::XSmall).color(Color::Muted)),
+                    )
+                    .child(
+                        IconButton::new(("delete-saved", i), IconName::Trash)
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text("Delete conversation"))
+                            .visible_on_hover(format!("saved-row-{i}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.delete_saved(&delete, window, cx);
+                            })),
+                    ),
             );
         }
         Some(list.into_any_element())
-    }
-}
-
-pub(crate) fn file_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
-}
-
-pub(crate) fn open_file(workspace: &WeakEntity<Workspace>, path: PathBuf, window: &mut Window, cx: &mut App) {
-    if let Some(workspace) = workspace.upgrade() {
-        workspace.update(cx, |ws, cx| ws.open_abs_path(path, workspace::OpenOptions::default(), window, cx).detach_and_log_err(cx));
     }
 }
 

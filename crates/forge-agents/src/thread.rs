@@ -160,7 +160,7 @@ pub struct ChangedFile {
 impl ChangedFile {
     /// (added, removed) lines against the original.
     pub fn stats(&self) -> (usize, usize) {
-        Edit { path: String::new(), old_text: self.original.clone(), new_text: self.current.clone() }.stats()
+        crate::diff::line_stats(self.original.as_deref().unwrap_or_default(), &self.current)
     }
 }
 
@@ -193,6 +193,8 @@ pub struct Checkpoint {
     /// The files written during this turn only: as they were before it, and after its
     /// latest write.
     pub turn_files: std::collections::BTreeMap<PathBuf, (Option<String>, String)>,
+    /// The turn's files put back as they were before it (from its summary).
+    pub undone: std::collections::BTreeSet<PathBuf>,
     pub started: std::time::Instant,
     /// How long the turn took, once it ended.
     pub duration: Option<std::time::Duration>,
@@ -201,7 +203,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// (added, removed) lines over the turn's files.
     pub fn turn_stats(&self) -> (usize, usize) {
-        self.turn_files.iter().map(|(path, (before, after))| crate::diff::Edit { path: path.to_string_lossy().into_owned(), old_text: before.clone(), new_text: after.clone() }.stats()).fold((0, 0), |(a, r), (x, y)| (a + x, r + y))
+        self.turn_files.values().map(|(before, after)| crate::diff::line_stats(before.as_deref().unwrap_or_default(), after)).fold((0, 0), |(a, r), (x, y)| (a + x, r + y))
     }
 }
 
@@ -1184,6 +1186,24 @@ impl Thread {
         self.changed(cx);
     }
 
+    /// Stops the agent and deletes the saved conversation for good, unlike `disconnect`
+    /// (which saves it).
+    pub fn delete_conversation(&mut self, cx: &mut Context<Self>) {
+        let file = self.session_id().map(|id| history::session_file(&self.history_dir, &self.root, id));
+        if let Some((id, _)) = self.connected.take() {
+            let rt = self.runtime.clone();
+            Tokio::spawn(cx, async move { rt.stop(&id).await }).detach();
+        }
+        self.resume = None;
+        self.status = Status::Disconnected;
+        if let Some(file) = file.filter(|f| f.exists()) {
+            if let Err(e) = history::delete(&file) {
+                log::error!("{e:#}");
+            }
+        }
+        self.changed(cx);
+    }
+
     pub fn delete_session(&mut self, summary: &SessionSummary, cx: &mut Context<Self>) {
         if let Err(e) = history::delete(&summary.file) {
             log::error!("{e:#}");
@@ -1399,7 +1419,7 @@ impl Thread {
 
     /// A checkpoint for the message just added.
     pub(crate) fn begin_checkpoint(&mut self) {
-        self.checkpoints.push(Checkpoint { entry: self.entries.len().saturating_sub(1), files: Default::default(), turn_files: Default::default(), started: std::time::Instant::now(), duration: None });
+        self.checkpoints.push(Checkpoint { entry: self.entries.len().saturating_sub(1), files: Default::default(), turn_files: Default::default(), undone: Default::default(), started: std::time::Instant::now(), duration: None });
     }
 
     /// The turn the message at `entry` started (its checkpoint), files changed or not.
@@ -1568,6 +1588,70 @@ impl Thread {
         self.changes.retain(|c| path.is_some_and(|p| p != c.path));
         self.changes_updated(cx);
         self.changed(cx);
+    }
+
+    /// The files of the turn started by the message at `entry` (`path` alone if given, all
+    /// of them otherwise) that a later turn changed again: undoing this turn loses those
+    /// changes too.
+    pub(crate) fn later_turns_touching(&self, entry: usize, path: Option<&std::path::Path>) -> Vec<PathBuf> {
+        let Some(ix) = self.checkpoints.iter().position(|c| c.entry == entry) else { return vec![] };
+        let turn = &self.checkpoints[ix];
+        let paths: Vec<&PathBuf> = turn.turn_files.keys().filter(|p| !turn.undone.contains(*p) && path.is_none_or(|only| only == p.as_path())).collect();
+        paths.into_iter().filter(|p| self.checkpoints[ix + 1..].iter().any(|later| later.turn_files.contains_key(*p) && !later.undone.contains(*p))).cloned().collect()
+    }
+
+    /// Rolls back the turn started by the message at `entry`: its files (`path` alone if
+    /// given) go back as they were before the turn. The conversation stays.
+    pub(crate) fn undo_turn(&mut self, entry: usize, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.status == Status::Busy {
+            self.system("Stop the agent before undoing a turn.", Color::Warning);
+            self.changed(cx);
+            return;
+        }
+        let Some(turn) = self.checkpoints.iter().find(|c| c.entry == entry) else { return };
+        let files: Vec<(PathBuf, Option<String>)> =
+            turn.turn_files.iter().filter(|(p, _)| !turn.undone.contains(*p) && path.as_ref().is_none_or(|only| only == *p)).map(|(p, (before, _))| (p.clone(), before.clone())).collect();
+        let project = self.project.clone();
+        cx.spawn(async move |this, cx| {
+            let mut restored = Vec::new();
+            let mut failed = Vec::new();
+            for (path, before) in &files {
+                match crate::project_fs::restore(&project, path, before.clone(), cx).await {
+                    Ok(()) => restored.push((path.clone(), before.clone())),
+                    Err(e) => failed.push(format!("{}: {e:#}", path.display())),
+                }
+            }
+            this.update(cx, |this, cx| {
+                let from = this.checkpoints.iter().position(|c| c.entry == entry).unwrap_or(this.checkpoints.len());
+                for (path, before) in &restored {
+                    // This turn and the later ones that changed it again are undone for it.
+                    for turn in &mut this.checkpoints[from..] {
+                        if turn.turn_files.contains_key(path) {
+                            turn.undone.insert(path.clone());
+                        }
+                    }
+                    if let Some(change) = this.changes.iter_mut().find(|c| &c.path == path) {
+                        change.current = before.clone().unwrap_or_default();
+                    }
+                }
+                this.changes.retain(|c| c.original.as_deref() != Some(c.current.as_str()) && !(c.original.is_none() && c.current.is_empty()));
+                let n = restored.len();
+                if n > 0 {
+                    let what = match &restored[..] {
+                        [(path, _)] => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        _ => format!("{n} files"),
+                    };
+                    this.system(format!("Undid this turn's changes to {what}."), Color::Muted);
+                }
+                for f in failed {
+                    this.system(format!("Could not undo {f}"), Color::Error);
+                }
+                this.changes_updated(cx);
+                this.changed(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Puts `path` (all changed files when `None`) back as it was before the agent.

@@ -42,24 +42,57 @@ fn turns(entries: &[Entry]) -> (std::ops::Range<usize>, Vec<std::ops::Range<usiz
     (preamble, turns)
 }
 
+/// A row of the conversation list: an entry before the first message, or a turn (its
+/// entries, and whether it is the latest).
+#[derive(Clone)]
+enum Row {
+    Entry(usize),
+    Turn(std::ops::Range<usize>, bool),
+}
+
+fn rows(entries: &[Entry]) -> Vec<Row> {
+    let (preamble, turns) = turns(entries);
+    let last = turns.len().saturating_sub(1);
+    preamble.map(Row::Entry).chain(turns.into_iter().enumerate().map(|(n, turn)| Row::Turn(turn, n == last))).collect()
+}
+
+/// How many rows the conversation list has.
+pub(super) fn row_count(entries: &[Entry]) -> usize {
+    let (preamble, turns) = turns(entries);
+    preamble.len() + turns.len()
+}
+
 impl ThreadView {
-    /// The whole conversation, turn by turn.
-    pub(super) fn render_turns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let thread = self.thread.read(cx);
-        let (preamble, turns) = turns(&thread.entries);
-        let mut out: Vec<AnyElement> = Vec::new();
-        let handle = self.thread.downgrade();
-        let app: &App = cx;
-        for ix in preamble {
-            out.push(render_entry(thread, &handle, ix, &thread.entries[ix], window, app));
-        }
-        let last_turn = turns.len().saturating_sub(1);
-        let mut rendered = Vec::new();
-        for (n, turn) in turns.iter().enumerate() {
-            rendered.push(self.render_turn(turn.clone(), n == last_turn, window, cx));
-        }
-        out.extend(rendered);
-        out
+    /// One row of the conversation, in the centred column. The list only asks for the
+    /// rows on screen, so a long conversation costs no more to repaint than a short one.
+    pub(super) fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let rows = rows(&self.thread.read(cx).entries);
+        let count = rows.len();
+        let element = match rows.get(ix).cloned() {
+            Some(Row::Entry(entry)) => {
+                let thread = self.thread.read(cx);
+                render_entry(thread, &self.thread.downgrade(), entry, &thread.entries[entry], window, cx)
+            }
+            Some(Row::Turn(turn, is_last)) => self.render_turn(turn, is_last, window, cx),
+            None => return div().into_any_element(),
+        };
+        h_flex()
+            .w_full()
+            .justify_center()
+            .px_4()
+            .child(
+                // `min_w_0`: in a row, a column otherwise grows to its widest line instead
+                // of wrapping it.
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .max_w(px(880.))
+                    .when(ix == 0, |el| el.pt_6())
+                    // Room between turns, so each message and its answer read as one.
+                    .map(|el| if ix + 1 == count { el.pb_6() } else { el.pb_8() })
+                    .child(element),
+            )
+            .into_any_element()
     }
 
     fn render_turn(&mut self, turn: std::ops::Range<usize>, is_last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -67,7 +100,9 @@ impl ThreadView {
         let handle = self.thread.downgrade();
         let user_ix = turn.start;
         let working = is_last && thread.status() == Status::Busy;
-        let checkpoint = thread.turn_at(user_ix).cloned();
+        // Not a clone of the checkpoint: it holds whole files.
+        let timing = thread.turn_at(user_ix).map(|c| (c.started, c.duration));
+        let has_summary = thread.turn_at(user_ix).is_some_and(|c| c.duration.is_some() && !c.turn_files.is_empty());
         let follow_terminal = self.follow_terminal(cx);
         let user = render_entry(thread, &handle, user_ix, &thread.entries[user_ix], window, cx);
 
@@ -114,7 +149,7 @@ impl ThreadView {
         let thread = self.thread.read(cx);
         let state: AnyElement = if working {
             let (activity, waiting) = thread.activity().unwrap_or(("Working".into(), false));
-            let elapsed = checkpoint.as_ref().map(|c| duration(c.started.elapsed())).unwrap_or_default();
+            let elapsed = timing.map(|(started, _)| duration(started.elapsed())).unwrap_or_default();
             h_flex()
                 .gap_1()
                 .min_w_0()
@@ -123,7 +158,7 @@ impl ThreadView {
                 .child(Label::new(elapsed).size(LabelSize::Small).color(Color::Muted))
                 .into_any_element()
         } else {
-            match checkpoint.as_ref().and_then(|c| c.duration) {
+            match timing.and_then(|(_, d)| d) {
                 Some(d) => Label::new(format!("Worked for {}", duration(d))).size(LabelSize::Small).color(Color::Muted).into_any_element(),
                 None => div().into_any_element(),
             }
@@ -134,7 +169,7 @@ impl ThreadView {
             .child(Icon::from_path("icons/forge_agents.svg").size(IconSize::Small).color(Color::Accent))
             .child(Label::new(thread.agent_label()).size(LabelSize::Small).color(Color::Default))
             .child(div().flex_1().min_w_0().child(state));
-        let summary = checkpoint.filter(|c| c.duration.is_some() && !c.turn_files.is_empty()).map(|c| self.render_turn_changes(user_ix, &c, window, cx));
+        let summary = has_summary.then(|| self.render_turn_changes(user_ix, window, cx));
         let has_agent_part = !items.is_empty() || working;
 
         v_flex()
@@ -257,45 +292,66 @@ impl ThreadView {
     }
 
     /// The files a finished turn changed: a line each with its counts, unfolding to its
-    /// diff (from before the turn to after it).
-    fn render_turn_changes(&mut self, user_ix: usize, turn: &crate::thread::Checkpoint, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// diff (from before the turn to after it); the whole turn opens in the review tab
+    /// (Keep / Undo on each change), and the turn or any of its files can be rolled back.
+    fn render_turn_changes(&mut self, user_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let thread = self.thread.read(cx);
+        let Some(turn) = thread.turn_at(user_ix) else { return div().into_any_element() };
         let root = thread.root().clone();
         let languages = thread.languages().clone();
         let colors = cx.theme().colors().clone();
         let (added, removed) = turn.turn_stats();
         let count = turn.turn_files.len();
-        let paths: Vec<PathBuf> = turn.turn_files.keys().cloned().collect();
-        let review_paths = paths.clone();
+        let all_undone = turn.turn_files.keys().all(|p| turn.undone.contains(p));
+        let review_paths: Vec<PathBuf> = turn.turn_files.keys().filter(|p| !turn.undone.contains(*p)).cloned().collect();
         let header = h_flex()
+            .flex_wrap()
             .gap_2()
             .px_3()
             .py_1p5()
-            .child(Icon::new(IconName::FileDiff).size(IconSize::Small).color(Color::Accent))
+            .child(Icon::new(IconName::FileDiff).size(IconSize::Small).color(if all_undone { Color::Muted } else { Color::Accent }))
             .child(Label::new(format!("{count} file{} changed in this turn", if count == 1 { "" } else { "s" })).size(LabelSize::Small))
             .child(Label::new(format!("+{added}")).size(LabelSize::Small).color(Color::Created))
             .child(Label::new(format!("−{removed}")).size(LabelSize::Small).color(Color::Deleted))
             .child(div().flex_1())
-            .child(
-                Button::new(("turn-review", user_ix), "Open diffs")
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Compact)
-                    .start_icon(Icon::new(IconName::Diff).size(IconSize::XSmall))
-                    .tooltip(Tooltip::text("This turn's changes in a tab beside the thread"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_turn_review(user_ix, review_paths.clone(), window, cx))),
-            );
+            .map(|el| {
+                if all_undone {
+                    return el.child(Label::new("Undone").size(LabelSize::Small).color(Color::Muted));
+                }
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(("turn-review", user_ix), "Review")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .start_icon(Icon::new(IconName::Diff).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text("This turn's files in the review tab beside the thread: keep or undo each change"))
+                                .on_click(cx.listener(move |this, _, window, cx| this.open_turn_review(user_ix, review_paths.clone(), window, cx))),
+                        )
+                        .child(
+                            Button::new(("turn-undo", user_ix), "Undo turn")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .start_icon(Icon::new(IconName::Undo).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text("Put this turn's files back as they were before it"))
+                                .on_click(cx.listener(move |this, _, window, cx| this.undo_turn(user_ix, None, window, cx))),
+                        ),
+                )
+            });
         let mut list = v_flex();
         for (n, (path, (before, after))) in turn.turn_files.iter().enumerate() {
             let shown = path.strip_prefix(&root).unwrap_or(path);
             let name = shown.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
             let dir = shown.parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty());
-            let edit = Edit { path: path.to_string_lossy().into_owned(), old_text: before.clone(), new_text: after.clone() };
-            let (a, r) = edit.stats();
+            let (a, r) = crate::diff::line_stats(before.as_deref().unwrap_or_default(), after);
+            let undone = turn.undone.contains(path);
             let key = (user_ix, path.clone());
             let open = self.turn_diffs.contains_key(&key);
             let icon = file_icons::FileIcons::get_icon(path, cx).map(Icon::from_path).unwrap_or_else(|| Icon::new(IconName::File));
-            let (toggle_key, toggle_edit, toggle_languages) = (key.clone(), edit.clone(), languages.clone());
-            let open_path = path.clone();
+            let (toggle_key, toggle_languages) = (key.clone(), languages.clone());
+            let (open_path, undo_path) = (path.clone(), path.clone());
+            let name_color = if undone { Color::Muted } else if before.is_none() { Color::Created } else { Color::Default };
             list = list.child(
                 v_flex()
                     .border_t_1()
@@ -310,9 +366,10 @@ impl ThreadView {
                             .hover(|el| el.bg(colors.element_hover))
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall).color(Color::Muted))
                             .child(icon.size(IconSize::Small).color(Color::Muted))
-                            .child(Label::new(name).size(LabelSize::Small).color(if before.is_none() { Color::Created } else { Color::Default }))
+                            .child(Label::new(name).size(LabelSize::Small).color(name_color).when(undone, |l| l.strikethrough()))
                             .children(dir.map(|d| div().min_w_0().flex_1().child(Label::new(d).size(LabelSize::Small).color(Color::Muted).truncate())))
-                            .when(before.is_none(), |el| el.child(Label::new("new").size(LabelSize::Small).color(Color::Created)))
+                            .when(before.is_none() && !undone, |el| el.child(Label::new("new").size(LabelSize::Small).color(Color::Created)))
+                            .when(undone, |el| el.child(Label::new("undone").size(LabelSize::Small).color(Color::Muted)))
                             .child(Label::new(format!("+{a}")).size(LabelSize::Small).color(Color::Created))
                             .child(Label::new(format!("−{r}")).size(LabelSize::Small).color(Color::Deleted))
                             .child(
@@ -324,10 +381,29 @@ impl ThreadView {
                                         this.open_file(open_path.clone(), window, cx);
                                     })),
                             )
+                            .when(!undone, |el| {
+                                el.child(
+                                    IconButton::new(("turn-file-undo", user_ix * 1000 + n), IconName::Undo)
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(if before.is_none() { "Undo: delete the file this turn created" } else { "Undo: back to before this turn" }))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.undo_turn(user_ix, Some(undo_path.clone()), window, cx);
+                                        })),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if this.turn_diffs.remove(&toggle_key).is_none() {
-                                    let view = DiffView::new(toggle_edit.clone(), toggle_languages.clone(), window, cx);
-                                    this.turn_diffs.insert(toggle_key.clone(), view);
+                                    let (ix, path) = &toggle_key;
+                                    let edit = this.thread.read(cx).turn_at(*ix).and_then(|t| t.turn_files.get(path)).map(|(before, after)| Edit {
+                                        path: path.to_string_lossy().into_owned(),
+                                        old_text: before.clone(),
+                                        new_text: after.clone(),
+                                    });
+                                    if let Some(edit) = edit {
+                                        let view = DiffView::new(edit, toggle_languages.clone(), window, cx);
+                                        this.turn_diffs.insert(toggle_key.clone(), view);
+                                    }
                                 }
                                 cx.notify();
                             })),

@@ -96,10 +96,11 @@ main() {
 write_cli() {
   cat >"$1" <<CLI
 #!/usr/bin/env bash
-# Opens files and folders in Forge: forge [paths…] (the current folder without any).
+# Opens files and folders in Forge: forge [paths…]. Without any, Forge just opens (with the
+# windows of its last session); \`forge .\` opens the current folder.
 set -euo pipefail
 app="$2"
-[ "\$#" -gt 0 ] || set -- .
+[ "\$#" -gt 0 ] || exec open -a "\$app"
 paths=()
 for path in "\$@"; do
   if [ -d "\$path" ]; then
