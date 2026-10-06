@@ -9,6 +9,7 @@ mod config_files;
 mod docks;
 mod external_changes;
 mod menus;
+mod search_bars;
 mod settings_view;
 mod open_editors;
 mod statusbar;
@@ -129,6 +130,7 @@ fn main() {
         go_to_line::init(cx);
         file_finder::init(cx);
         search::init(cx);
+        search_bars::init(cx);
         project_panel::init(cx);
         terminal_view::init(cx);
         dap_adapters::init(cx);

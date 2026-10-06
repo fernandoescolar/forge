@@ -4,6 +4,7 @@ Forge is the opinionated IDE for real-world .NET, Go, Rust and JavaScript develo
 
 - [Install and update](#install-and-update)
 - [Getting started](#getting-started)
+- [Search and replace](#search-and-replace)
 - [Panels and layout](#panels-and-layout)
 - [Settings](#settings) and [colours and fonts](#colours-and-fonts)
 - [Run and debug](#run-and-debug) and the [terminal](#terminal)
@@ -47,9 +48,17 @@ Forge uses the tools you already have, found through your shell's `PATH`:
 ## Getting started
 
 - **Open a folder:** File › Open (⌘O), drop it on the Dock icon, or run `forge <path>` in a terminal. File › *Open Recent…* (⌥⌘O) picks one of your recent projects. Forge reopens the windows and files you had open when you quit.
-- **Find anything:** ⌘P opens files, ⌘⇧P runs any command, ⌘⇧F searches the project.
+- **Find anything:** ⌘P opens files, ⌘⇧P runs any command, ⌘F finds in the open file and ⌘⇧F searches the project (see [Search and replace](#search-and-replace)).
 - **Run and debug:** pick what to run in the title bar, then Run or Debug (see [Run and debug](#run-and-debug)).
 - **Get around:** the status bar shows errors and warnings, what the language servers and agents are doing, the debug session, merge conflicts and your branch's pull request; each one opens what it is about.
+
+## Search and replace
+
+- **In the open file:** ⌘F (Edit › Find) opens the find bar above the editor, with the selection or the word under the cursor as the query. Matches highlight as you type; Enter and ⇧Enter (or ⌘G and ⇧⌘G) go to the next and previous one, ⌥Enter selects them all, and Escape closes the bar. ⌥⌘L limits the search to the selection.
+- **In the whole project:** ⌘⇧F (Edit › Find in Project) opens a search tab. Type the query and press Enter: the results show as excerpts of every file that matches, which you can edit in place. ⌘⇧F again goes back to the query; Escape moves between the query and the results. ⌘⇧J shows the *include* and *exclude* filters (paths or globs such as `src/**/*.cs`, separated by commas); the button next to them also searches files your `.gitignore` leaves out.
+- **Options:** the buttons at the end of the query, or ⌥⌘C *match case*, ⌥⌘W *whole word* and ⌥⌘X *regular expression*. With a regular expression, the replacement can use the groups it captured (`$1`).
+- **Replace:** ⇧⌘H (or Edit › Find and Replace) adds the replacement field. Enter replaces the current match and moves to the next; ⌘Enter replaces them all, in the file or across the project.
+- **Up and Down** in the query go through your earlier searches.
 
 ## Panels and layout
 
