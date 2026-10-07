@@ -50,6 +50,10 @@ pub fn error_message(e: &anyhow::Error) -> String {
             parts.push(t.message().to_string());
             break;
         }
+        if let Some(m) = cause.downcast_ref::<mongodb::error::Error>() {
+            parts.push(mongo_message(m));
+            break;
+        }
         let s = cause.to_string();
         if parts.last().is_some_and(|p| p.contains(&s)) {
             continue;
@@ -57,6 +61,23 @@ pub fn error_message(e: &anyhow::Error) -> String {
         parts.push(s);
     }
     parts.join(": ")
+}
+
+/// The MongoDB driver's errors, without its debugging details.
+fn mongo_message(e: &mongodb::error::Error) -> String {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match e.kind.as_ref() {
+        ErrorKind::Authentication { .. } => "Authentication failed: check the user and password (and which database they belong to)".into(),
+        ErrorKind::Command(c) => c.message.clone(),
+        ErrorKind::Write(WriteFailure::WriteError(w)) => w.message.clone(),
+        ErrorKind::Write(WriteFailure::WriteConcernError(w)) => w.message.clone(),
+        ErrorKind::ServerSelection { message, .. } => {
+            let first = message.split(". Topology").next().unwrap_or(message);
+            format!("Could not reach the server: {first}")
+        }
+        ErrorKind::InvalidArgument { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Database-specific error code (SQLSTATE for sqlx engines, error number for SQL Server).
@@ -67,6 +88,9 @@ pub fn error_code(e: &anyhow::Error) -> Option<String> {
         }
         if let Some(tiberius::error::Error::Server(t)) = cause.downcast_ref::<tiberius::error::Error>() {
             return Some(t.code().to_string());
+        }
+        if let Some(mongodb::error::ErrorKind::Command(c)) = cause.downcast_ref::<mongodb::error::Error>().map(|m| m.kind.as_ref()) {
+            return Some(c.code.to_string());
         }
         None
     })

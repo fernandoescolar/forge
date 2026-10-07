@@ -1,6 +1,7 @@
 //! Request loop and method dispatch.
 
 use crate::engines::{self, ApplyChangesParams, ConnectParams, Engine, FetchTableParams, nonempty};
+use crate::mongo::{self, Mongo};
 use crate::protocol::{Request, RpcError, response};
 use anyhow::Result;
 use serde::Deserialize;
@@ -20,6 +21,8 @@ type ConnectOutcome = Option<Result<(), RpcError>>;
 #[derive(Default)]
 pub struct Server {
     conns: RwLock<HashMap<String, Arc<dyn Engine>>>,
+    /// MongoDB connections: documents, not tables, so not an [`Engine`].
+    mongo: RwLock<HashMap<String, Arc<Mongo>>>,
     inflight: Mutex<HashMap<String, (Id, AbortHandle)>>,
     /// connectionId -> (generation, outcome) for connects that have not finished yet.
     pending_connects: Mutex<HashMap<String, (u64, watch::Receiver<ConnectOutcome>)>>,
@@ -160,7 +163,7 @@ impl Server {
 
     /// Handle one parsed request and return its response line.
     pub async fn handle(self: &Arc<Self>, req: Request, ticket: Option<ConnectTicket>) -> String {
-        let cancel_key = matches!(req.method.as_str(), "query" | "fetchTable")
+        let cancel_key = matches!(req.method.as_str(), "query" | "fetchTable" | "find" | "aggregate")
             .then(|| req.params.get("requestId").and_then(request_key))
             .flatten();
 
@@ -189,8 +192,8 @@ impl Server {
         response(req.id, result)
     }
 
-    /// Look up a connection, waiting for an in-flight `connect` on the same id if there is one.
-    async fn engine(&self, id: &str) -> Result<Arc<dyn Engine>, RpcError> {
+    /// Waits for an in-flight `connect` on `id`, if there is one; its error if it failed.
+    async fn connected(&self, id: &str) -> Result<(), RpcError> {
         let pending = self.pending_connects.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|(_, rx)| rx.clone());
         if let Some(mut rx) = pending {
             // If the connect task died without an answer (Err), fall through to the plain lookup.
@@ -200,6 +203,27 @@ impl Server {
                 return Err(e.clone());
             }
         }
+        Ok(())
+    }
+
+    /// A MongoDB connection, once its `connect` has finished.
+    async fn mongo(&self, id: &str) -> Result<Arc<Mongo>, RpcError> {
+        self.connected(id).await?;
+        self.mongo
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| RpcError::new("not_connected", format!("no MongoDB connection with id \"{id}\"")))
+    }
+
+    fn is_mongo(&self, id: &str) -> bool {
+        self.mongo.read().unwrap_or_else(|e| e.into_inner()).contains_key(id)
+    }
+
+    /// Look up a connection, waiting for an in-flight `connect` on the same id if there is one.
+    async fn engine(&self, id: &str) -> Result<Arc<dyn Engine>, RpcError> {
+        self.connected(id).await?;
         self.conns
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -213,6 +237,49 @@ impl Server {
         for (_, e) in all {
             let _ = tokio::time::timeout(Duration::from_secs(1), e.close()).await;
         }
+        let all: Vec<_> = self.mongo.write().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        for (_, m) in all {
+            let _ = tokio::time::timeout(Duration::from_secs(1), m.close()).await;
+        }
+    }
+
+    /// The MongoDB methods (documents and collections).
+    async fn dispatch_mongo(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "listCollections" => {
+                let p: ConnRef = parse(params)?;
+                let database = p.database.ok_or_else(|| RpcError::new("invalid_params", "missing database"))?;
+                to_json(self.mongo(&p.connection_id).await?.list_collections(&database).await?)
+            }
+            "listIndexes" => {
+                let p: mongo::DocumentParams = parse(params)?;
+                to_json(self.mongo(&p.connection_id).await?.list_indexes(&p.database, &p.collection).await?)
+            }
+            "find" => {
+                let p: mongo::FindParams = parse(params)?;
+                to_json(self.mongo(&p.connection_id).await?.find(&p).await?)
+            }
+            "aggregate" => {
+                let p: mongo::AggregateParams = parse(params)?;
+                to_json(self.mongo(&p.connection_id).await?.aggregate(&p).await?)
+            }
+            "insertDocument" => {
+                let p: mongo::DocumentParams = parse(params)?;
+                let id = self.mongo(&p.connection_id).await?.insert(&p.database, &p.collection, p.document()?).await?;
+                Ok(json!({ "id": id }))
+            }
+            "replaceDocument" => {
+                let p: mongo::DocumentParams = parse(params)?;
+                self.mongo(&p.connection_id).await?.replace(&p.database, &p.collection, p.id()?, p.document()?).await?;
+                Ok(Value::Null)
+            }
+            "deleteDocument" => {
+                let p: mongo::DocumentParams = parse(params)?;
+                self.mongo(&p.connection_id).await?.delete(&p.database, &p.collection, p.id()?).await?;
+                Ok(Value::Null)
+            }
+            other => Err(RpcError::new("unknown_method", format!("unknown method \"{other}\""))),
+        }
     }
 
     async fn dispatch(self: Arc<Self>, method: &str, params: Value, ticket: Option<ConnectTicket>) -> Result<Value, RpcError> {
@@ -221,6 +288,14 @@ impl Server {
             "connect" => {
                 let connected = async {
                     let p: ConnectParams = parse(params)?;
+                    if p.engine == "mongodb" {
+                        let (conn, info) = Mongo::connect(&p).await?;
+                        let old = self.mongo.write().unwrap_or_else(|e| e.into_inner()).insert(p.connection_id.clone(), Arc::new(conn));
+                        if let Some(old) = old {
+                            tokio::spawn(async move { old.close().await });
+                        }
+                        return to_json(info);
+                    }
                     let (engine, info) = engines::connect(&p).await?;
                     let old = self.conns.write().unwrap_or_else(|e| e.into_inner()).insert(p.connection_id.clone(), engine);
                     if let Some(old) = old {
@@ -240,12 +315,21 @@ impl Server {
                 if let Some(old) = old {
                     old.close().await;
                 }
+                let old = self.mongo.write().unwrap_or_else(|e| e.into_inner()).remove(&p.connection_id);
+                if let Some(old) = old {
+                    old.close().await;
+                }
                 Ok(Value::Null)
             }
             "listDatabases" => {
                 let p: ConnRef = parse(params)?;
+                self.connected(&p.connection_id).await?;
+                if self.is_mongo(&p.connection_id) {
+                    return to_json(self.mongo(&p.connection_id).await?.list_databases().await?);
+                }
                 to_json(self.engine(&p.connection_id).await?.list_databases().await?)
             }
+            "listCollections" | "listIndexes" | "find" | "aggregate" | "insertDocument" | "replaceDocument" | "deleteDocument" => self.dispatch_mongo(method, params).await,
             "listSchemas" => {
                 let p: ConnRef = parse(params)?;
                 to_json(self.engine(&p.connection_id).await?.list_schemas(nonempty(p.database.as_deref())).await?)

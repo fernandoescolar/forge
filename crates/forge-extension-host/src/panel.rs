@@ -113,8 +113,21 @@ pub struct DockEntry {
     pub title: Rc<dyn Fn(&App) -> SharedString>,
 }
 
+/// One host serves every window: what extensions open (tabs, files, dialogs) goes to the
+/// window the user is in, so the host follows the window that was activated last.
+pub(crate) fn follow_active_window(host: Entity<ExtensionHost>, window: &mut Window, cx: &mut Context<Workspace>) {
+    cx.observe_window_activation(window, move |workspace, window, cx| {
+        if window.is_window_active() {
+            let (weak, handle) = (workspace.weak_handle(), window.window_handle());
+            host.update(cx, |h, cx| h.set_workspace(weak, handle, cx));
+        }
+    })
+    .detach();
+}
+
 /// Adds the overview panel and every extension slot to `workspace`.
 pub fn add_panels(host: Entity<ExtensionHost>, workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> Vec<DockEntry> {
+    follow_active_window(host.clone(), window, cx);
     let overview = cx.new(|cx| ExtensionsPanel::new(host.clone(), workspace, window, cx));
     workspace.add_panel(overview.clone(), window, cx);
     let mut entries = vec![DockEntry { handle: Arc::new(overview), title: Rc::new(|_| "Extensions".into()) }];

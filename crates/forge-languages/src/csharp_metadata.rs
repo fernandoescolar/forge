@@ -137,7 +137,7 @@ fn load_metadata_source(
     .detach();
 }
 
-fn omnisharp_servers(project: &Entity<Project>, cx: &App) -> Vec<Arc<LanguageServer>> {
+pub(crate) fn omnisharp_servers(project: &Entity<Project>, cx: &App) -> Vec<Arc<LanguageServer>> {
     let project = project.read(cx);
     let lsp_store = project.lsp_store().read(cx);
     project

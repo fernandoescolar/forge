@@ -1,0 +1,25 @@
+diff --git a/crates/editor/src/code_actions.rs b/crates/editor/src/code_actions.rs
+index 2c64b1e..fced235 100644
+--- a/crates/editor/src/code_actions.rs
++++ b/crates/editor/src/code_actions.rs
+@@ -314,6 +314,20 @@ impl Editor {
+         Some((buffer_snapshot.remote_id(), range.start.row))
+     }
+ 
++    /// Adds a source of code actions (shown with the language servers' in the code actions
++    /// menu); one with the same `id` is replaced.
++    pub fn push_code_action_provider(
++        &mut self,
++        provider: Rc<dyn CodeActionProvider>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let id = provider.id();
++        self.code_action_providers.retain(|p| p.id() != id);
++        self.code_action_providers.push(provider);
++        self.refresh_code_actions_for_selection(window, cx);
++    }
++
+     pub fn code_actions_enabled_for_toolbar(&self, cx: &App) -> bool {
+         !self.code_action_providers.is_empty()
+             && EditorSettings::get_global(cx).toolbar.code_actions

@@ -115,6 +115,32 @@ impl SolutionExplorer {
         .detach_and_log_err(cx);
     }
 
+    /// The selected C# project's usings, every file's, into its global usings file; the
+    /// changes open in a tab to review and save.
+    pub(super) fn move_usings_to_global_usings(&mut self, _: &MoveUsingsToGlobalUsings, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project(cx).filter(|p| !p.is_fsharp()) else { return };
+        let Some(workspace) = self.workspace.upgrade() else { return };
+        let dir = project.dir().to_path_buf();
+        let target = dir.join(crate::config::get(cx).global_usings_file);
+        let name = project.path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let task = crate::global_usings::move_usings(workspace.read(cx).project().clone(), None, Some(dir), target.clone(), true, cx);
+        cx.spawn_in(window, async move |_, cx| {
+            let transaction = task.await?;
+            workspace.update_in(cx, |ws, window, cx| {
+                if transaction.0.is_empty() {
+                    struct NothingToMove;
+                    let message = format!("No file of {name} has usings to move.");
+                    ws.show_toast(workspace::Toast::new(workspace::notifications::NotificationId::unique::<NothingToMove>(), message).autohide(), cx);
+                } else {
+                    let file = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    crate::global_usings::open_review(ws, transaction, format!("Usings of {name} → {file}"), window, cx);
+                }
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// The project folder's shell environment (`dotnet` and its tools on `PATH`).
     fn shell_env(&self, dir: &Path, cx: &mut Context<Self>) -> gpui::Task<Vec<(String, String)>> {
         let Some(project) = self.workspace.upgrade().map(|ws| ws.read(cx).project().clone()) else { return gpui::Task::ready(vec![]) };

@@ -79,6 +79,9 @@ actions!(
         ManagePackages,
         /// Opens the selected project's user secrets (`secrets.json`), setting them up first.
         ManageUserSecrets,
+        /// The `using` directives of every C# file of the selected project become global
+        /// usings in its `globalUsingsFile` (dotnet.json).
+        MoveUsingsToGlobalUsings,
         /// `dotnet ef migrations add`, for the selected project.
         AddMigration,
         /// `dotnet ef migrations remove`.
@@ -1003,6 +1006,7 @@ impl Render for SolutionExplorer {
             .on_action(cx.listener(Self::publish))
             .on_action(cx.listener(Self::manage_packages))
             .on_action(cx.listener(Self::manage_user_secrets))
+            .on_action(cx.listener(Self::move_usings_to_global_usings))
             .on_action(cx.listener(Self::add_migration))
             .on_action(cx.listener(Self::remove_migration))
             .on_action(cx.listener(Self::list_migrations))
@@ -1184,6 +1188,52 @@ mod tests {
             p.test(&Test, window, cx);
         });
         cx.run_until_parked();
+    }
+
+    /// A C# project's menu moves the usings of all its files to its global usings file,
+    /// and shows the changes in a tab to review.
+    #[gpui::test]
+    async fn moves_a_projects_usings_to_its_global_usings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let files = [
+            ("App.sln", include_str!("../../../dotnet-model/tests/fixtures/sample.sln")),
+            ("src/App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n"),
+            ("src/App/Program.cs", "using System;\n\nConsole.WriteLine();\n"),
+            ("src/App/Models/User.cs", "using System.Text;\nnamespace App.Models;\n"),
+        ];
+        for (name, text) in files {
+            write(&root, name, text);
+        }
+        let (panel, mut cx) = panel_for(&root, cx).await;
+        let workspace = panel.read_with(&cx, |p, _| p.workspace.upgrade().unwrap());
+        // The buffers come from the project's fs.
+        let fs = workspace.read_with(&cx, |ws, cx| ws.project().read(cx).fs().clone());
+        for (name, text) in files {
+            let path = root.join(name);
+            fs.create_dir(path.parent().unwrap()).await.unwrap();
+            fs.write(&path, text.as_bytes()).await.unwrap();
+        }
+        cx.update(|_, cx| cx.set_global(crate::config::DotnetConfig { global_usings_file: "_Imports.cs".into(), ..Default::default() }));
+        wait_for(&mut cx, &panel, "the solution", |p, _| !p.lines.is_empty()).await;
+
+        let app = root.join("src/App/App.csproj");
+        panel.update_in(&mut cx, |p, window, cx| {
+            p.selected = Some(format!("project:{}", app.display()));
+            p.move_usings_to_global_usings(&MoveUsingsToGlobalUsings, window, cx);
+        });
+        cx.run_until_parked();
+        let review = workspace.read_with(&cx, |ws, cx| ws.active_item(cx).and_then(|i| i.downcast::<Editor>())).expect("a review tab");
+        assert_eq!(review.read_with(&cx, |e, cx| e.buffer().read(cx).title(cx).to_string()), "Usings of App → _Imports.cs");
+        let text = |path: &str, cx: &mut VisualTestContext| {
+            let project = workspace.read_with(cx, |ws, _| ws.project().clone());
+            let open = project.update(cx, |p, cx| p.open_local_buffer(root.join(path), cx));
+            async move { open.await.unwrap() }
+        };
+        let imports = text("src/App/_Imports.cs", &mut cx).await;
+        assert_eq!(imports.read_with(&cx, |b, _| b.text()), "global using System;\nglobal using System.Text;\n");
+        let user = text("src/App/Models/User.cs", &mut cx).await;
+        assert_eq!(user.read_with(&cx, |b, _| b.text()), "namespace App.Models;\n");
     }
 
     #[gpui::test]

@@ -3784,6 +3784,7 @@ dependencies = [
  "streaming-iterator",
  "task",
  "tempfile",
+ "text",
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-c-sharp",

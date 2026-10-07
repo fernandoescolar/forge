@@ -33,6 +33,9 @@ pub struct DotnetConfig {
     pub custom_commands: HashMap<String, Vec<String>>,
     /// How deep to look for solutions under each folder of the workspace.
     pub solution_search_depth: usize,
+    /// The file, relative to each project's folder, that "Move usings to …" turns a file's
+    /// `using` directives into `global using` directives in.
+    pub global_usings_file: String,
     pub nuget: NuGetConfig,
 }
 
@@ -65,6 +68,7 @@ impl Default for DotnetConfig {
             track_active_file: true,
             custom_commands: HashMap::new(),
             solution_search_depth: 4,
+            global_usings_file: "GlobalUsings.cs".into(),
             nuget: NuGetConfig::default(),
         }
     }

@@ -323,8 +323,13 @@ impl TestPanel {
             }
             runner::DebugPlan::Scenario(scenario) => Task::ready(Some(task::DebugScenario { label, ..scenario })),
         };
-        let context = task::TaskContext { cwd: Some(project.dir().to_path_buf()), ..task::TaskContext::default() };
+        // The debug locator runs `dotnet` from Forge itself, so it needs the user's shell
+        // environment rather than the GUI app's minimal one.
+        let dir = project.dir().to_path_buf();
+        let environment = self.project.read(cx).environment().clone();
+        let env = environment.update(cx, |env, cx| env.directory_environment(dir.as_path().into(), cx));
         cx.spawn_in(window, async move |_, cx| {
+            let context = task::TaskContext { cwd: Some(dir), project_env: env.await.unwrap_or_default(), ..task::TaskContext::default() };
             let Some(scenario) = scenario.await else {
                 anyhow::bail!("Forge does not know how to debug the tests of {}", project.name);
             };

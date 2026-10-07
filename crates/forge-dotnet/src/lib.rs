@@ -5,6 +5,7 @@
 pub mod config;
 pub mod explorer;
 mod fetch;
+pub mod global_usings;
 mod language_server_sync;
 pub mod model;
 pub mod nuget_view;
@@ -19,4 +20,5 @@ pub fn init(cx: &mut gpui::App) {
     fetch::init(cx);
     explorer::init(cx);
     project_files::init(cx);
+    global_usings::init(cx);
 }

@@ -239,6 +239,21 @@ impl RunController {
         TaskContext { cwd: Some(target.dir.clone()), ..TaskContext::default() }
     }
 
+    /// A task context for debugging in `dir`, with the user's shell environment: a debug
+    /// locator runs its tools (`dotnet msbuild`) from Forge itself, whose environment is the
+    /// GUI app's minimal one (no `dotnet` on `PATH` when launched from the Dock or Finder).
+    fn debug_context(&self, dir: Option<PathBuf>, cx: &mut App) -> Task<TaskContext> {
+        let environment = self.project.read(cx).environment().clone();
+        let env = dir.clone().map(|dir| environment.update(cx, |env, cx| env.directory_environment(dir.into(), cx)));
+        cx.background_spawn(async move {
+            let project_env = match env {
+                Some(env) => env.await.unwrap_or_default(),
+                None => Default::default(),
+            };
+            TaskContext { cwd: dir, project_env, ..TaskContext::default() }
+        })
+    }
+
     pub fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.selected().cloned() else { return };
         if self.state(cx) != State::Idle {
@@ -383,8 +398,9 @@ impl RunController {
         let scenario = self.project.read(cx).dap_store().update(cx, |store, cx| {
             store.debug_scenario_for_build_task(template, DebugAdapterName(target.kind.debug_adapter().into()), label, cx)
         });
-        let context = Self::task_context(&target);
+        let context = self.debug_context(Some(target.dir.clone()), cx);
         cx.spawn_in(window, async move |_, cx| {
+            let context = context.await;
             let Some(scenario) = scenario.await else {
                 anyhow::bail!("Forge does not know how to debug {}", target.name);
             };
@@ -508,10 +524,11 @@ impl RunController {
                 let scenario = self.project.read(cx).dap_store().update(cx, |store, cx| {
                     store.debug_scenario_for_build_task(template, DebugAdapterName(Kind::Aspire.debug_adapter().into()), label.clone(), cx)
                 });
-                let context = TaskContext { cwd: session.project.parent().map(Path::to_path_buf), ..TaskContext::default() };
+                let context = self.debug_context(session.project.parent().map(Path::to_path_buf), cx);
                 let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
                 let workspace = self.workspace.clone();
                 cx.spawn_in(window, async move |this, cx| {
+                    let context = context.await;
                     let started = match scenario.await {
                         Some(scenario) => workspace.update_in(cx, |workspace, window, cx| {
                             workspace.start_debug_session(scenario, context.into(), None, worktree_id, window, cx);

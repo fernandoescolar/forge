@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from 'react';
 import { forge } from '@forge/api';
 import type { ExtensionContext } from '@forge/api';
-import { onSidecarExit, sql } from './client';
+import { mongo, onSidecarExit, sql } from './client';
 import type { ConnectParams, DbObject, Engine } from './client';
 
 export type ConnectionConfig = {
@@ -17,6 +17,11 @@ export type ConnectionConfig = {
   file?: string;
   ssl?: 'disable' | 'prefer' | 'require';
   trustServerCertificate?: boolean;
+  /**
+   * MongoDB: connect with a connection string (`mongodb+srv://…` for Atlas) instead of host
+   * and port. It may hold the password, so it is kept where passwords are (the keychain).
+   */
+  useUrl?: boolean;
   /** Keep the password in the keychain (else it is asked for on connect). */
   savePassword: boolean;
 };
@@ -47,12 +52,15 @@ export const ENGINES: { value: Engine; label: string; port?: number }[] = [
   { value: 'mariadb', label: 'MariaDB', port: 3306 },
   { value: 'mssql', label: 'SQL Server', port: 1433 },
   { value: 'sqlite', label: 'SQLite' },
+  { value: 'mongodb', label: 'MongoDB', port: 27017 },
 ];
 
 export const engineLabel = (e: Engine) => ENGINES.find((x) => x.value === e)?.label ?? e;
 /** Engines whose databases hold schemas (else databases hold tables, or there is one database). */
 const hasSchemas = (e: Engine) => e === 'postgres' || e === 'mssql';
 const hasDatabases = (e: Engine) => e !== 'sqlite';
+/** Documents in collections, not rows in tables. */
+export const isMongo = (e: Engine | undefined) => e === 'mongodb';
 
 let ctx: ExtensionContext;
 let version = 0;
@@ -129,8 +137,13 @@ export async function storedPassword(id: string): Promise<string | null> {
 
 export function connectParams(config: ConnectionConfig, password: string | null): ConnectParams {
   const { engine, host, port, user, database, file, ssl, trustServerCertificate } = config;
-  return engine === 'sqlite' ? { engine, file } : { engine, host, port, user, password: password ?? undefined, database, ssl, trustServerCertificate };
+  if (engine === 'sqlite') return { engine, file };
+  if (isMongo(engine) && config.useUrl) return { engine, url: password ?? undefined };
+  return { engine, host, port, user, password: password ?? undefined, database, ssl, trustServerCertificate };
 }
+
+/** Whether connecting needs a secret: a password, or MongoDB's connection string. */
+const needsSecret = (c: ConnectionConfig) => c.engine !== 'sqlite' && !(isMongo(c.engine) && !c.useUrl && !c.user);
 
 /** Shows the connection's form to type the password it doesn't save (set by the extension). */
 let askPassword: (id: string) => void = () => {};
@@ -143,7 +156,7 @@ export async function ensureConnected(id: string): Promise<boolean> {
   const config = connection(id);
   if (!config) return false;
   const password = config.engine === 'sqlite' ? null : await storedPassword(id);
-  if (config.engine !== 'sqlite' && password === null && !config.savePassword) {
+  if (needsSecret(config) && password === null && !config.savePassword) {
     askPassword(id);
     return false;
   }
@@ -228,6 +241,18 @@ async function childrenOf(node: TreeNode): Promise<TreeNode[]> {
       return databases.map((name) => ({ key: `${node.key}/db:${name}`, kind: 'database', label: name, connectionId, database: name, schema: null }));
     }
     case 'database': {
+      if (isMongo(config.engine)) {
+        const collections = await mongo.listCollections(connectionId, node.database!);
+        return collections.map((c) => ({
+          key: `${node.key}/${c.name}`,
+          kind: 'object',
+          label: c.name,
+          connectionId,
+          database: node.database,
+          schema: null,
+          object: { name: c.name, schema: null, kind: c.kind === 'view' ? 'view' : 'collection' },
+        }));
+      }
       if (!hasSchemas(config.engine)) return groups(node, node.database, null);
       const schemas = await sql.listSchemas(connectionId, node.database);
       return schemas.map((name) => ({ key: `${node.key}/schema:${name}`, kind: 'schema', label: name, connectionId, database: node.database, schema: name }));

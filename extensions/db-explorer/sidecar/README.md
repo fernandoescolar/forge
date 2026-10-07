@@ -4,7 +4,7 @@ Database sidecar for the DB Explorer extension. Extensions run in QuickJS withou
 extension spawns this binary and talks to it over **stdin/stdout, one JSON object per line (UTF-8)**.
 Logs go to stderr. The process exits when stdin closes.
 
-Engines: PostgreSQL, MySQL/MariaDB, SQLite (bundled, via `sqlx`), and SQL Server (via `tiberius`).
+Engines: PostgreSQL, MySQL/MariaDB, SQLite (bundled, via `sqlx`), SQL Server (via `tiberius`), and MongoDB (the official driver; its own methods, below).
 TLS is rustls only (no OpenSSL), and the binary is self-contained.
 
 ## Building and testing
@@ -19,6 +19,7 @@ FORGE_SQL_TEST_PG='{"host":"localhost","port":5432,"user":"postgres","password":
 FORGE_SQL_TEST_MYSQL='{"host":"localhost","port":3306,"user":"root","password":"pw","database":"forge"}' \
 FORGE_SQL_TEST_MSSQL='{"host":"localhost","port":1433,"user":"sa","password":"pw","trustServerCertificate":true}' \
 cargo test --test servers
+FORGE_SQL_TEST_MONGO='{"host":"localhost","port":27017}' cargo test --test mongo
 ```
 
 ## Wire format
@@ -125,3 +126,21 @@ the full declared type (`character varying(50)`, `decimal(10,2)`, …).
   `BEGIN`) does not carry over between requests. SQLite is the exception, because it uses one
   connection.
 - SQLite `rowsAffected` after DDL comes from `sqlite3_changes()`, which may be stale.
+
+## MongoDB
+
+`connect` with `engine: "mongodb"` takes `host?, port?` (27017), `user?, password?, database?` (users sign in against `admin`), `ssl?` (`require` turns TLS on), `trustServerCertificate?` (with TLS: accept any certificate), or a whole connection string in `url` (`mongodb://…`, `mongodb+srv://…`). `listDatabases` and `disconnect` work as for the other engines; `cancel` stops a `find` or `aggregate` sent with a `requestId`.
+
+Documents, filters, sorts, projections and pipelines travel as **text**: JSON plus the shell's `ObjectId("…")`, `ISODate("…")`, `NumberLong("…")`, `NumberInt(…)`, `NumberDecimal("…")` and `UUID("…")`, and canonical Extended JSON (`{"$timestamp": …}`) for the rest. Documents come back in that form, so saving an edited one keeps its types (an Int64 is written `NumberLong("7")`, a whole Double `3.0`).
+
+| method | params | result |
+|---|---|---|
+| `listCollections` | `connectionId, database` | `[{name, kind: "collection"\|"view"}]` (no `system.*`) |
+| `listIndexes` | `connectionId, database, collection` | `[{name, keys, unique}]` |
+| `find` | `connectionId, database, collection, filter?, sort?, projection?, skip?, limit?, requestId?` | `{documents: [{id, text, fields}], truncated, total, elapsedMs}` |
+| `aggregate` | `connectionId, database, collection, pipeline, maxDocs?` (1000), `requestId?` | the same, `total` null |
+| `insertDocument` | `connectionId, database, collection, document` | `{id}` |
+| `replaceDocument` | `connectionId, database, collection, id, document` (its `_id`, if any, must be `id`) | `null` |
+| `deleteDocument` | `connectionId, database, collection, id` | `null` |
+
+In `documents`, `id` is the `_id` as text (to pass back to `replaceDocument` / `deleteDocument`), `text` the whole document, indented, and `fields` each top-level field in short for a table (strings, numbers and booleans as such; ids and dates as text; `{ 3 fields }`, `[ 2 items ]` for objects and arrays).

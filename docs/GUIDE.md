@@ -141,7 +141,11 @@ The **Solution Explorer** shows `.sln`/`.slnx` solutions as Visual Studio does: 
 
 **User secrets and Entity Framework.** A project's context menu has *Manage User Secrets*, which opens its `secrets.json` (and sets up user secrets the first time). Projects that use Entity Framework Core also have *Add Migration…*, *Update Database*, *Remove Last Migration* and *List Migrations*. They run `dotnet ef` in a terminal, with the app that references the project as the startup project, and offer to install `dotnet-ef` when it is missing.
 
-The **NuGet** tab browses, installs, updates and consolidates packages, including with central package management. In project files, package names complete as you type, and outdated versions are marked; ⌘. updates one.
+**Fix all occurrences.** On a C# warning or suggestion that has a fix, the code actions menu (⌘↩ or ⌘.) also offers *Fix all … in this file*, *in the project* and *in the solution*, as Visual Studio does (for example *Fix all “Unnecessary using directive” (CS8019) in the project App*). OmniSharp computes the fix; the files it changes open in a tab to review before you save them, and ⌘Z undoes them.
+
+**Global usings.** On the `using` lines at the top of a C# file, ⌘↩ offers *Move usings to GlobalUsings.cs*: they become `global using` directives in that file at the root of the project (created when it doesn't exist; ones it already has aren't repeated), and leave the file. *…in every file of* the project does it for all of its files at once, as does *Move Usings to GlobalUsings.cs* in a C# project's context menu in the Solution Explorer. The changed files open in a tab to review before you save them. Usings inside a namespace, after a file-scoped `namespace` or behind `#if` stay, since moving them would change what they mean. The file is `globalUsingsFile` in the .NET settings (`dotnet.json`), relative to the project's folder: `_Imports.cs`, `Properties/Usings.cs`…
+
+The **NuGet** tab browses, installs, updates and consolidates packages, including with central package management. In project files, package names complete as you type, and outdated versions are marked; ⌘↩ (or ⌘.) updates one.
 
 ![The Solution Explorer with a solution of three projects, their dependencies and NuGet packages](images/solution-explorer.jpg)
 
@@ -209,11 +213,12 @@ The response tab shows the status, time, size and headers, then the body (format
 
 ## Database Explorer
 
-The **Databases** panel (View › Panels › Databases; an extension that comes with Forge) browses SQL Server, PostgreSQL, MySQL, MariaDB and SQLite databases. Click **+** to add a connection: pick the database, then the server, user and password (kept in the macOS keychain if you leave *Save password* on), or the SQLite file. *Test* tries it first.
+The **Databases** panel (View › Panels › Databases; an extension that comes with Forge) browses SQL Server, PostgreSQL, MySQL, MariaDB, SQLite and MongoDB databases. Click **+** to add a connection: pick the database, then the server, user and password (kept in the macOS keychain if you leave *Save password* on), or the SQLite file. A MongoDB connection can also be a connection string (`mongodb+srv://…`, as Atlas gives it), kept in the keychain too. *Test* tries it first.
 
 - **Browse.** Expand a connection to see its databases, schemas, tables and views. Right-click for more: connect and disconnect, refresh, edit, duplicate or delete the connection, copy a name or a `SELECT`.
 - **Rows.** Double-click a table or view to open its rows in a tab, a page at a time. Click a column's header to sort by it, type a condition in *WHERE* and press Enter to filter, and move between pages at the bottom.
 - **Edit.** In a table with a primary key, double-click a cell to change it (Enter keeps it, Esc cancels), **+** adds a row and **−** (or Delete) deletes the selected ones. Changes are coloured until you *Save*, which applies them all in one transaction, or *Discard*. Right-click a cell to set it to NULL or copy values. Tables without a primary key are read-only.
+- **MongoDB.** Expand a connection to see its databases and their collections; double-click one to open its documents. *Find* takes a filter, a sort and the fields to show, as JSON (`{ "status": "active" }`, `{ "createdAt": -1 }`), and goes a page at a time; *Aggregate* runs a pipeline (`[{ "$match": … }, { "$group": … }]`, ⌘Enter). Besides JSON you can write `ObjectId("…")`, `ISODate("2024-05-31")`, `NumberLong("…")`, `NumberInt(…)`, `NumberDecimal("…")` and `UUID("…")`. The table shows each document's top-level fields; select one to see it whole, as text in that same form, edit it and *Save* (it replaces the document; its `_id` can't change). *Insert Document* adds one; the trash button deletes the selected one.
 - **Queries.** *New Query* (the file icon, or right-click › New Query) opens a query tab on the selected connection and database. Write SQL and press ⌘Enter or *Run*: each result appears in its own tab, with what the other statements did under *Messages*. *Cancel* stops a long query. *Database Explorer: Open the Active File (or Selection) in a Query* in the command palette starts one from a `.sql` file.
 
 ![The Databases panel and a query tab with its results](images/database-explorer.jpg)

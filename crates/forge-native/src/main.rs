@@ -318,12 +318,25 @@ fn load_keymap(cx: &mut App) {
         b.set_meta(KeybindSource::Default.meta());
     }
     cx.bind_keys(bindings);
+    bind_forge_keys(cx);
+}
+
+/// Forge's bindings, over Zed's defaults (of two bindings for the same place, the later wins).
+fn bind_forge_keys(cx: &mut App) {
     cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None), gpui::KeyBinding::new("cmd-,", settings_view::OpenSettings, None)]);
+    // ⌘↩ shows the code actions (Zed: ⌘., kept too), instead of Zed's "new line below".
+    cx.bind_keys([gpui::KeyBinding::new("cmd-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"))]);
     forge_agents::bind_keys(cx);
-    // ⌘. in a project file (no language server there): the package's other versions.
+    // ⌘. / ⌘↩ in a project file (no language server there): the package's other versions.
     for extension in ["csproj", "fsproj", "vbproj", "props", "targets", "proj"] {
-        cx.bind_keys([gpui::KeyBinding::new("cmd-.", forge_dotnet::project_files::ChangePackageVersion, Some(&format!("Editor && extension == {extension}")))]);
+        let context = format!("Editor && extension == {extension}");
+        cx.bind_keys([
+            gpui::KeyBinding::new("cmd-.", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
+            gpui::KeyBinding::new("cmd-enter", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
+        ]);
     }
+    // After the code actions: in a .http file ⌘↩ sends the request.
+    forge_http::bind_keys(cx);
 }
 
 /// Mirrors Zed's `initialize_panels`, restricted to the panels Forge ships.
@@ -404,6 +417,35 @@ fn build_window_options(display_uuid: Option<uuid::Uuid>, cx: &mut App) -> gpui:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⌘↩: code actions in editors, but sending the request in .http files and changing
+    /// the package version in project files; ⌘. still shows code actions.
+    #[gpui::test]
+    fn cmd_enter_opens_the_code_actions(cx: &mut gpui::TestAppContext) {
+        let action_for = |keys: &str, context: &str, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                let stack = [gpui::KeyContext::parse("Workspace").unwrap(), gpui::KeyContext::parse(context).unwrap()];
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &stack);
+                bindings.first().map(|b| b.action().name().to_string())
+            })
+        };
+        cx.update(|cx| {
+            settings::init(cx);
+            // Zed's default keymap, as the app loads it, then Forge's.
+            let default = settings::KeymapFile::load(include_str!("../../../vendor/zed/assets/keymaps/default-macos.json"), cx);
+            // Like the app, it skips bindings to actions of Zed crates Forge doesn't ship.
+            let (settings::KeymapFileLoadResult::Success { key_bindings } | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. }) = default else { panic!("the default keymap parses") };
+            cx.bind_keys(key_bindings);
+            bind_forge_keys(cx);
+        });
+        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
+        assert_eq!(action_for("cmd-.", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
+        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=http", cx).as_deref(), Some("forge_http::SendRequest"));
+        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=csproj", cx).as_deref(), Some("forge_dotnet::ChangePackageVersion"));
+        assert_ne!(action_for("cmd-enter", "Editor mode=single_line", cx).as_deref(), Some("editor::ToggleCodeActions"), "not in single-line inputs");
+    }
 
     #[test]
     fn startup_paths_only_open_what_is_asked() {

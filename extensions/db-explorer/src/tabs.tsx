@@ -1,5 +1,6 @@
 // Tabs the explorer opens in the editor area.
 import { forge } from '@forge/api';
+import { CollectionView } from './collectionView';
 import { ConnectionForm } from './connectionForm';
 import { QueryView } from './queryView';
 import { TableView } from './tableView';
@@ -31,14 +32,25 @@ export function openQuery(connectionId: string, database: string | null, text = 
   });
 }
 
-/** The rows of a table or view. */
+/** The rows of a table or view, or the documents of a MongoDB collection. */
 export function openTable(node: TreeNode) {
   const object = node.object!;
+  if (store.isMongo(store.connection(node.connectionId)?.engine)) {
+    forge.tabs.open({
+      id: `db-explorer.collection:${node.connectionId}:${node.database ?? ''}:${object.name}`,
+      title: object.name,
+      icon: object.kind === 'view' ? 'eye' : 'json',
+      render: () => <CollectionView connectionId={node.connectionId} database={node.database ?? ''} collection={object.name} kind={object.kind === 'view' ? 'view' : 'collection'} />,
+    });
+    return;
+  }
+  const kind = object.kind;
+  if (kind === 'collection') return;
   const id = `db-explorer.table:${node.connectionId}:${node.database ?? ''}:${node.schema ?? ''}:${object.name}`;
   forge.tabs.open({
     id,
     title: node.schema && node.schema !== 'dbo' && node.schema !== 'public' ? `${node.schema}.${object.name}` : object.name,
     icon: object.kind === 'view' ? 'eye' : 'table',
-    render: () => <TableView connectionId={node.connectionId} database={node.database} schema={node.schema} table={object.name} kind={object.kind} />,
+    render: () => <TableView connectionId={node.connectionId} database={node.database} schema={node.schema} table={object.name} kind={kind} />,
   });
 }

@@ -34,7 +34,7 @@ Forge keeps its state in `~/Library/Application Support/Forge`, apart from an in
 | `config/agents.json` | The ACP agents threads talk to, MCP servers and agent permissions |
 | `config/AGENTS.md` | The user's instructions for agents, sent with the first message of every thread |
 | `config/extensions.json` | Extension settings |
-| `config/dotnet.json` | Solution Explorer and NuGet options (`configuration`, `properties`, `itemTypes`, `customCommands`, `nestFiles`, `nuget.includePrerelease`…) |
+| `config/dotnet.json` | Solution Explorer and NuGet options (`configuration`, `properties`, `itemTypes`, `customCommands`, `nestFiles`, `globalUsingsFile`, `nuget.includePrerelease`…) |
 | `agent-sessions/` | Saved agent conversations, per project |
 | `themes/*.json` | Full Zed theme files, for those who prefer them to palettes |
 | `extensions/` | Installed extensions |

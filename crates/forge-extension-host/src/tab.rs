@@ -125,6 +125,94 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// With two windows, what an extension opens goes to the window the user is in (the one
+    /// activated last), not to the one the host was first given.
+    #[gpui::test]
+    async fn tabs_open_in_the_active_window(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            crate::init_for_tests(cx);
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext-windows");
+        std::fs::create_dir_all(ext.join("dist")).unwrap();
+        std::fs::write(ext.join("package.json"), r#"{"name":"ext-windows","forge":{}}"#).unwrap();
+        let code = r#"var __forgeExtension = { activate(ctx) {
+            const f = __forge.modules['@forge/api'].forge;
+            const h = __forge.modules.react.createElement;
+            const api = __forge.modules['@forge/api'];
+            let n = 0;
+            f.commands.register('ready', 'Ready', () => {});
+            f.commands.register('open', 'Open', () => {
+                n += 1;
+                f.tabs.open({ id: 'ext-windows.form' + n, title: 'Form ' + n, render: () => h(api.View, {}) });
+            });
+        } };"#;
+        std::fs::write(ext.join("dist/extension.js"), code).unwrap();
+        let host = cx.update(|cx| ExtensionHost::init(vec![tmp.path().to_path_buf()], cx)).unwrap();
+
+        params.fs.as_fake().insert_tree("/one", serde_json::json!({})).await;
+        params.fs.as_fake().insert_tree("/two", serde_json::json!({})).await;
+        let mut windows = Vec::new();
+        for root in ["/one", "/two"] {
+            let project = project::Project::test(params.fs.clone(), [root.as_ref()], cx).await;
+            let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+            let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+            let vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            windows.push((workspace, vcx));
+        }
+        // As when the panels are added: the host is given each window as it opens, and
+        // follows activations from then on.
+        for (workspace, vcx) in &mut windows {
+            let host = host.clone();
+            workspace.update_in(vcx, |ws, window, cx| {
+                crate::panel::follow_active_window(host.clone(), window, cx);
+                let weak = ws.weak_handle();
+                host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx));
+            });
+        }
+        let ready = |vcx: &mut gpui::VisualTestContext| host.read_with(vcx, |h, _| h.commands.iter().any(|c| c.id == "ready"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(&mut windows[0].1) {
+            assert!(Instant::now() < deadline, "the extension never loaded");
+            windows[0].1.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let tabs = |workspace: &Entity<Workspace>, vcx: &mut gpui::VisualTestContext| workspace.read_with(vcx, |ws, cx| ws.items_of_type::<ExtensionTab>(cx).map(|t| t.read(cx).title.to_string()).collect::<Vec<_>>());
+        // Activates window `ix`, runs the extension's command there, waits for `total` tabs.
+        let open_from = |ix: usize, total: usize, windows: &mut Vec<(Entity<Workspace>, gpui::VisualTestContext)>| {
+            windows[ix].1.update(|window, _| window.activate_window());
+            windows[ix].1.run_until_parked();
+            host.read_with(&windows[ix].1, |h, _| h.run_command("open"));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut opened = 0;
+                for (ws, vcx) in windows.iter_mut() {
+                    vcx.run_until_parked();
+                    opened += tabs(ws, vcx).len();
+                }
+                if opened == total {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the tab never opened");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        // The second window opened last; the user goes back to the first and clicks there.
+        open_from(0, 1, &mut windows);
+        let (one, two) = (windows[0].0.clone(), windows[1].0.clone());
+        assert_eq!(tabs(&one, &mut windows[0].1), ["Form 1"], "in the window the user is in");
+        assert!(tabs(&two, &mut windows[1].1).is_empty());
+
+        open_from(1, 2, &mut windows);
+        assert_eq!(tabs(&two, &mut windows[1].1), ["Form 2"]);
+        assert_eq!(tabs(&one, &mut windows[0].1), ["Form 1"]);
+    }
+
     /// An extension spawns a program and its own sidecar and talks to them, and opens a tab
     /// in the editor area with a data grid, a tree and a select; closing the tab tells it.
     #[gpui::test]

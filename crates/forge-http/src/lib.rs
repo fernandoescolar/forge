@@ -44,12 +44,17 @@ pub struct SendRequest {
 pub const ENV_FILE: &str = "http-client.env.json";
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn init(cx: &mut App) {
-    cx.set_global(HttpState::default());
+/// ⌘↩ sends the request at the cursor. Call after the default keymap: Zed binds ⌘↩ in
+/// every editor too, and of two bindings for the same editor the later one wins.
+pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-enter", SendRequest::default(), Some("Editor && extension == http")),
         gpui::KeyBinding::new("cmd-enter", SendRequest::default(), Some("Editor && extension == rest")),
     ]);
+}
+
+pub fn init(cx: &mut App) {
+    cx.set_global(HttpState::default());
     // The run button on a request line sends it (instead of running a task). Other run
     // buttons go to whoever handled them before.
     let previous = cx.try_global::<editor::RunIndicatorClick>().cloned();

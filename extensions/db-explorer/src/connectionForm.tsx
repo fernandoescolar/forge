@@ -1,5 +1,6 @@
 // Adding or editing a connection: engine, where the server (or SQLite file) is, who to
-// sign in as. The password goes to the keychain when "Save password" is on.
+// sign in as. The password goes to the keychain when "Save password" is on. MongoDB can
+// also take a whole connection string (Atlas gives one), kept in the keychain too.
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { forge, Button, Checkbox, Input, Scroll, Select, Spinner, Text, View } from '@forge/api';
@@ -20,9 +21,15 @@ type Form = {
   ssl: 'disable' | 'prefer' | 'require';
   trustServerCertificate: boolean;
   savePassword: boolean;
+  /** MongoDB: connect with `url` instead of host, port, user and password. */
+  useUrl: boolean;
+  url: string;
 };
 
-const blank: Form = { name: '', engine: 'postgres', host: 'localhost', port: '', user: '', password: '', database: '', file: '', ssl: 'prefer', trustServerCertificate: true, savePassword: true };
+const blank: Form = { name: '', engine: 'postgres', host: 'localhost', port: '', user: '', password: '', database: '', file: '', ssl: 'prefer', trustServerCertificate: true, savePassword: true, useUrl: false, url: '' };
+
+/** `cluster0.abcd.mongodb.net` out of `mongodb+srv://user:pw@cluster0.abcd.mongodb.net/db?…`. */
+const urlHost = (url: string) => url.replace(/^mongodb(\+srv)?:\/\//, '').replace(/^[^@/]*@/, '').split(/[/?,]/)[0];
 
 export function ConnectionForm({ id, message, onDone }: { id: string | null; message?: string; onDone: () => void }) {
   const [form, setForm] = useState<Form>(blank);
@@ -45,35 +52,43 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
         ssl: c.ssl ?? 'prefer',
         trustServerCertificate: c.trustServerCertificate ?? true,
         savePassword: c.savePassword,
+        useUrl: !!c.useUrl,
+        // With a connection string, the keychain holds it instead of a password.
+        url: c.useUrl ? password ?? '' : '',
       }),
     );
   }, [id]);
 
   const set = <K extends keyof Form>(key: K) => (value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
   const sqlite = form.engine === 'sqlite';
+  const mongodb = store.isMongo(form.engine);
+  const withUrl = mongodb && form.useUrl;
+  /** What goes to the keychain: the password, or the connection string. */
+  const secret = sqlite ? null : withUrl ? form.url.trim() : form.password;
   const defaultPort = store.ENGINES.find((e) => e.value === form.engine)?.port;
 
   const config = (): ConnectionConfig => ({
     id: id ?? store.newId(),
-    name: form.name.trim() || (sqlite ? form.file.split('/').pop() ?? 'SQLite' : `${form.database || form.host}`) || 'Connection',
+    name: form.name.trim() || (sqlite ? form.file.split('/').pop() ?? 'SQLite' : withUrl ? urlHost(form.url) : `${form.database || form.host}`) || 'Connection',
     engine: form.engine,
-    host: sqlite ? undefined : form.host.trim() || 'localhost',
-    port: sqlite || !form.port.trim() ? undefined : Number(form.port),
-    user: sqlite ? undefined : form.user.trim() || undefined,
-    database: sqlite ? undefined : form.database.trim() || undefined,
+    host: sqlite || withUrl ? undefined : form.host.trim() || 'localhost',
+    port: sqlite || withUrl || !form.port.trim() ? undefined : Number(form.port),
+    user: sqlite || withUrl ? undefined : form.user.trim() || undefined,
+    database: sqlite || withUrl ? undefined : form.database.trim() || undefined,
     file: sqlite ? form.file.trim() : undefined,
-    ssl: form.engine === 'postgres' || form.engine === 'mysql' || form.engine === 'mariadb' ? form.ssl : undefined,
-    trustServerCertificate: form.engine === 'mssql' ? form.trustServerCertificate : undefined,
+    ssl: form.engine === 'postgres' || form.engine === 'mysql' || form.engine === 'mariadb' || (mongodb && !withUrl) ? form.ssl : undefined,
+    trustServerCertificate: form.engine === 'mssql' || (mongodb && !withUrl && form.ssl === 'require') ? form.trustServerCertificate : undefined,
+    useUrl: withUrl || undefined,
     savePassword: form.savePassword,
   });
 
-  const invalid = sqlite ? !form.file.trim() : !form.host.trim() || (!!form.port.trim() && !/^\d+$/.test(form.port.trim()));
+  const invalid = sqlite ? !form.file.trim() : withUrl ? !/^mongodb(\+srv)?:\/\//.test(form.url.trim()) : !form.host.trim() || (!!form.port.trim() && !/^\d+$/.test(form.port.trim()));
 
   const test = async () => {
     setStatus({ kind: 'busy', text: 'Connecting…' });
     const probe = `test-${Date.now()}`;
     try {
-      const result = await sql.connect(probe, store.connectParams(config(), sqlite ? null : form.password));
+      const result = await sql.connect(probe, store.connectParams(config(), secret));
       await sql.disconnect(probe).catch(() => {});
       setStatus({ kind: 'ok', text: `Connected: ${result.serverVersion}` });
     } catch (e) {
@@ -83,7 +98,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
 
   const save = async (connect: boolean) => {
     const c = config();
-    await store.saveConnection(c, sqlite ? null : form.password);
+    await store.saveConnection(c, secret);
     onDone();
     if (connect) {
       const node = store.visibleRows().find((r) => r.node.key === c.id)?.node;
@@ -111,7 +126,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
         <Text style={{ size: 'lg', weight: 'bold' }}>{id ? 'Edit Connection' : 'New Connection'}</Text>
 
         <Field label="Database">
-          <Select value={form.engine} options={store.ENGINES.map((e) => ({ value: e.value, label: e.label }))} onChange={(engine) => setForm((f) => ({ ...f, engine, port: '' }))} />
+          <Select value={form.engine} options={store.ENGINES.map((e) => ({ value: e.value, label: e.label }))} onChange={(engine) => setForm((f) => ({ ...f, engine, port: '', ssl: store.isMongo(engine) ? 'disable' : f.ssl === 'disable' ? 'prefer' : f.ssl }))} />
         </Field>
         <Field label="Name">
           <Input value={form.name} placeholder="Shown in the Databases panel" onChange={set('name')} autoFocus />
@@ -127,8 +142,23 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
               <Button label="New…" tooltip="Create an empty database file" onClick={create} />
             </View>
           </Field>
+        ) : withUrl ? (
+          <>
+            <Field label="Connect with">
+              <Select value="url" options={[{ value: 'host', label: 'Host and port' }, { value: 'url', label: 'Connection string' }]} onChange={(v) => set('useUrl')(v === 'url')} />
+            </Field>
+            <Field label="Connection string">
+              <Input value={form.url} placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/" onChange={set('url')} onSubmit={() => !invalid && save(true)} />
+            </Field>
+            <Checkbox checked={form.savePassword} label="Save the connection string in the keychain (it may hold the password)" onChange={set('savePassword')} />
+          </>
         ) : (
           <>
+            {mongodb && (
+              <Field label="Connect with">
+                <Select value="host" options={[{ value: 'host', label: 'Host and port' }, { value: 'url', label: 'Connection string' }]} onChange={(v) => set('useUrl')(v === 'url')} />
+              </Field>
+            )}
             <View style={{ direction: 'row', gap: 10 }}>
               <View style={{ grow: true }}>
                 <Field label="Host">
@@ -144,7 +174,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
             <View style={{ direction: 'row', gap: 10 }}>
               <View style={{ grow: true }}>
                 <Field label="User">
-                  <Input value={form.user} placeholder={form.engine === 'mssql' ? 'sa' : form.engine === 'postgres' ? 'postgres' : 'root'} onChange={set('user')} />
+                  <Input value={form.user} placeholder={mongodb ? 'none' : form.engine === 'mssql' ? 'sa' : form.engine === 'postgres' ? 'postgres' : 'root'} onChange={set('user')} />
                 </Field>
               </View>
               <View style={{ grow: true }}>
@@ -155,9 +185,23 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
             </View>
             <Checkbox checked={form.savePassword} label="Save password in the keychain" onChange={set('savePassword')} />
             <Field label="Database (optional)">
-              <Input value={form.database} placeholder={form.engine === 'postgres' ? 'postgres' : form.engine === 'mssql' ? 'master' : ''} onChange={set('database')} />
+              <Input value={form.database} placeholder={form.engine === 'postgres' ? 'postgres' : form.engine === 'mssql' ? 'master' : mongodb ? 'Opened first; users still sign in against admin' : ''} onChange={set('database')} />
             </Field>
-            {form.engine === 'mssql' ? (
+            {mongodb ? (
+              <>
+                <Field label="TLS">
+                  <Select
+                    value={form.ssl === 'require' ? 'require' : 'disable'}
+                    options={[
+                      { value: 'disable', label: 'Off' },
+                      { value: 'require', label: 'On' },
+                    ]}
+                    onChange={set('ssl')}
+                  />
+                </Field>
+                {form.ssl === 'require' && <Checkbox checked={form.trustServerCertificate} label="Accept any server certificate" onChange={set('trustServerCertificate')} />}
+              </>
+            ) : form.engine === 'mssql' ? (
               <Checkbox checked={form.trustServerCertificate} label="Trust the server certificate" onChange={set('trustServerCertificate')} />
             ) : (
               <Field label="SSL">

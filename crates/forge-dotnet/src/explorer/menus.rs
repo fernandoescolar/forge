@@ -22,6 +22,8 @@ impl SolutionExplorer {
             .unwrap_or_default();
         let is_fsharp = project.as_ref().is_some_and(|p| p.is_fsharp());
         let has_clipboard = self.clipboard.is_some();
+        let usings_file = crate::config::get(cx).global_usings_file;
+        let usings_label = format!("Move Usings to {}", std::path::Path::new(&usings_file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(usings_file));
         let kind = kind.clone();
 
         ContextMenu::build(window, cx, move |menu, _, _| {
@@ -113,6 +115,7 @@ impl SolutionExplorer {
                         .action("Add Project Reference…", Box::new(AddProjectReference))
                         .action("Manage NuGet Packages…", Box::new(ManagePackages))
                         .action("Manage User Secrets", Box::new(ManageUserSecrets))
+                        .when(!is_fsharp, |menu| menu.action(usings_label.clone(), Box::new(MoveUsingsToGlobalUsings)))
                         .when(uses_ef, |menu| {
                             menu.separator()
                                 .action("Add Migration…", Box::new(AddMigration))

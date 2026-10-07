@@ -29,6 +29,7 @@ regex = "1.5"
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 smol = "2.0"
 task = { path = "../../vendor/zed/crates/task" }
+text = { path = "../../vendor/zed/crates/text" }
 streaming-iterator = "0.1"
 toml = "0.8"
 tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
@@ -42,3 +43,4 @@ cc = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }

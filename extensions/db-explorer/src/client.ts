@@ -3,7 +3,7 @@
 import { forge } from '@forge/api';
 import type { ChildProcess } from '@forge/api';
 
-export type Engine = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'mssql';
+export type Engine = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'mssql' | 'mongodb';
 export type Cell = string | number | boolean | null;
 
 export type ConnectParams = {
@@ -16,11 +16,13 @@ export type ConnectParams = {
   file?: string;
   ssl?: 'disable' | 'prefer' | 'require';
   trustServerCertificate?: boolean;
+  /** A whole connection string (MongoDB: `mongodb://…`, `mongodb+srv://…`); overrides the rest. */
+  url?: string;
 };
 
 export type ColumnInfo = { name: string; type: string };
 export type ResultSet = { columns: ColumnInfo[]; rows: Cell[][]; truncated: boolean; rowsAffected: number | null };
-export type DbObject = { name: string; schema: string | null; kind: 'table' | 'view' };
+export type DbObject = { name: string; schema: string | null; kind: 'table' | 'view' | 'collection' };
 export type ColumnDetail = { name: string; type: string; nullable: boolean; default: string | null; primaryKey: boolean; autoIncrement: boolean };
 export type TableRef = { connectionId: string; database?: string | null; schema?: string | null; table: string };
 export type Change =
@@ -121,4 +123,25 @@ export const sql = {
   applyChanges: (t: TableRef & { changes: Change[] }) => client.request<{ applied: number }>('applyChanges', t),
   cancel: (id: string) => client.request<{ cancelled: boolean }>('cancel', { requestId: id }),
   stop: () => client.stop(),
+};
+
+// ------------------------------------------------------------------------------ MongoDB
+
+/**
+ * A document found: as text (JSON with `ObjectId("…")`, `ISODate("…")`… so types survive an
+ * edit), its `_id` in the same form (to save or delete it), and its top-level fields in
+ * short, for the table.
+ */
+export type FoundDocument = { id: string | null; text: string; fields: Record<string, Cell> };
+export type Documents = { documents: FoundDocument[]; truncated: boolean; total: number | null; elapsedMs: number };
+export type CollectionRef = { connectionId: string; database: string; collection: string };
+
+export const mongo = {
+  listCollections: (connectionId: string, database: string) => client.request<{ name: string; kind: 'collection' | 'view' }[]>('listCollections', { connectionId, database }),
+  listIndexes: (c: CollectionRef) => client.request<{ name: string; keys: string; unique: boolean }[]>('listIndexes', c),
+  find: (c: CollectionRef & { filter?: string; sort?: string; projection?: string; skip?: number; limit?: number; requestId?: string }) => client.request<Documents>('find', c),
+  aggregate: (c: CollectionRef & { pipeline: string; maxDocs?: number; requestId?: string }) => client.request<Documents>('aggregate', c),
+  insert: (c: CollectionRef, document: string) => client.request<{ id: string }>('insertDocument', { ...c, document }),
+  replace: (c: CollectionRef, id: string, document: string) => client.request<null>('replaceDocument', { ...c, id, document }),
+  remove: (c: CollectionRef, id: string) => client.request<null>('deleteDocument', { ...c, id }),
 };
