@@ -13,21 +13,22 @@
 #
 # Both architectures build on Apple silicon runners (Intel is cross-compiled: the Intel
 # runners take twice as long). A tag can only reuse build caches saved on main, so pushes to
-# main that change Zed or the dependencies build too, without publishing anything, to keep
-# that cache warm: a release then compiles little more than Forge's own crates.
+# main that change Zed or the dependencies (their lock files, Zed, its patches) build too,
+# without publishing anything, to keep that cache warm: a release then compiles little more
+# than Forge's own crates. A push to main whose commit is also tagged for a release skips
+# that: the tag's run builds it.
 name: Release
 
 on:
   push:
     tags: ["v*"]
     branches: [main]
+    # Only for branch pushes: tag pushes always run.
     paths:
-      - Cargo.toml
       - Cargo.lock
       - vendor/**
       - patches/**
-      - extensions/*/sidecar/**
-      - .github/workflows/release.yml
+      - extensions/*/sidecar/Cargo.lock
   workflow_dispatch:
 
 permissions:
@@ -38,7 +39,30 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  # Whether to build: always for a tag or by hand; for a push to main, unless the commit has a
+  # version tag too (pushed with it: its own run builds and publishes it).
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=true
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            tagged="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" 'refs/tags/v*' | awk -v sha="$GITHUB_SHA" '$1 == sha' | head -n 1)"
+            if [ -n "$tagged" ]; then
+              echo "This commit is tagged for a release (${tagged##*/}): that run builds it."
+              build=false
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
