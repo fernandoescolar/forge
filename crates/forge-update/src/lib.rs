@@ -78,11 +78,14 @@ pub struct Release {
     pub notes_url: String,
 }
 
-/// `1.10.0` > `1.9.3`; a missing part counts as 0; a pre-release suffix (`-beta.1`) sorts
-/// before the release.
+/// `1.10.0` > `1.9.3`; a missing part counts as 0; a pre-release suffix (`-rc.1`) sorts
+/// before the release, and suffixes compare as semver says: part by part (split at dots),
+/// numbers as numbers (`rc.10` > `rc.9`), a number before a word, more parts after fewer.
+/// Build metadata (`+…`) doesn't count.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     let parse = |v: &str| {
         let v = v.trim().trim_start_matches('v');
+        let v = v.split_once('+').map_or(v, |(v, _)| v);
         let (core, pre) = v.split_once('-').map(|(c, p)| (c, Some(p))).unwrap_or((v, None));
         let numbers: Vec<u64> = core.split('.').map(|n| n.parse().unwrap_or(0)).collect();
         (numbers, pre.map(str::to_string))
@@ -95,8 +98,31 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
         (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(a), Some(b)) => compare_pre_release(&a, &b),
     })
+}
+
+/// Semver's precedence for pre-release suffixes (`beta.2` < `beta.10` < `rc.1`).
+fn compare_pre_release(a: &str, b: &str) -> Ordering {
+    let (mut a_parts, mut b_parts) = (a.split('.'), b.split('.'));
+    loop {
+        match (a_parts.next(), b_parts.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let order = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
 }
 
 /// The newer release in GitHub's "latest release" JSON, with its asset for `arch`.
@@ -304,6 +330,13 @@ mod tests {
         assert_eq!(compare_versions("1.10.0", "1.9.3"), Ordering::Greater);
         assert_eq!(compare_versions("v0.2", "0.2.0"), Ordering::Equal);
         assert_eq!(compare_versions("0.2.0-beta.1", "0.2.0"), Ordering::Less);
+        // Pre-releases, as semver orders them.
+        assert_eq!(compare_versions("0.0.1-rc.10", "0.0.1-rc.9"), Ordering::Greater, "numbers as numbers");
+        assert_eq!(compare_versions("0.0.1-rc.1", "0.0.1-kappa"), Ordering::Greater, "from the Greek letters to rc");
+        assert_eq!(compare_versions("0.0.1", "0.0.1-rc.3"), Ordering::Greater, "the release after its candidates");
+        assert_eq!(compare_versions("0.0.1-beta.2", "0.0.1-beta"), Ordering::Greater, "more parts after fewer");
+        assert_eq!(compare_versions("0.0.1-1", "0.0.1-alpha"), Ordering::Less, "a number before a word");
+        assert_eq!(compare_versions("0.0.1-rc.1+build.5", "0.0.1-rc.1"), Ordering::Equal, "build metadata doesn't count");
         assert_eq!(compare_versions("0.1.0", "0.2.0"), Ordering::Less);
     }
 
