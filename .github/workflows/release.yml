@@ -103,12 +103,11 @@ jobs:
           identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"')"
           if [ -z "$identity" ]; then
             # Forge's self-signed certificate: trusted for code signing on this runner only, so
-            # codesign takes it (users' Macs don't need to trust it; "Verify the signature"
-            # below checks that).
+            # codesign takes it (users' Macs don't need to trust it: the verify job checks that
+            # on a runner that doesn't).
             /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/certificate.p12" -nokeys -passin "pass:$MACOS_CERTIFICATE_PASSWORD" | /usr/bin/openssl x509 -out "$RUNNER_TEMP/certificate.pem"
             sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$RUNNER_TEMP/certificate.pem"
             identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"[^"]*"' | tr -d '"')"
-            echo "FORGE_SELF_SIGNED=1" >> "$GITHUB_ENV"
           fi
           [ -n "$identity" ] || { echo "::error::MACOS_CERTIFICATE holds no code-signing identity"; exit 1; }
           echo "Signing with: $identity"
@@ -119,22 +118,35 @@ jobs:
           fi
       - name: Build the app
         run: scripts/bundle-macos.sh
-      - name: Verify the signature as a user's Mac will
-        if: env.FORGE_SELF_SIGNED == '1'
-        # Users' Macs don't trust Forge's own certificate: the install script and the updater
-        # check the signature without that trust, so check it that way here too.
-        run: |
-          sudo security remove-trusted-cert -d "$RUNNER_TEMP/certificate.pem"
-          codesign --verify --deep --strict --verbose=2 dist/Forge.app
-          codesign -d -r- dist/Forge.app
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: forge-${{ matrix.target }}
           path: dist/Forge-*.zip
 
-  publish:
+  # The zips as a user's Mac gets them: on a fresh runner that has never seen (or trusted) the
+  # signing certificate, unpacked and checked the way scripts/install.sh and forge-update do.
+  verify:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-${{ matrix.target }}
+          path: dist
+      - name: Verify the signature as a user's Mac will
+        run: |
+          zip="$(ls dist/Forge-*.zip)"
+          ditto -x -k "$zip" unpacked
+          codesign --verify --deep --strict --verbose=2 unpacked/Forge.app
+          codesign -d -r- unpacked/Forge.app
+
+  publish:
+    needs: [build, verify]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
