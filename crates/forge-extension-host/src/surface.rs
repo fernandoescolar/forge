@@ -17,7 +17,13 @@ use gpui::{
     anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, ops::Range, str::FromStr as _};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    ops::Range,
+    rc::Rc,
+    str::FromStr as _,
+};
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle, Checkbox, Clickable as _, Color, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, Disableable as _, Divider, Icon, IconName, IconSize,
@@ -51,6 +57,14 @@ struct InputState {
     editor: Entity<Editor>,
     /// `(multiline, password)` it was created for; a change recreates it.
     kind: (bool, bool),
+    /// The language its text is highlighted as (Zed's name: "JSON", "SQL"…), once set.
+    language: Option<String>,
+    /// The extension's value at the last sync: the text changes only when that does. Shared
+    /// with the editor subscription: text equal to it is not news to the extension.
+    value: Rc<RefCell<String>>,
+    /// What was typed and sent to the extension (`onChange`) and not yet echoed back as
+    /// its value: an echo is not a change to apply. Shared with the editor subscription.
+    sent: Rc<RefCell<VecDeque<String>>>,
     _subscription: Subscription,
 }
 
@@ -90,20 +104,35 @@ impl Surface {
         Self { host, panel, fill, focus_handle: cx.focus_handle(), inputs: HashMap::new(), grids: HashMap::new(), menu: None, _subscription: subscription }
     }
 
+    /// The editors behind the inputs, in the order of their nodes.
+    #[cfg(test)]
+    pub(crate) fn input_editors(&self) -> Vec<Entity<Editor>> {
+        let mut inputs: Vec<_> = self.inputs.iter().collect();
+        inputs.sort_by_key(|(id, _)| **id);
+        inputs.into_iter().map(|(_, i)| i.editor.clone()).collect()
+    }
+
+    /// The language each input's text is highlighted as, by input.
+    #[cfg(test)]
+    pub(crate) fn input_languages(&self, cx: &App) -> Vec<Option<String>> {
+        self.inputs.values().map(|i| i.editor.read(cx).buffer().read(cx).as_singleton().and_then(|b| b.read(cx).language().map(|l| l.name().to_string()))).collect()
+    }
+
     fn tree<'a>(&self, cx: &'a App) -> Option<&'a Tree> {
         self.host.read(cx).trees.get(&self.panel)
     }
 
     /// Creates or updates the entities behind `input` and `grid` nodes before rendering.
-    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (inputs, grids) = {
             let Some(tree) = self.tree(cx) else { return };
-            let inputs: Vec<(NodeId, String, String, bool, bool, bool)> = collect(tree, |n| is(n, "input"))
+            let inputs: Vec<(NodeId, String, String, bool, bool, bool, Option<String>)> = collect(tree, |n| is(n, "input"))
                 .into_iter()
                 .map(|id| {
                     let n = tree.get(id).unwrap();
                     let flag = |k: &str| n.prop(k).and_then(Value::as_bool).unwrap_or(false);
-                    (id, n.str_prop("value").unwrap_or_default().to_string(), n.str_prop("placeholder").unwrap_or_default().to_string(), flag("multiline"), flag("password"), flag("autoFocus"))
+                    let language = n.str_prop("language").filter(|l| !l.is_empty()).map(str::to_string);
+                    (id, n.str_prop("value").unwrap_or_default().to_string(), n.str_prop("placeholder").unwrap_or_default().to_string(), flag("multiline"), flag("password"), flag("autoFocus"), language)
                 })
                 .collect();
             let grids: Vec<(NodeId, Vec<(String, Option<f64>)>)> = collect(tree, |n| is(n, "grid"))
@@ -118,7 +147,7 @@ impl Surface {
         };
 
         self.inputs.retain(|id, _| inputs.iter().any(|(w, ..)| w == id));
-        for (id, value, placeholder, multiline, password, auto_focus) in inputs {
+        for (id, value, placeholder, multiline, password, auto_focus, language) in inputs {
             if self.inputs.get(&id).is_some_and(|s| s.kind != (multiline, password)) {
                 self.inputs.remove(&id);
             }
@@ -132,20 +161,63 @@ impl Surface {
                     editor
                 });
                 let host = self.host.clone();
+                let sent: Rc<RefCell<VecDeque<String>>> = Rc::default();
+                let sent_by_editor = sent.clone();
+                let known: Rc<RefCell<String>> = Rc::new(RefCell::new(value.clone()));
+                let known_by_editor = known.clone();
                 let subscription = cx.subscribe(&editor, move |_, editor, event: &EditorEvent, cx| {
                     if matches!(event, EditorEvent::Edited { .. }) {
                         let text = editor.read(cx).text(cx);
+                        // The text the extension set (or already has) is not a change to report,
+                        // as in React: setting `value` doesn't call `onChange`. Reporting it
+                        // would bounce values back and forth with late echoes.
+                        if *known_by_editor.borrow() == text {
+                            return;
+                        }
+                        let mut sent = sent_by_editor.borrow_mut();
+                        sent.push_back(text.clone());
+                        if sent.len() > 64 {
+                            sent.pop_front();
+                        }
+                        drop(sent);
                         host.read(cx).dispatch(id, "onChange", json!(text));
                     }
                 });
-                self.inputs.insert(id, InputState { editor, kind: (multiline, password), _subscription: subscription });
+                editor.update(cx, |e, cx| e.set_text(value.as_str(), window, cx));
+                sent.borrow_mut().clear();
+                self.inputs.insert(id, InputState { editor, kind: (multiline, password), language: None, value: known, sent, _subscription: subscription });
             }
-            let editor = self.inputs[&id].editor.clone();
+            if self.inputs[&id].language != language {
+                self.inputs.get_mut(&id).unwrap().language = language.clone();
+                set_language(&self.inputs[&id].editor, language, cx);
+            }
+            // Controlled input: the extension's value replaces the text when the extension
+            // changes it (clearing after a submit, loading a record), not when it merely
+            // hasn't caught up with what is being typed: it runs on its own thread, and a
+            // redraw before it answers would otherwise undo the keys.
+            let state = self.inputs.get_mut(&id).unwrap();
+            let changed = *state.value.borrow() != value;
+            let echo = changed && {
+                let mut sent = state.sent.borrow_mut();
+                match sent.iter().position(|text| *text == value) {
+                    Some(at) => {
+                        sent.drain(..=at);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            *state.value.borrow_mut() = value.clone();
+            let editor = state.editor.clone();
+            let sent = state.sent.clone();
             editor.update(cx, |e, cx| {
-                // Controlled input: adopt the extension's value unless the user is typing
-                // (clearing is always applied, e.g. after submit).
-                if e.text(cx) != value && (value.is_empty() || !e.focus_handle(cx).is_focused(window)) {
+                if changed && !echo && e.text(cx) != value {
                     e.set_text(value.as_str(), window, cx);
+                    // What was typed before is overwritten: its echoes are no longer ours.
+                    sent.borrow_mut().clear();
+                } else if !changed && e.text(cx) == value {
+                    // Caught up: nothing typed is waiting for its echo.
+                    sent.borrow_mut().clear();
                 }
                 e.set_placeholder_text(&placeholder, window, cx);
             });
@@ -451,8 +523,11 @@ impl Surface {
             .empty_table_callback(move |_, _| v_flex().p_4().child(Label::new(empty.clone()).color(Color::Muted)).into_any_element());
 
         let focus = state.interaction.read(cx).focus_handle.clone();
+        let panel = self.panel.clone();
         styled(div(), style, cx)
             .id(self.element_id(id))
+            // Tests measure the grid (it must get room to show its rows).
+            .debug_selector(move || format!("forge-grid-{panel}-{id}"))
             .key_context("ForgeGrid")
             .track_focus(&focus)
             .on_action(cx.listener(move |this, _: &GridCopy, _, cx| this.copy_rows(id, cx)))
@@ -842,6 +917,22 @@ fn token_color(token: &str, cx: &App) -> Option<Hsla> {
 }
 
 /// Applies the `Style` subset from packages/forge-api/src/index.ts.
+/// Highlights `editor`'s text as `language` (Zed's name for it), or as plain text.
+fn set_language(editor: &Entity<Editor>, language: Option<String>, cx: &mut App) {
+    let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton() else { return };
+    let Some(name) = language else {
+        buffer.update(cx, |b, cx| b.set_language(None, cx));
+        return;
+    };
+    let Some(registry) = workspace::AppState::try_global(cx).map(|state| state.languages.clone()) else { return };
+    let load = registry.language_for_name(&name);
+    cx.spawn(async move |cx| match load.await {
+        Ok(language) => buffer.update(cx, |b, cx| b.set_language(Some(language), cx)),
+        Err(e) => log::warn!("an input asked for the language {name}: {e:#}"),
+    })
+    .detach();
+}
+
 pub(crate) fn styled<E: gpui::Styled>(el: E, style: &Value, cx: &App) -> E {
     let num = |k: &str| style.get(k).and_then(Value::as_f64).map(|v| px(v as f32));
     let s = |k: &str| style.get(k).and_then(Value::as_str);

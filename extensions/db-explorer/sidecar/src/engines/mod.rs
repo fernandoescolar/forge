@@ -120,6 +120,11 @@ pub struct ConnectParams {
     pub ssl: Option<String>,
     pub trust_server_certificate: Option<bool>,
     pub url: Option<String>,
+    /// Redis Sentinel: the sentinels (`host:port`, comma-separated), the name of the master
+    /// they watch, and the sentinels' own password if they have one.
+    pub sentinels: Option<String>,
+    pub master_name: Option<String>,
+    pub sentinel_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

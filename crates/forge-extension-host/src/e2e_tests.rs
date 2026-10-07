@@ -246,6 +246,19 @@ async fn database_explorer_mongodb_end_to_end(cx: &mut gpui::TestAppContext) {
         call(3, "insertDocument", with(r#"{ "_id": ObjectId("65f1c0ffee0000000000aaaa"), "name": "Ada", "born": ISODate("1815-12-10") }"#));
         call(4, "insertDocument", with(r#"{ "name": "Grace", "langs": ["COBOL"] }"#));
         call(5, "insertDocument", with(r#"{ "name": "Linus", "score": NumberLong("7") }"#));
+        // And 25 in another collection, for paging.
+        let many = json!({ "connectionId": "seed", "database": "forge_e2e", "collection": "many", "limit": 1000 });
+        let old = call(6, "find", many.clone());
+        for (i, d) in old["result"]["documents"].as_array().unwrap().iter().enumerate() {
+            let mut v = many.clone();
+            v["id"] = d["id"].clone();
+            call(100 + i as u64, "deleteDocument", v);
+        }
+        for i in 0..25 {
+            let mut v = many.clone();
+            v["document"] = json!(format!("{{ \"n\": {i} }}"));
+            call(200 + i, "insertDocument", v);
+        }
         drop(stdin);
         seed.wait().unwrap();
     }
@@ -292,6 +305,13 @@ async fn database_explorer_mongodb_end_to_end(cx: &mut gpui::TestAppContext) {
     let columns: Vec<Value> = ui.prop(&tab, grid, "columns").as_array().unwrap().iter().map(|c| c["name"].clone()).collect();
     assert_eq!(columns, [json!("_id"), json!("name"), json!("born"), json!("langs"), json!("score")], "_id first, then fields as they appear");
     assert_eq!(ui.prop(&tab, grid, "rows")[1][3], json!("[ 1 item ]"));
+    // Drawn, the table has room for its rows (a row of views doesn't stretch its children
+    // unless asked: the table once got no height at all).
+    ui.cx.update(|window, _| window.refresh());
+    ui.cx.run_until_parked();
+    let selector: &'static str = Box::leak(format!("forge-grid-{tab}-{grid}").into_boxed_str());
+    let bounds = ui.cx.debug_bounds(selector).expect("the documents table is drawn");
+    assert!(bounds.size.height > gpui::px(100.), "the documents table is {:?} high", bounds.size.height);
 
     // Select Ada: her document, as text, in the editor; edit it whole and save.
     ui.send(grid, "onSelect", json!({ "rows": [0] }));
@@ -348,4 +368,195 @@ async fn database_explorer_mongodb_end_to_end(cx: &mut gpui::TestAppContext) {
     ui.send(filter, "onChange", json!("{ name: 1 }"));
     ui.send(filter, "onSubmit", json!("{ name: 1 }"));
     ui.text(&tab, "not valid JSON");
+
+    // Opening a collection shows its first page at once; the page size can change.
+    let many = ui.by_label("db-explorer", "treeItem", "many");
+    ui.send(many, "onDoubleClick", Value::Null);
+    let many_tab = ui.wait("the many tab", |h| h.trees.keys().find(|k| k.ends_with(":many") && h.trees[*k].len() > 3).cloned());
+    ui.text(&many_tab, "1–25 of 25");
+    let size = ui.find(&many_tab, "select", "the page size", |p| p.get("value") == Some(&json!(200)));
+    ui.send(size, "onChange", json!(10));
+    ui.text(&many_tab, "1–10 of 25");
+    let next = ui.find(&many_tab, "button", "the next page button", |p| p.get("tooltip").and_then(Value::as_str) == Some("Next page"));
+    ui.send(next, "onClick", Value::Null);
+    ui.text(&many_tab, "11–20 of 25");
+}
+
+/// Redis through the same UI: a connection with a password on database 9; its keys as a tree
+/// split at `:`, filtered by a pattern and loaded in batches; a hash edited and saved; a key
+/// created; the console. Needs a server: FORGE_SQL_TEST_REDIS='{"host":"127.0.0.1","port":6390,"password":"pw"}'
+/// (e.g. `docker run -d --rm -p 127.0.0.1:6390:6379 redis redis-server --requirepass pw`).
+#[gpui::test]
+async fn database_explorer_redis_end_to_end(cx: &mut gpui::TestAppContext) {
+    let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/db-explorer");
+    let sidecar = crate::process::sidecar_path(&extension, "forge-sql");
+    let Some(server) = std::env::var("FORGE_SQL_TEST_REDIS").ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else {
+        eprintln!("skipping: FORGE_SQL_TEST_REDIS not set");
+        return;
+    };
+    if !extension.join("dist/extension.js").is_file() || !sidecar.is_file() {
+        eprintln!("skipping: build extensions/db-explorer and its sidecar first");
+        return;
+    }
+    let host_name = server["host"].as_str().unwrap_or("127.0.0.1").to_string();
+    let port = server["port"].as_u64().unwrap_or(6379);
+    let password = server["password"].as_str().unwrap_or_default().to_string();
+
+    // Seed database 9 with the sidecar: 2,500 session keys (more than a batch) and 3 others.
+    {
+        use std::io::{BufRead, Write};
+        let mut seed = std::process::Command::new(&sidecar).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut stdin = seed.stdin.take().unwrap();
+        let mut lines = std::io::BufReader::new(seed.stdout.take().unwrap()).lines();
+        let mut id = 0;
+        let mut call = |method: &str, params: Value| -> Value {
+            id += 1;
+            writeln!(stdin, "{}", json!({ "id": id, "method": method, "params": params })).unwrap();
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+        };
+        let connected = call("connect", json!({ "connectionId": "seed", "engine": "redis", "host": host_name, "port": port, "password": password, "database": "9" }));
+        assert!(connected.get("result").is_some(), "{connected}");
+        let mut run = |line: String| call("redisCommand", json!({ "connectionId": "seed", "db": 9, "line": line }));
+        run("FLUSHDB".into());
+        run("HSET user:1 name Ada lang Analytical".into());
+        run("HSET user:2 name Grace".into());
+        run("SET config:theme dark".into());
+        for chunk in (0..2500).collect::<Vec<_>>().chunks(500) {
+            let args: Vec<String> = chunk.iter().map(|i| format!("session:{i:04} x")).collect();
+            run(format!("MSET {}", args.join(" ")));
+        }
+        drop(stdin);
+        seed.wait().unwrap();
+    }
+
+    cx.executor().allow_parking();
+    let params = cx.update(workspace::AppState::test);
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        editor::init(cx);
+        crate::init_for_tests(cx);
+    });
+    let host = cx.update(|cx| ExtensionHost::init(vec![extension.clone()], cx)).unwrap();
+    params.fs.as_fake().insert_tree("/root", json!({})).await;
+    let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let weak = workspace.downgrade();
+    cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+    let mut ui = Ui { host: host.clone(), cx };
+    let confirm = |ui: &mut Ui, answer: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ui.cx.has_pending_prompt() {
+            assert!(Instant::now() < deadline, "no confirmation");
+            ui.cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        ui.cx.simulate_prompt_answer(answer);
+    };
+
+    // A Redis connection: host, port, password, database 9.
+    let add = ui.by_label("db-explorer", "button", "Add Connection…");
+    ui.send(add, "onClick", Value::Null);
+    let form = ui.tab("db-explorer.connection:new");
+    let engine = ui.find(&form, "select", "the engine select", |p| p.get("value") == Some(&json!("postgres")));
+    ui.send(engine, "onChange", json!("redis"));
+    let by_placeholder = |ui: &mut Ui, tab: &str, placeholder: &str| ui.find(tab, "input", placeholder, |p| p.get("placeholder").and_then(Value::as_str) == Some(placeholder));
+    let input = by_placeholder(&mut ui, &form, "localhost");
+    ui.send(input, "onChange", json!(host_name));
+    let input = by_placeholder(&mut ui, &form, "6379");
+    ui.send(input, "onChange", json!(port.to_string()));
+    let input = ui.find(&form, "input", "the password", |p| p.get("password") == Some(&json!(true)));
+    ui.send(input, "onChange", json!(password));
+    let input = by_placeholder(&mut ui, &form, "0");
+    ui.send(input, "onChange", json!("9"));
+    let save = ui.by_label(&form, "button", "Save and Connect");
+    ui.send(save, "onClick", Value::Null);
+
+    // db9 with its key count; expanded, the first batch of keys as a tree.
+    let db9 = ui.by_label("db-explorer", "treeItem", "db9");
+    ui.wait("db9's key count", |h| (h.trees.get("db-explorer")?.get(db9)?.prop("description")? == &json!("2503 keys")).then_some(()));
+    ui.send(db9, "onClick", Value::Null);
+    let more = ui.by_label("db-explorer", "treeItem", "Load more keys…");
+    ui.by_label("db-explorer", "treeItem", "config");
+    let user = ui.by_label("db-explorer", "treeItem", "user");
+    let session = ui.by_label("db-explorer", "treeItem", "session");
+    let count = ui.prop("db-explorer", session, "description");
+    assert!(count.as_str().unwrap().ends_with('+'), "a batch, not all of them: {count}");
+    ui.send(more, "onClick", Value::Null);
+    ui.wait("all the session keys", |h| {
+        let tree = h.trees.get("db-explorer")?;
+        let found = collect(tree, |n| matches!(&n.kind, NodeKind::Element { kind, props, .. } if kind == "treeItem" && props.get("label") == Some(&json!("session")) && props.get("description") == Some(&json!("2500"))));
+        (!found.is_empty()).then_some(())
+    });
+    assert!(ui.host.read_with(ui.cx, |h, _| collect(&h.trees["db-explorer"], |n| matches!(&n.kind, NodeKind::Element { props, .. } if props.get("label") == Some(&json!("Load more keys…")))).is_empty()), "nothing more to load");
+
+    // A filter: only the user keys. (The tree was redrawn: find the row again.)
+    let _ = user;
+    let user = ui.by_label("db-explorer", "treeItem", "user");
+    ui.send(user, "onClick", Value::Null);
+    let filter = ui.find("db-explorer", "input", "the key filter", |p| p.get("placeholder").and_then(Value::as_str).is_some_and(|s| s.starts_with("Filter keys in db9")));
+    ui.send(filter, "onChange", json!("user:*"));
+    ui.send(filter, "onSubmit", json!("user:*"));
+    ui.wait("only the user keys", |h| {
+        let tree = h.trees.get("db-explorer")?;
+        let labels: Vec<String> = collect(tree, |n| matches!(&n.kind, NodeKind::Element { kind, .. } if kind == "treeItem")).into_iter().filter_map(|id| tree.get(id)?.str_prop("label").map(str::to_string)).collect();
+        (labels.contains(&"user".to_string()) && !labels.contains(&"session".to_string()) && !labels.contains(&"config".to_string())).then_some(())
+    });
+
+    // Open user:1 (the namespace stays open across the filter), edit a value, save.
+    let user = ui.by_label("db-explorer", "treeItem", "user");
+    if ui.prop("db-explorer", user, "expanded") != json!(true) {
+        ui.send(user, "onClick", Value::Null);
+    }
+    let user1 = ui.by_label("db-explorer", "treeItem", "1");
+    assert_eq!(ui.prop("db-explorer", user1, "icon"), json!("hash"));
+    ui.send(user1, "onDoubleClick", Value::Null);
+    let tab = ui.tab("db-explorer.key:");
+    let grid = ui.find(&tab, "grid", "the hash's fields", |p| p.get("rows").and_then(Value::as_array).is_some_and(|r| r.len() == 2));
+    ui.cx.update(|window, _| window.refresh());
+    ui.cx.run_until_parked();
+    let selector: &'static str = Box::leak(format!("forge-grid-{tab}-{grid}").into_boxed_str());
+    let bounds = ui.cx.debug_bounds(selector).expect("the fields table is drawn");
+    assert!(bounds.size.height > gpui::px(100.), "the fields table is {:?} high", bounds.size.height);
+    let rows = ui.prop(&tab, grid, "rows");
+    let name_row = rows.as_array().unwrap().iter().position(|r| r[0] == json!("name")).unwrap();
+    ui.send(grid, "onCellEdit", json!({ "row": name_row, "column": 1, "value": "Ada Lovelace" }));
+    let save = ui.by_label(&tab, "button", "Save 1");
+    ui.send(save, "onClick", Value::Null);
+    confirm(&mut ui, "Save");
+    ui.wait("the saved value", |h| {
+        let rows = h.trees.get(&tab)?.get(grid)?.prop("rows")?.as_array()?.clone();
+        rows.iter().any(|r| r[1] == json!("Ada Lovelace")).then_some(())
+    });
+
+    // A new list key.
+    let db9 = ui.by_label("db-explorer", "treeItem", "db9");
+    ui.send(db9, "onContextMenu", json!({ "id": "new-key" }));
+    let new_key = ui.tab("db-explorer.newkey:");
+    let name = by_placeholder(&mut ui, &new_key, "user:42:profile");
+    ui.send(name, "onChange", json!("user:queue"));
+    let kind = ui.find(&new_key, "select", "the type select", |p| p.get("value") == Some(&json!("string")));
+    ui.send(kind, "onChange", json!("list"));
+    let value = ui.find(&new_key, "input", "the first item", |p| p.get("multiline") != Some(&json!(true)) && p.get("placeholder").is_none_or(|v| v.is_null() || v == "") && p.get("value") == Some(&json!("")));
+    ui.send(value, "onChange", json!("job-1"));
+    let create = ui.by_label(&new_key, "button", "Create");
+    ui.send(create, "onClick", Value::Null);
+    let list_tab = ui.wait("the new key's tab", |h| h.trees.keys().find(|k| k.ends_with(":9:user:queue") && h.trees[*k].len() > 3).cloned());
+    ui.find(&list_tab, "grid", "the list", |p| p.get("rows") == Some(&json!([[0, "job-1"]])));
+
+    // The console.
+    let db9 = ui.by_label("db-explorer", "treeItem", "db9");
+    ui.send(db9, "onContextMenu", json!({ "id": "console" }));
+    let console = ui.tab("db-explorer.console:");
+    let line = ui.find(&console, "input", "the command line", |p| p.get("placeholder").and_then(Value::as_str).is_some_and(|s| s.starts_with("db9>")));
+    ui.send(line, "onChange", json!("HGET user:1 name"));
+    ui.send(line, "onSubmit", json!("HGET user:1 name"));
+    ui.text(&console, "\"Ada Lovelace\"");
+    ui.send(line, "onChange", json!("LLEN user:queue"));
+    ui.send(line, "onSubmit", json!("LLEN user:queue"));
+    ui.text(&console, "(integer) 1");
+    ui.send(line, "onChange", json!("HGET user:queue x"));
+    ui.send(line, "onSubmit", json!("HGET user:queue x"));
+    ui.text(&console, "(error) WRONGTYPE");
 }

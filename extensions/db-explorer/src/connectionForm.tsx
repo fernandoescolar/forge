@@ -1,6 +1,7 @@
 // Adding or editing a connection: engine, where the server (or SQLite file) is, who to
 // sign in as. The password goes to the keychain when "Save password" is on. MongoDB can
-// also take a whole connection string (Atlas gives one), kept in the keychain too.
+// also take a whole connection string (Atlas gives one), kept in the keychain too; Redis a
+// URL, or Sentinel: the sentinels to ask for the master, and their own password.
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { forge, Button, Checkbox, Input, Scroll, Select, Spinner, Text, View } from '@forge/api';
@@ -21,15 +22,40 @@ type Form = {
   ssl: 'disable' | 'prefer' | 'require';
   trustServerCertificate: boolean;
   savePassword: boolean;
-  /** MongoDB: connect with `url` instead of host, port, user and password. */
+  /** MongoDB and Redis: connect with `url` instead of host, port, user and password. */
   useUrl: boolean;
   url: string;
+  /** Redis: ask these sentinels for the master named `masterName`. */
+  useSentinel: boolean;
+  sentinels: string;
+  masterName: string;
+  sentinelPassword: string;
 };
 
-const blank: Form = { name: '', engine: 'postgres', host: 'localhost', port: '', user: '', password: '', database: '', file: '', ssl: 'prefer', trustServerCertificate: true, savePassword: true, useUrl: false, url: '' };
+const blank: Form = {
+  name: '',
+  engine: 'postgres',
+  host: 'localhost',
+  port: '',
+  user: '',
+  password: '',
+  database: '',
+  file: '',
+  ssl: 'prefer',
+  trustServerCertificate: true,
+  savePassword: true,
+  useUrl: false,
+  url: '',
+  useSentinel: false,
+  sentinels: '',
+  masterName: '',
+  sentinelPassword: '',
+};
 
-/** `cluster0.abcd.mongodb.net` out of `mongodb+srv://user:pw@cluster0.abcd.mongodb.net/db?…`. */
-const urlHost = (url: string) => url.replace(/^mongodb(\+srv)?:\/\//, '').replace(/^[^@/]*@/, '').split(/[/?,]/)[0];
+/** `cluster0.abcd.mongodb.net` out of `mongodb+srv://user:pw@cluster0.abcd.mongodb.net/db?…` (or `redis://…`). */
+const urlHost = (url: string) => url.replace(/^(mongodb(\+srv)?|rediss?):\/\//, '').replace(/^[^@/]*@/, '').split(/[/?,]/)[0];
+
+type Mode = 'host' | 'url' | 'sentinel';
 
 export function ConnectionForm({ id, message, onDone }: { id: string | null; message?: string; onDone: () => void }) {
   const [form, setForm] = useState<Form>(blank);
@@ -39,7 +65,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
     if (!id) return;
     const c = store.connection(id);
     if (!c) return;
-    store.storedPassword(id).then((password) =>
+    Promise.all([store.storedPassword(id), c.useSentinel ? store.storedSentinelPassword(id) : Promise.resolve(null)]).then(([password, sentinelPassword]) =>
       setForm({
         name: c.name,
         engine: c.engine,
@@ -55,6 +81,10 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
         useUrl: !!c.useUrl,
         // With a connection string, the keychain holds it instead of a password.
         url: c.useUrl ? password ?? '' : '',
+        useSentinel: !!c.useSentinel,
+        sentinels: c.sentinels ?? '',
+        masterName: c.masterName ?? '',
+        sentinelPassword: sentinelPassword ?? '',
       }),
     );
   }, [id]);
@@ -62,33 +92,62 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
   const set = <K extends keyof Form>(key: K) => (value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
   const sqlite = form.engine === 'sqlite';
   const mongodb = store.isMongo(form.engine);
-  const withUrl = mongodb && form.useUrl;
+  const redisDb = store.isRedis(form.engine);
+  const withUrl = (mongodb || redisDb) && form.useUrl;
+  const withSentinel = redisDb && form.useSentinel && !withUrl;
+  const mode: Mode = withUrl ? 'url' : withSentinel ? 'sentinel' : 'host';
+  const setMode = (m: Mode) => setForm((f) => ({ ...f, useUrl: m === 'url', useSentinel: m === 'sentinel' }));
   /** What goes to the keychain: the password, or the connection string. */
   const secret = sqlite ? null : withUrl ? form.url.trim() : form.password;
+  const urlPattern = redisDb ? /^rediss?:\/\// : /^mongodb(\+srv)?:\/\//;
   const defaultPort = store.ENGINES.find((e) => e.value === form.engine)?.port;
 
   const config = (): ConnectionConfig => ({
     id: id ?? store.newId(),
-    name: form.name.trim() || (sqlite ? form.file.split('/').pop() ?? 'SQLite' : withUrl ? urlHost(form.url) : `${form.database || form.host}`) || 'Connection',
+    name:
+      form.name.trim() ||
+      (sqlite
+        ? form.file.split('/').pop() ?? 'SQLite'
+        : withUrl
+          ? urlHost(form.url)
+          : withSentinel
+            ? form.masterName.trim() || 'mymaster'
+            : redisDb
+              ? `${form.host.trim() || 'localhost'}${form.database.trim() && form.database.trim() !== '0' ? ` db${form.database.trim()}` : ''}`
+              : `${form.database || form.host}`) ||
+      'Connection',
     engine: form.engine,
-    host: sqlite || withUrl ? undefined : form.host.trim() || 'localhost',
-    port: sqlite || withUrl || !form.port.trim() ? undefined : Number(form.port),
+    host: sqlite || withUrl || withSentinel ? undefined : form.host.trim() || 'localhost',
+    port: sqlite || withUrl || withSentinel || !form.port.trim() ? undefined : Number(form.port),
     user: sqlite || withUrl ? undefined : form.user.trim() || undefined,
     database: sqlite || withUrl ? undefined : form.database.trim() || undefined,
     file: sqlite ? form.file.trim() : undefined,
-    ssl: form.engine === 'postgres' || form.engine === 'mysql' || form.engine === 'mariadb' || (mongodb && !withUrl) ? form.ssl : undefined,
-    trustServerCertificate: form.engine === 'mssql' || (mongodb && !withUrl && form.ssl === 'require') ? form.trustServerCertificate : undefined,
+    ssl: form.engine === 'postgres' || form.engine === 'mysql' || form.engine === 'mariadb' || ((mongodb || redisDb) && !withUrl) ? form.ssl : undefined,
+    trustServerCertificate: form.engine === 'mssql' || ((mongodb || redisDb) && !withUrl && form.ssl === 'require') ? form.trustServerCertificate : undefined,
     useUrl: withUrl || undefined,
+    useSentinel: withSentinel || undefined,
+    sentinels: withSentinel ? form.sentinels.trim() : undefined,
+    masterName: withSentinel ? form.masterName.trim() || 'mymaster' : undefined,
+    hasPassword: !sqlite && !withUrl && !!form.password ? true : undefined,
     savePassword: form.savePassword,
   });
 
-  const invalid = sqlite ? !form.file.trim() : withUrl ? !/^mongodb(\+srv)?:\/\//.test(form.url.trim()) : !form.host.trim() || (!!form.port.trim() && !/^\d+$/.test(form.port.trim()));
+  const badPort = !!form.port.trim() && !/^\d+$/.test(form.port.trim());
+  const badDatabase = redisDb && !!form.database.trim() && !/^\d+$/.test(form.database.trim());
+  const invalid = sqlite
+    ? !form.file.trim()
+    : withUrl
+      ? !urlPattern.test(form.url.trim())
+      : withSentinel
+        ? !form.sentinels.trim() || badDatabase
+        : !form.host.trim() || badPort || badDatabase;
+  const sentinelSecret = withSentinel ? form.sentinelPassword : null;
 
   const test = async () => {
     setStatus({ kind: 'busy', text: 'Connecting…' });
     const probe = `test-${Date.now()}`;
     try {
-      const result = await sql.connect(probe, store.connectParams(config(), secret));
+      const result = await sql.connect(probe, store.connectParams(config(), secret, sentinelSecret));
       await sql.disconnect(probe).catch(() => {});
       setStatus({ kind: 'ok', text: `Connected: ${result.serverVersion}` });
     } catch (e) {
@@ -98,7 +157,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
 
   const save = async (connect: boolean) => {
     const c = config();
-    await store.saveConnection(c, secret);
+    await store.saveConnection(c, secret, sentinelSecret);
     onDone();
     if (connect) {
       const node = store.visibleRows().find((r) => r.node.key === c.id)?.node;
@@ -126,7 +185,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
         <Text style={{ size: 'lg', weight: 'bold' }}>{id ? 'Edit Connection' : 'New Connection'}</Text>
 
         <Field label="Database">
-          <Select value={form.engine} options={store.ENGINES.map((e) => ({ value: e.value, label: e.label }))} onChange={(engine) => setForm((f) => ({ ...f, engine, port: '', ssl: store.isMongo(engine) ? 'disable' : f.ssl === 'disable' ? 'prefer' : f.ssl }))} />
+          <Select value={form.engine} options={store.ENGINES.map((e) => ({ value: e.value, label: e.label }))} onChange={(engine) => setForm((f) => ({ ...f, engine, port: '', ssl: store.isMongo(engine) || store.isRedis(engine) ? 'disable' : f.ssl === 'disable' ? 'prefer' : f.ssl, useSentinel: store.isRedis(engine) && f.useSentinel }))} />
         </Field>
         <Field label="Name">
           <Input value={form.name} placeholder="Shown in the Databases panel" onChange={set('name')} autoFocus />
@@ -144,21 +203,39 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
           </Field>
         ) : withUrl ? (
           <>
-            <Field label="Connect with">
-              <Select value="url" options={[{ value: 'host', label: 'Host and port' }, { value: 'url', label: 'Connection string' }]} onChange={(v) => set('useUrl')(v === 'url')} />
+            <ModeSelect redis={redisDb} mode={mode} onChange={setMode} />
+            <Field label={redisDb ? 'URL' : 'Connection string'}>
+              <Input
+                value={form.url}
+                placeholder={redisDb ? 'rediss://default:password@cache.example.com:6380/0' : 'mongodb+srv://user:password@cluster0.example.mongodb.net/'}
+                onChange={set('url')}
+                onSubmit={() => !invalid && save(true)}
+              />
             </Field>
-            <Field label="Connection string">
-              <Input value={form.url} placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/" onChange={set('url')} onSubmit={() => !invalid && save(true)} />
-            </Field>
-            <Checkbox checked={form.savePassword} label="Save the connection string in the keychain (it may hold the password)" onChange={set('savePassword')} />
+            <Checkbox checked={form.savePassword} label={`Save the ${redisDb ? 'URL' : 'connection string'} in the keychain (it may hold the password)`} onChange={set('savePassword')} />
           </>
         ) : (
           <>
-            {mongodb && (
-              <Field label="Connect with">
-                <Select value="host" options={[{ value: 'host', label: 'Host and port' }, { value: 'url', label: 'Connection string' }]} onChange={(v) => set('useUrl')(v === 'url')} />
-              </Field>
-            )}
+            {(mongodb || redisDb) && <ModeSelect redis={redisDb} mode={mode} onChange={setMode} />}
+            {withSentinel ? (
+              <>
+                <Field label="Sentinels">
+                  <Input value={form.sentinels} placeholder="sentinel-1:26379, sentinel-2:26379, sentinel-3:26379" onChange={set('sentinels')} />
+                </Field>
+                <View style={{ direction: 'row', gap: 10 }}>
+                  <View style={{ grow: true }}>
+                    <Field label="Master name">
+                      <Input value={form.masterName} placeholder="mymaster" onChange={set('masterName')} />
+                    </Field>
+                  </View>
+                  <View style={{ grow: true }}>
+                    <Field label="Sentinel password (if they have one)">
+                      <Input value={form.sentinelPassword} password onChange={set('sentinelPassword')} />
+                    </Field>
+                  </View>
+                </View>
+              </>
+            ) : (
             <View style={{ direction: 'row', gap: 10 }}>
               <View style={{ grow: true }}>
                 <Field label="Host">
@@ -171,10 +248,11 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
                 </Field>
               </View>
             </View>
+            )}
             <View style={{ direction: 'row', gap: 10 }}>
               <View style={{ grow: true }}>
                 <Field label="User">
-                  <Input value={form.user} placeholder={mongodb ? 'none' : form.engine === 'mssql' ? 'sa' : form.engine === 'postgres' ? 'postgres' : 'root'} onChange={set('user')} />
+                  <Input value={form.user} placeholder={mongodb ? 'none' : redisDb ? 'default' : form.engine === 'mssql' ? 'sa' : form.engine === 'postgres' ? 'postgres' : 'root'} onChange={set('user')} />
                 </Field>
               </View>
               <View style={{ grow: true }}>
@@ -184,10 +262,14 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
               </View>
             </View>
             <Checkbox checked={form.savePassword} label="Save password in the keychain" onChange={set('savePassword')} />
-            <Field label="Database (optional)">
-              <Input value={form.database} placeholder={form.engine === 'postgres' ? 'postgres' : form.engine === 'mssql' ? 'master' : mongodb ? 'Opened first; users still sign in against admin' : ''} onChange={set('database')} />
+            <Field label={redisDb ? 'Database number (optional)' : 'Database (optional)'}>
+              <Input
+                value={form.database}
+                placeholder={form.engine === 'postgres' ? 'postgres' : form.engine === 'mssql' ? 'master' : mongodb ? 'Opened first; users still sign in against admin' : redisDb ? '0' : ''}
+                onChange={set('database')}
+              />
             </Field>
-            {mongodb ? (
+            {mongodb || redisDb ? (
               <>
                 <Field label="TLS">
                   <Select
@@ -233,6 +315,25 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
         )}
       </View>
     </Scroll>
+  );
+}
+
+/** How MongoDB and Redis connect: host and port, a URL / connection string, or (Redis) Sentinel. */
+function ModeSelect({ redis, mode, onChange }: { redis: boolean; mode: Mode; onChange: (mode: Mode) => void }) {
+  const options: { value: Mode; label: string }[] = redis
+    ? [
+        { value: 'host', label: 'Host and port' },
+        { value: 'sentinel', label: 'Sentinel' },
+        { value: 'url', label: 'URL' },
+      ]
+    : [
+        { value: 'host', label: 'Host and port' },
+        { value: 'url', label: 'Connection string' },
+      ];
+  return (
+    <Field label="Connect with">
+      <Select value={mode} options={options} onChange={onChange} />
+    </Field>
   );
 }
 

@@ -54,6 +54,10 @@ pub fn error_message(e: &anyhow::Error) -> String {
             parts.push(mongo_message(m));
             break;
         }
+        if let Some(r) = cause.downcast_ref::<redis::RedisError>() {
+            parts.push(crate::kv::redis_message(r));
+            break;
+        }
         let s = cause.to_string();
         if parts.last().is_some_and(|p| p.contains(&s)) {
             continue;
@@ -91,6 +95,9 @@ pub fn error_code(e: &anyhow::Error) -> Option<String> {
         }
         if let Some(mongodb::error::ErrorKind::Command(c)) = cause.downcast_ref::<mongodb::error::Error>().map(|m| m.kind.as_ref()) {
             return Some(c.code.to_string());
+        }
+        if let Some(code) = cause.downcast_ref::<redis::RedisError>().and_then(|r| r.code()) {
+            return Some(code.to_string());
         }
         None
     })

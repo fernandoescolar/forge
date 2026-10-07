@@ -21,6 +21,11 @@ pub struct ExtensionTab {
 }
 
 impl ExtensionTab {
+    #[cfg(test)]
+    pub(crate) fn surface(&self) -> &Entity<Surface> {
+        &self.surface
+    }
+
     fn new(host: Entity<ExtensionHost>, id: String, title: String, icon: String, cx: &mut Context<Self>) -> Self {
         let surface = cx.new(|cx| Surface::new(host.clone(), id.clone(), true, cx));
         // Closing the tab (dropping it, not moving it to another pane) unmounts its React tree.
@@ -124,6 +129,153 @@ impl Item for ExtensionTab {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Typing into an empty input keeps every key, even when the screen redraws before the
+    /// extension has heard of them (it runs on its own thread); a value the extension sets
+    /// itself, like clearing the input, still replaces the text.
+    #[gpui::test]
+    async fn inputs_keep_what_is_typed(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            crate::init_for_tests(cx);
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext-typing");
+        std::fs::create_dir_all(ext.join("dist")).unwrap();
+        std::fs::write(ext.join("package.json"), r#"{"name":"ext-typing","forge":{}}"#).unwrap();
+        let code = r#"var __forgeExtension = { activate(ctx) {
+            const f = __forge.modules['@forge/api'].forge;
+            const R = __forge.modules.react;
+            const h = R.createElement;
+            const api = __forge.modules['@forge/api'];
+            function Form() {
+                const [v, setV] = R.useState('');
+                return h(api.View, {},
+                    h(api.Input, { value: v, placeholder: 'Name', onChange: setV }),
+                    h(api.Text, {}, 'value=' + v),
+                    h(api.Button, { label: 'Clear', onClick: () => setV('') }));
+            }
+            f.commands.register('open', 'Open', () => f.tabs.open({ id: 'ext-typing.form', title: 'Form', render: () => h(Form) }));
+            f.commands.register('ready', 'Ready', () => {});
+        } };"#;
+        std::fs::write(ext.join("dist/extension.js"), code).unwrap();
+        let host = cx.update(|cx| ExtensionHost::init(vec![tmp.path().to_path_buf()], cx)).unwrap();
+        params.fs.as_fake().insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let weak = workspace.downgrade();
+        cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+        let wait = |what: &str, cx: &mut gpui::VisualTestContext, f: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !f(cx) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait("the extension", cx, &|cx| host.read_with(cx, |h, _| h.commands.iter().any(|c| c.id == "ready")));
+        host.read_with(cx, |h, _| h.run_command("open"));
+        let surface = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |ws, cx| ws.items_of_type::<ExtensionTab>(cx).next().map(|t| t.read(cx).surface().clone()));
+        wait("the form", cx, &|cx| surface(cx).is_some_and(|s| s.read_with(cx, |s, _| !s.input_editors().is_empty())));
+        let surface = surface(cx).unwrap();
+        let editor = surface.read_with(cx, |s, _| s.input_editors()[0].clone());
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            host.read_with(cx, |h, _| {
+                h.trees
+                    .get("ext-typing.form")
+                    .map(|t| crate::surface::collect(t, |n| matches!(&n.kind, crate::tree::NodeKind::Element { kind, .. } if kind == "text")).into_iter().map(|id| crate::surface::text_content(t, id)).collect::<String>())
+                    .unwrap_or_default()
+            })
+        };
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        // A key, and a redraw before the extension answers: the key stays.
+        let type_key = |key: &str, cx: &mut gpui::VisualTestContext| {
+            editor.update_in(cx, |e, window, cx| e.insert(key, window, cx));
+            surface.update_in(cx, |s, window, cx| s.sync(window, cx));
+        };
+        type_key("a", cx);
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "a", "the first key is kept");
+        type_key("d", cx);
+        type_key("a", cx);
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "ada");
+        wait("the extension to have it", cx, &|cx| shown(cx) == "value=ada");
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "ada", "its echo doesn't undo anything");
+
+        // The extension clears it: that does replace the text, and typing starts over.
+        let clear = host.read_with(cx, |h, _| {
+            crate::surface::collect(&h.trees["ext-typing.form"], |n| matches!(&n.kind, crate::tree::NodeKind::Element { kind, props, .. } if kind == "button" && props.get("label") == Some(&serde_json::json!("Clear"))))[0]
+        });
+        host.read_with(cx, |h, _| h.dispatch(clear, "onClick", serde_json::Value::Null));
+        wait("the input cleared", cx, &|cx| editor.read_with(cx, |e, cx| e.text(cx)).is_empty() && shown(cx) == "value=");
+        type_key("x", cx);
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "x", "typing after a clear is kept too");
+        wait("the extension to have it", cx, &|cx| shown(cx) == "value=x");
+    }
+
+    /// An input with a `language` highlights its text as that language.
+    #[gpui::test]
+    async fn inputs_highlight_their_language(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            crate::init_for_tests(cx);
+        });
+        // As the app does: inputs find languages through the global app state.
+        cx.update(|cx| workspace::AppState::set_global(params.clone(), cx));
+        params.languages.add(std::sync::Arc::new(language::Language::new(language::LanguageConfig { name: "JSON".into(), ..Default::default() }, None)));
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext-lang");
+        std::fs::create_dir_all(ext.join("dist")).unwrap();
+        std::fs::write(ext.join("package.json"), r#"{"name":"ext-lang","forge":{}}"#).unwrap();
+        let code = r#"var __forgeExtension = { activate(ctx) {
+            const f = __forge.modules['@forge/api'].forge;
+            const h = __forge.modules.react.createElement;
+            const api = __forge.modules['@forge/api'];
+            f.commands.register('open', 'Open', () => {
+                f.tabs.open({ id: 'ext-lang.doc', title: 'Doc', render: () => h(api.View, {},
+                    h(api.Input, { value: '{ "a": 1 }', multiline: true, language: 'JSON' }),
+                    h(api.Input, { value: 'plain' })) });
+            });
+            f.commands.register('ready', 'Ready', () => {});
+        } };"#;
+        std::fs::write(ext.join("dist/extension.js"), code).unwrap();
+        let host = cx.update(|cx| ExtensionHost::init(vec![tmp.path().to_path_buf()], cx)).unwrap();
+        params.fs.as_fake().insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let weak = workspace.downgrade();
+        cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !host.read_with(cx, |h, _| h.commands.iter().any(|c| c.id == "ready")) {
+            assert!(Instant::now() < deadline, "the extension never loaded");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        host.read_with(cx, |h, _| h.run_command("open"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let languages = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ExtensionTab>(cx).next().map(|t| t.read(cx).surface().read(cx).input_languages(cx)));
+            if let Some(mut languages) = languages.filter(|l| l.len() == 2 && l.contains(&Some("JSON".to_string()))) {
+                languages.sort();
+                assert_eq!(languages, [None, Some("JSON".to_string())], "only the input that asked for it");
+                break;
+            }
+            assert!(Instant::now() < deadline, "the input never got its language");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     /// With two windows, what an extension opens goes to the window the user is in (the one
     /// activated last), not to the one the host was first given.

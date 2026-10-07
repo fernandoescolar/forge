@@ -8,7 +8,11 @@
 #   FORGE_NOTARY_PROFILE=forge scripts/bundle-macos.sh    # also notarizes and staples
 #   FORGE_TARGET=x86_64-apple-darwin scripts/bundle-macos.sh   # for another architecture
 #
-# Signing with an identity uses the hardened runtime and scripts/Forge.entitlements.
+# Signing with a Developer ID uses the hardened runtime and scripts/Forge.entitlements.
+# Without FORGE_SIGN_IDENTITY, the app is signed with "Forge Signing" when that identity is in
+# the keychain (scripts/create-signing-identity.sh makes it; CI gets it from the signing secrets),
+# so that every build is the same app to the keychain and "Always Allow" sticks; else ad hoc,
+# and the keychain asks again after each build for every saved password.
 # Notarizing needs a notarytool keychain profile, created once with
 #   xcrun notarytool store-credentials forge --apple-id <id> --team-id <team> --password <app password>
 # FORGE_UPDATE_REPOSITORY=owner/repo builds an app that updates itself from that GitHub
@@ -112,20 +116,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-IDENTITY="${FORGE_SIGN_IDENTITY:--}"
+LOCAL_IDENTITY="Forge Signing"
+if [ -n "${FORGE_SIGN_IDENTITY:-}" ]; then
+  IDENTITY="$FORGE_SIGN_IDENTITY"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$LOCAL_IDENTITY\""; then
+  IDENTITY="$LOCAL_IDENTITY"
+else
+  IDENTITY="-"
+fi
+# A Developer ID gets the hardened runtime and a timestamp (what notarizing needs); a local or
+# ad-hoc signature just identifies the build.
+case "$IDENTITY" in
+  "Developer ID"*) RELEASE_SIGN=(--options runtime --timestamp) ;;
+  *) RELEASE_SIGN=() ;;
+esac
 echo "==> codesign (${IDENTITY})"
 # Extensions' sidecars are programs too, outside the places --deep signs: sign them first.
 find "$APP/Contents/Resources/extensions" -path '*/bin/*' -type f -perm -u+x -print0 | while IFS= read -r -d '' sidecar; do
-  if [ "$IDENTITY" = "-" ]; then
-    codesign --force --sign - "$sidecar"
-  else
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$sidecar"
-  fi
+  codesign --force ${RELEASE_SIGN[@]+"${RELEASE_SIGN[@]}"} --sign "$IDENTITY" "$sidecar"
 done
-if [ "$IDENTITY" = "-" ]; then
-  codesign --force --deep --sign - "$APP"
+if [ ${#RELEASE_SIGN[@]} -gt 0 ]; then
+  codesign --force --deep "${RELEASE_SIGN[@]}" --entitlements scripts/Forge.entitlements --sign "$IDENTITY" "$APP"
 else
-  codesign --force --deep --options runtime --timestamp --entitlements scripts/Forge.entitlements --sign "$IDENTITY" "$APP"
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+fi
+if [ "$IDENTITY" = "-" ]; then
+  echo "    (ad hoc: the keychain will ask again for saved passwords; scripts/create-signing-identity.sh fixes that)"
 fi
 codesign --verify --deep --strict "$APP"
 

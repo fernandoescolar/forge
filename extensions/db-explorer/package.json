@@ -3,7 +3,7 @@
   "displayName": "Database Explorer",
   "version": "0.1.0",
   "private": true,
-  "description": "Browse SQL Server, PostgreSQL, MySQL/MariaDB, SQLite and MongoDB databases: tables, views, rows you can edit, your own queries, and MongoDB collections and documents",
+  "description": "Browse SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, MongoDB and Redis databases: tables, views, rows you can edit, your own queries, MongoDB collections and documents, and Redis keys of every type with a console",
   "forge": {
     "entry": "src/extension.tsx",
     "main": "dist/extension.js",

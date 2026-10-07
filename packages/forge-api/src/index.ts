@@ -86,6 +86,8 @@ export type InputProps = Base & {
   password?: boolean;
   /** Takes the keyboard focus when it appears. */
   autoFocus?: boolean;
+  /** Highlights the text as this language (Forge's name for it: "JSON", "SQL", "YAML"…). */
+  language?: string;
   onChange?: (value: string) => void;
   /** Enter in a single-line input, ⌘Enter in a multi-line one. */
   onSubmit?: (value: string) => void;

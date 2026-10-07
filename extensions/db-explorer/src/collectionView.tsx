@@ -3,7 +3,7 @@
 // text to edit and save whole (replaceOne by _id), insert or delete. Documents are JSON with
 // the shell's helpers (ObjectId("…"), ISODate("…"), NumberLong("…")…), so types survive.
 import { useEffect, useRef, useState } from 'react';
-import { forge, Button, DataGrid, Input, Spinner, Text, View } from '@forge/api';
+import { forge, Button, DataGrid, Input, Select, Spinner, Text, View } from '@forge/api';
 import type { Cell } from '@forge/api';
 import { mongo, requestId, sql } from './client';
 import type { CollectionRef, Documents } from './client';
@@ -13,6 +13,12 @@ type Props = { connectionId: string; database: string; collection: string; kind:
 type Mode = 'find' | 'aggregate';
 /** What the editor shows: a document found (by index), a new one, or nothing. */
 type Editing = { kind: 'existing'; index: number; id: string } | { kind: 'new' } | null;
+
+/** Documents per page to choose from. */
+export const PAGE_SIZES = [10, 20, 50, 100, 200, 500, 1000];
+
+/** The page size closest to `wanted` (the Page size setting) among [`PAGE_SIZES`]. */
+export const closestPageSize = (wanted: number) => PAGE_SIZES.reduce((best, n) => (Math.abs(n - wanted) < Math.abs(best - wanted) ? n : best));
 
 /** Columns: `_id` first, then the fields in the order they first appear; at most 50. */
 export function columnsOf(docs: Documents['documents']): string[] {
@@ -48,26 +54,34 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
   const [editError, setEditError] = useState<string | null>(null);
   /** The document to select again after a reload (its _id). */
   const keep = useRef<string | null>(null);
+  /** The latest search: an earlier one that answers late is ignored. */
+  const latest = useRef<string | null>(null);
+  /** What the boxes hold now: a reload started earlier (after a save) searches with it. */
+  const inputs = useRef({ mode, filter, sort, projection, pipeline, pageSize });
+  inputs.current = { mode, filter, sort, projection, pipeline, pageSize };
 
   const docs = result?.documents ?? [];
   const current = editing?.kind === 'existing' ? docs[editing.index] : null;
   const dirty = editing?.kind === 'new' ? text.trim() !== '' && text.trim() !== '{}' : !!current && text !== current.text;
 
-  const run = async (opts: { skip?: number; mode?: Mode } = {}) => {
-    if (running) return;
+  const run = async (opts: { skip?: number; mode?: Mode; size?: number } = {}) => {
+    // A new search replaces the one still running (instead of being dropped).
+    if (latest.current) sql.cancel(latest.current).catch(() => {});
     const id = requestId();
-    const runMode = opts.mode ?? mode;
+    latest.current = id;
+    const { filter, sort, projection, pipeline, pageSize } = inputs.current;
+    const runMode = opts.mode ?? inputs.current.mode;
     const from = opts.skip ?? 0;
     setRunning(id);
     setError(null);
     try {
       if (!(await store.ensureConnected(connectionId))) throw new Error('Not connected.');
-      const size = (await forge.settings.get<number>('dbExplorer.pageSize')) ?? 200;
-      setPageSize(size);
+      const size = opts.size ?? pageSize;
       const found =
         runMode === 'find'
           ? await mongo.find({ ...ref, filter, sort, projection, skip: from, limit: size, requestId: id })
           : await mongo.aggregate({ ...ref, pipeline, maxDocs: (await forge.settings.get<number>('dbExplorer.maxRows')) ?? 1000, requestId: id });
+      if (latest.current !== id) return;
       setResult(found);
       setSkip(runMode === 'find' ? from : 0);
       // Keep the selected document selected, if it is still there.
@@ -78,14 +92,22 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
         setText('');
       }
     } catch (e) {
-      setError((e as Error).message);
+      if (latest.current === id) setError((e as Error).message);
     } finally {
-      setRunning(null);
+      if (latest.current === id) {
+        latest.current = null;
+        setRunning(null);
+      }
     }
   };
 
+  // The first page right away, as many documents as the Page size setting says.
   useEffect(() => {
-    run();
+    forge.settings.get<number>('dbExplorer.pageSize').then((wanted) => {
+      const size = closestPageSize(wanted ?? 200);
+      setPageSize(size);
+      run({ size });
+    });
   }, [connectionId, database, collection]);
 
   const select = (index: number, found = result) => {
@@ -183,6 +205,15 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
           <>
             <Button icon="chevron_left" variant="ghost" tooltip="Previous page" disabled={!!running || skip === 0} onClick={() => run({ skip: Math.max(0, skip - pageSize) })} />
             <Button icon="chevron_right" variant="ghost" tooltip="Next page" disabled={!!running || !hasNext} onClick={() => run({ skip: skip + pageSize })} />
+            <Select
+              value={pageSize}
+              options={PAGE_SIZES.map((n) => ({ value: n, label: `${n} per page` }))}
+              disabled={!!running}
+              onChange={(size) => {
+                setPageSize(size);
+                run({ size });
+              }}
+            />
           </>
         )}
         {!readOnly && <Button label="Insert Document" icon="plus" variant="ghost" onClick={insertNew} />}
@@ -191,18 +222,18 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
       {mode === 'find' ? (
         <View style={{ direction: 'row', gap: 6, paddingX: 8, paddingY: 6, borderSide: 'bottom' }}>
           <View style={{ grow: true }}>
-            <Input value={filter} placeholder='Filter: { "status": "active", "_id": ObjectId("…") }' onChange={setFilter} onSubmit={() => run()} autoFocus />
+            <Input value={filter} language="JSON" placeholder='Filter: { "status": "active", "_id": ObjectId("…") }' onChange={setFilter} onSubmit={() => run()} autoFocus />
           </View>
           <View style={{ width: 200 }}>
-            <Input value={sort} placeholder='Sort: { "createdAt": -1 }' onChange={setSort} onSubmit={() => run()} />
+            <Input value={sort} language="JSON" placeholder='Sort: { "createdAt": -1 }' onChange={setSort} onSubmit={() => run()} />
           </View>
           <View style={{ width: 200 }}>
-            <Input value={projection} placeholder='Fields: { "name": 1 }' onChange={setProjection} onSubmit={() => run()} />
+            <Input value={projection} language="JSON" placeholder='Fields: { "name": 1 }' onChange={setProjection} onSubmit={() => run()} />
           </View>
         </View>
       ) : (
         <View style={{ padding: 8, shrink: false, borderSide: 'bottom' }}>
-          <Input value={pipeline} multiline placeholder='[{ "$match": {} }, { "$group": { … } }]' onChange={setPipeline} onSubmit={() => run({ mode: 'aggregate' })} />
+          <Input value={pipeline} multiline language="JSON" placeholder='[{ "$match": {} }, { "$group": { … } }]' onChange={setPipeline} onSubmit={() => run({ mode: 'aggregate' })} />
         </View>
       )}
 
@@ -213,7 +244,8 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
           </Text>
         </View>
       ) : (
-        <View style={{ direction: 'row', grow: true }}>
+        // `stretch`: a row centres its children, and the table has no height of its own.
+        <View style={{ direction: 'row', grow: true, align: 'stretch' }}>
           <DataGrid
             style={{ grow: true }}
             columns={columns.map((name) => ({ name, primaryKey: name === '_id' }))}
@@ -260,7 +292,7 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
                 </View>
               )}
               <View style={{ grow: true, padding: 8 }}>
-                <Input value={text} multiline onChange={readOnly || !editing ? undefined : setText} onSubmit={() => !readOnly && dirty && save()} />
+                <Input value={text} multiline language="JSON" onChange={readOnly || !editing ? undefined : setText} onSubmit={() => !readOnly && dirty && save()} />
               </View>
             </View>
           )}

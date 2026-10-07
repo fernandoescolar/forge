@@ -1,6 +1,7 @@
 //! Request loop and method dispatch.
 
 use crate::engines::{self, ApplyChangesParams, ConnectParams, Engine, FetchTableParams, nonempty};
+use crate::kv::{self, Redis};
 use crate::mongo::{self, Mongo};
 use crate::protocol::{Request, RpcError, response};
 use anyhow::Result;
@@ -23,6 +24,8 @@ pub struct Server {
     conns: RwLock<HashMap<String, Arc<dyn Engine>>>,
     /// MongoDB connections: documents, not tables, so not an [`Engine`].
     mongo: RwLock<HashMap<String, Arc<Mongo>>>,
+    /// Redis connections: keys and values.
+    redis: RwLock<HashMap<String, Arc<Redis>>>,
     inflight: Mutex<HashMap<String, (Id, AbortHandle)>>,
     /// connectionId -> (generation, outcome) for connects that have not finished yet.
     pending_connects: Mutex<HashMap<String, (u64, watch::Receiver<ConnectOutcome>)>>,
@@ -163,7 +166,7 @@ impl Server {
 
     /// Handle one parsed request and return its response line.
     pub async fn handle(self: &Arc<Self>, req: Request, ticket: Option<ConnectTicket>) -> String {
-        let cancel_key = matches!(req.method.as_str(), "query" | "fetchTable" | "find" | "aggregate")
+        let cancel_key = matches!(req.method.as_str(), "query" | "fetchTable" | "find" | "aggregate" | "scanKeys" | "redisCommand")
             .then(|| req.params.get("requestId").and_then(request_key))
             .flatten();
 
@@ -217,6 +220,78 @@ impl Server {
             .ok_or_else(|| RpcError::new("not_connected", format!("no MongoDB connection with id \"{id}\"")))
     }
 
+    /// A Redis connection, once its `connect` has finished.
+    async fn redis(&self, id: &str) -> Result<Arc<Redis>, RpcError> {
+        self.connected(id).await?;
+        self.redis
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| RpcError::new("not_connected", format!("no Redis connection with id \"{id}\"")))
+    }
+
+    /// The Redis methods (keys and their values).
+    async fn dispatch_redis(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "redisDatabases" => {
+                let p: ConnRef = parse(params)?;
+                to_json(self.redis(&p.connection_id).await?.databases().await?)
+            }
+            "scanKeys" => {
+                let p: kv::ScanParams = parse(params)?;
+                to_json(self.redis(&p.connection_id).await?.scan(&p).await?)
+            }
+            "getKey" => {
+                let p: kv::KeyParams = parse(params)?;
+                to_json(self.redis(&p.connection_id).await?.get(&p).await?)
+            }
+            "editKey" => {
+                let p: kv::EditParams = parse(params)?;
+                self.redis(&p.connection_id).await?.edit(&p).await?;
+                Ok(Value::Null)
+            }
+            "expireKey" => {
+                let p: kv::KeyParams = parse(params)?;
+                self.redis(&p.connection_id).await?.expire(p.db, &p.key()?, p.ttl).await?;
+                Ok(Value::Null)
+            }
+            "renameKey" => {
+                let p: kv::KeyParams = parse(params)?;
+                let to = kv::text::from_display(p.to.as_deref().ok_or_else(|| RpcError::new("invalid_params", "missing to"))?, p.key_escaped)?;
+                self.redis(&p.connection_id).await?.rename(p.db, &p.key()?, &to).await?;
+                Ok(Value::Null)
+            }
+            "deleteKeys" => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    connection_id: String,
+                    db: i64,
+                    keys: Vec<(String, bool)>,
+                }
+                let p: P = parse(params)?;
+                let keys = p.keys.iter().map(|(k, e)| kv::text::from_display(k, *e)).collect::<anyhow::Result<Vec<_>>>()?;
+                let deleted = self.redis(&p.connection_id).await?.delete(p.db, &keys).await?;
+                Ok(json!({ "deleted": deleted }))
+            }
+            "redisCommand" => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    connection_id: String,
+                    db: i64,
+                    line: String,
+                }
+                let p: P = parse(params)?;
+                let start = Instant::now();
+                let output = self.redis(&p.connection_id).await?.command(p.db, &p.line).await?;
+                Ok(json!({ "output": output, "elapsedMs": start.elapsed().as_millis() as u64 }))
+            }
+            other => Err(RpcError::new("unknown_method", format!("unknown method \"{other}\""))),
+        }
+    }
+
     fn is_mongo(&self, id: &str) -> bool {
         self.mongo.read().unwrap_or_else(|e| e.into_inner()).contains_key(id)
     }
@@ -240,6 +315,10 @@ impl Server {
         let all: Vec<_> = self.mongo.write().unwrap_or_else(|e| e.into_inner()).drain().collect();
         for (_, m) in all {
             let _ = tokio::time::timeout(Duration::from_secs(1), m.close()).await;
+        }
+        let all: Vec<_> = self.redis.write().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        for (_, r) in all {
+            r.close().await;
         }
     }
 
@@ -288,6 +367,14 @@ impl Server {
             "connect" => {
                 let connected = async {
                     let p: ConnectParams = parse(params)?;
+                    if p.engine == "redis" {
+                        let (conn, info) = Redis::connect(&p).await?;
+                        let old = self.redis.write().unwrap_or_else(|e| e.into_inner()).insert(p.connection_id.clone(), Arc::new(conn));
+                        if let Some(old) = old {
+                            tokio::spawn(async move { old.close().await });
+                        }
+                        return to_json(info);
+                    }
                     if p.engine == "mongodb" {
                         let (conn, info) = Mongo::connect(&p).await?;
                         let old = self.mongo.write().unwrap_or_else(|e| e.into_inner()).insert(p.connection_id.clone(), Arc::new(conn));
@@ -319,6 +406,10 @@ impl Server {
                 if let Some(old) = old {
                     old.close().await;
                 }
+                let old = self.redis.write().unwrap_or_else(|e| e.into_inner()).remove(&p.connection_id);
+                if let Some(old) = old {
+                    old.close().await;
+                }
                 Ok(Value::Null)
             }
             "listDatabases" => {
@@ -330,6 +421,7 @@ impl Server {
                 to_json(self.engine(&p.connection_id).await?.list_databases().await?)
             }
             "listCollections" | "listIndexes" | "find" | "aggregate" | "insertDocument" | "replaceDocument" | "deleteDocument" => self.dispatch_mongo(method, params).await,
+            "redisDatabases" | "scanKeys" | "getKey" | "editKey" | "expireKey" | "renameKey" | "deleteKeys" | "redisCommand" => self.dispatch_redis(method, params).await,
             "listSchemas" => {
                 let p: ConnRef = parse(params)?;
                 to_json(self.engine(&p.connection_id).await?.list_schemas(nonempty(p.database.as_deref())).await?)

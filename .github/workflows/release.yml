@@ -1,11 +1,15 @@
 # Builds the macOS app for a version tag (v1.2.3, v1.2.3-beta.1), with that version, and
 # publishes it as a GitHub release,
-# whose zips Forge updates itself from (forge-update). Signs and notarizes when the
+# whose zips Forge updates itself from (forge-update). Signs (and notarizes) when the
 # signing secrets are set:
-#   MACOS_CERTIFICATE           base64 of the "Developer ID Application" .p12
+#   MACOS_CERTIFICATE           base64 of the .p12: a "Developer ID Application", or Forge's
+#                               own self-signed "Forge Signing" (scripts/create-signing-identity.sh
+#                               --github sets both secrets)
 #   MACOS_CERTIFICATE_PASSWORD  its password
-#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
-# Without them the app is ad-hoc signed (Gatekeeper will ask before opening it).
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool (Developer ID only)
+# Signed with one certificate, every release is the same app to the keychain: "Always Allow"
+# for a saved password survives updates. Only a Developer ID satisfies Gatekeeper for a zip
+# downloaded by hand. Without the secrets the app is ad-hoc signed.
 #
 # Both architectures build on Apple silicon runners (Intel is cross-compiled: the Intel
 # runners take twice as long). A tag can only reuse build caches saved on main, so pushes to
@@ -97,13 +101,32 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
           security list-keychain -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"')"
+          if [ -z "$identity" ]; then
+            # Forge's self-signed certificate: trusted for code signing on this runner only, so
+            # codesign takes it (users' Macs don't need to trust it; "Verify the signature"
+            # below checks that).
+            /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/certificate.p12" -nokeys -passin "pass:$MACOS_CERTIFICATE_PASSWORD" | /usr/bin/openssl x509 -out "$RUNNER_TEMP/certificate.pem"
+            sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$RUNNER_TEMP/certificate.pem"
+            identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"[^"]*"' | tr -d '"')"
+            echo "FORGE_SELF_SIGNED=1" >> "$GITHUB_ENV"
+          fi
+          [ -n "$identity" ] || { echo "::error::MACOS_CERTIFICATE holds no code-signing identity"; exit 1; }
+          echo "Signing with: $identity"
           echo "FORGE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-          if [ -n "$APPLE_ID" ]; then
+          if [ -n "$APPLE_ID" ] && [[ "$identity" == "Developer ID"* ]]; then
             xcrun notarytool store-credentials forge --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$keychain"
             echo "FORGE_NOTARY_PROFILE=forge" >> "$GITHUB_ENV"
           fi
       - name: Build the app
         run: scripts/bundle-macos.sh
+      - name: Verify the signature as a user's Mac will
+        if: env.FORGE_SELF_SIGNED == '1'
+        # Users' Macs don't trust Forge's own certificate: the install script and the updater
+        # check the signature without that trust, so check it that way here too.
+        run: |
+          sudo security remove-trusted-cert -d "$RUNNER_TEMP/certificate.pem"
+          codesign --verify --deep --strict --verbose=2 dist/Forge.app
+          codesign -d -r- dist/Forge.app
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/')
         with:

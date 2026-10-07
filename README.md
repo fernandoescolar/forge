@@ -12,7 +12,7 @@ Forge is a native, GPU-rendered code editor that makes the decisions for you. Op
 - **Run, test, debug.** One Run / Debug / Stop in the title bar, and hot reload for .NET. The Tests panel covers .NET, Go, Rust, Jest, Vitest and pytest: run or debug any test, with results in the gutter.
 - **Agents in the flow, not in a chat box.** Any [ACP](https://agentclientprotocol.com) agent (Claude Code, Codex, Gemini…) works in *threads*, conversations laid out as documents in the editor area. The agent edits through your editor, and you keep or undo every change. Threads can be anchored to a line, follow the agent live, run in their own git worktree, and take your project's standing instructions. Agents are one click away from an error, a failing test, the terminal output, a commit message, a merge conflict or a pull request review.
 - **Git and GitHub.** Zed's Git panel, a commit graph, a three-pane merge editor, and your branch's pull request with its checks in the status bar, through `gh`.
-- **The rest of a working day.** `.http` request files with environments, a database explorer (SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, MongoDB), an Output panel, layouts you drag into place, and palette themes you edit in 30 colours.
+- **The rest of a working day.** `.http` request files with environments, a database explorer (SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, MongoDB, Redis), an Output panel, layouts you drag into place, and palette themes you edit in 30 colours.
 
 | | | |
 | --- | --- | --- |

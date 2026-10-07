@@ -1,6 +1,7 @@
 // Database Explorer: browse SQL Server, PostgreSQL, MySQL/MariaDB and SQLite databases,
-// open tables and views, edit their rows and run your own queries; and MongoDB's
-// collections, finding, aggregating and editing their documents.
+// open tables and views, edit their rows and run your own queries; MongoDB's collections,
+// finding, aggregating and editing their documents; and Redis's keys (of every type, with
+// TTLs) and a console.
 //
 // The databases are reached through `forge-sql` (sidecar/), a program shipped with the
 // extension in bin/<platform>/ and started with `forge.process.sidecar`.

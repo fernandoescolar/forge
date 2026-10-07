@@ -3,7 +3,7 @@
 import { forge } from '@forge/api';
 import type { ChildProcess } from '@forge/api';
 
-export type Engine = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'mssql' | 'mongodb';
+export type Engine = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'mssql' | 'mongodb' | 'redis';
 export type Cell = string | number | boolean | null;
 
 export type ConnectParams = {
@@ -16,8 +16,12 @@ export type ConnectParams = {
   file?: string;
   ssl?: 'disable' | 'prefer' | 'require';
   trustServerCertificate?: boolean;
-  /** A whole connection string (MongoDB: `mongodb://…`, `mongodb+srv://…`); overrides the rest. */
+  /** A whole connection string (MongoDB: `mongodb://…`, `mongodb+srv://…`; Redis: `redis://…`, `rediss://…`); overrides the rest. */
   url?: string;
+  /** Redis Sentinel: the sentinels (`host:port`, comma-separated), the master's name, their password. */
+  sentinels?: string;
+  masterName?: string;
+  sentinelPassword?: string;
 };
 
 export type ColumnInfo = { name: string; type: string };
@@ -144,4 +148,59 @@ export const mongo = {
   insert: (c: CollectionRef, document: string) => client.request<{ id: string }>('insertDocument', { ...c, document }),
   replace: (c: CollectionRef, id: string, document: string) => client.request<null>('replaceDocument', { ...c, id, document }),
   remove: (c: CollectionRef, id: string) => client.request<null>('deleteDocument', { ...c, id }),
+};
+
+// ------------------------------------------------------------------------------ Redis
+
+/** A key found by SCAN. `escaped`: its name isn't UTF-8 and is shown with `\xNN` escapes. */
+export type RedisKey = { name: string; escaped: boolean; type: string };
+/**
+ * A key and a page of its value: `text` for a string; else `columns` and `rows` (hash: field,
+ * value; list: index, value; set: member; zset: member, score; stream: id, fields as JSON),
+ * and `next` to pass back (`cursor` for hashes, sets and streams, `offset` for lists and zsets).
+ */
+export type RedisValue = {
+  key: string;
+  type: 'string' | 'hash' | 'list' | 'set' | 'zset' | 'stream';
+  /** Seconds left; -1 without expiry. */
+  ttl: number;
+  length: number;
+  text: string | null;
+  escaped: boolean;
+  columns: string[];
+  rows: Cell[][];
+  escapedRows: boolean[];
+  next: string | number | null;
+};
+export type KeyRef = { connectionId: string; db: number; key: string; keyEscaped?: boolean };
+/** One change to a key (`op` and its fields, as the sidecar's `editKey` takes them). */
+export type RedisEdit =
+  | { op: 'setString'; value: string }
+  | { op: 'hashSet'; field: string; value: string }
+  | { op: 'hashDelete'; fields: string[] }
+  | { op: 'listSet'; index: number; value: string }
+  | { op: 'listPush'; value: string; head?: boolean }
+  | { op: 'listDelete'; indexes: number[] }
+  | { op: 'setAdd'; member: string }
+  | { op: 'setDelete'; members: string[] }
+  | { op: 'setRename'; member: string; to: string }
+  | { op: 'zSetAdd'; member: string; score: number }
+  | { op: 'zSetDelete'; members: string[] }
+  | { op: 'zSetRename'; member: string; to: string }
+  | { op: 'streamAdd'; fields: [string, string][] }
+  | { op: 'streamDelete'; ids: string[] }
+  | { op: 'create'; type: string; field?: string; value?: string; score?: number };
+
+export const redis = {
+  databases: (connectionId: string) => client.request<{ db: number; keys: number }[]>('redisDatabases', { connectionId }),
+  scan: (connectionId: string, db: number, pattern: string, cursor = '0', count = 1000, requestId?: string) =>
+    client.request<{ cursor: string; keys: RedisKey[] }>('scanKeys', { connectionId, db, pattern, cursor, count, requestId }),
+  get: (k: KeyRef & { cursor?: string; offset?: number; limit?: number }) => client.request<RedisValue>('getKey', k),
+  /** `escaped`: the texts in `edit` are escaped (the row or value was shown escaped). */
+  edit: (k: KeyRef, edit: RedisEdit, escaped = false) => client.request<null>('editKey', { ...k, escaped, ...edit }),
+  expire: (k: KeyRef, ttl: number | null) => client.request<null>('expireKey', { ...k, ttl }),
+  rename: (k: KeyRef, to: string) => client.request<null>('renameKey', { ...k, to }),
+  remove: (connectionId: string, db: number, keys: { name: string; escaped: boolean }[]) =>
+    client.request<{ deleted: number }>('deleteKeys', { connectionId, db, keys: keys.map((k) => [k.name, k.escaped]) }),
+  command: (connectionId: string, db: number, line: string, requestId?: string) => client.request<{ output: string; elapsedMs: number }>('redisCommand', { connectionId, db, line, requestId }),
 };

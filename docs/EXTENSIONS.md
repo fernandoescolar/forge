@@ -132,7 +132,7 @@ Components are React elements that Forge draws natively, with the active theme's
 | `Scroll` | A `View` that scrolls its content |
 | `Text` | Text; `selectable` |
 | `Button` | `label`, `icon`, `variant` (`filled`, `subtle`, `ghost`), `disabled`, `selected`, `tooltip`, `onClick` |
-| `Input` | `value`, `placeholder`, `onChange`, `onSubmit` (Enter, or ⌘Enter when `multiline`), `multiline`, `password`, `autoFocus` |
+| `Input` | `value`, `placeholder`, `onChange`, `onSubmit` (Enter, or ⌘Enter when `multiline`), `multiline`, `password`, `autoFocus`, `language` (highlights the text as that language, by Forge's name for it: `"JSON"`, `"YAML"`…) |
 | `Checkbox` | `checked`, `label`, `onChange` |
 | `Select` | A drop-down: `value`, `options` (`{ value, label }`), `placeholder`, `disabled`, `onChange` |
 | `Icon` | `name`: one of Zed's icon names, such as `sparkle`, `file_tree`, `database_zap` |

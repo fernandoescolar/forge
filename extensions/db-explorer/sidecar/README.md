@@ -4,7 +4,7 @@ Database sidecar for the DB Explorer extension. Extensions run in QuickJS withou
 extension spawns this binary and talks to it over **stdin/stdout, one JSON object per line (UTF-8)**.
 Logs go to stderr. The process exits when stdin closes.
 
-Engines: PostgreSQL, MySQL/MariaDB, SQLite (bundled, via `sqlx`), SQL Server (via `tiberius`), and MongoDB (the official driver; its own methods, below).
+Engines: PostgreSQL, MySQL/MariaDB, SQLite (bundled, via `sqlx`), SQL Server (via `tiberius`), MongoDB (the official driver) and Redis (the `redis` crate, with Sentinel); the last two have their own methods, below.
 TLS is rustls only (no OpenSSL), and the binary is self-contained.
 
 ## Building and testing
@@ -20,6 +20,8 @@ FORGE_SQL_TEST_MYSQL='{"host":"localhost","port":3306,"user":"root","password":"
 FORGE_SQL_TEST_MSSQL='{"host":"localhost","port":1433,"user":"sa","password":"pw","trustServerCertificate":true}' \
 cargo test --test servers
 FORGE_SQL_TEST_MONGO='{"host":"localhost","port":27017}' cargo test --test mongo
+FORGE_SQL_TEST_REDIS='{"host":"localhost","port":6379}' \
+FORGE_SQL_TEST_REDIS_SENTINEL='{"sentinels":"localhost:26379","masterName":"mymaster"}' cargo test --test redis
 ```
 
 ## Wire format
@@ -144,3 +146,22 @@ Documents, filters, sorts, projections and pipelines travel as **text**: JSON pl
 | `deleteDocument` | `connectionId, database, collection, id` | `null` |
 
 In `documents`, `id` is the `_id` as text (to pass back to `replaceDocument` / `deleteDocument`), `text` the whole document, indented, and `fields` each top-level field in short for a table (strings, numbers and booleans as such; ids and dates as text; `{ 3 fields }`, `[ 2 items ]` for objects and arrays).
+
+## Redis
+
+`connect` with `engine: "redis"` takes `host?, port?` (6379), `user?` (an ACL user), `password?`, `database?` (its number, `"0"`…), `ssl?` (`require` turns TLS on), `trustServerCertificate?`; or a `url` (`redis://`, `rediss://`); or, for **Sentinel**, `sentinels` (`host:port`, comma-separated; 26379 by default), `masterName` (`mymaster` by default) and `sentinelPassword?`, with `user`, `password` and `database` for the master. Each database gets its own connection, opened on first use; one that drops (a restart, a failover) is opened again, Sentinel naming the master again, and the request tried once more.
+
+Keys, fields and values travel as text: as they are when they are UTF-8, else escaped as `redis-cli` shows them (`\xNN`, and `\\` for a backslash) with a flag (`escaped`), so an edit writes the same bytes back.
+
+| method | params | result |
+|---|---|---|
+| `redisDatabases` | `connectionId` | `[{db, keys}]` (every database: `CONFIG GET databases`, else 16) |
+| `scanKeys` | `connectionId, db, pattern?` (`*`), `cursor?` (`"0"`), `count?` (1000), `type?`, `requestId?` | `{cursor, keys: [{name, escaped, type}]}` (`cursor` `"0"`: done) |
+| `getKey` | `connectionId, db, key, keyEscaped?, cursor?` (hash, set: SCAN cursor; stream: last id), `offset?` (list, zset), `limit?` (500) | `{key, type, ttl, length, text, escaped, columns, rows, escapedRows, next}` |
+| `editKey` | `connectionId, db, key, keyEscaped?, escaped?, op, …` | `null` |
+| `expireKey` | `connectionId, db, key, keyEscaped?, ttl` (seconds, or null to persist) | `null` |
+| `renameKey` | `connectionId, db, key, keyEscaped?, to` (fails when taken) | `null` |
+| `deleteKeys` | `connectionId, db, keys: [[name, escaped], …]` (UNLINK) | `{deleted}` |
+| `redisCommand` | `connectionId, db, line, requestId?` | `{output, elapsedMs}`: the reply as `redis-cli` prints it; server errors are `(error) …` replies |
+
+`editKey` ops: `setString {value}` (keeps the TTL), `hashSet {field, value}`, `hashDelete {fields}`, `listSet {index, value}`, `listPush {value, head?}`, `listDelete {indexes}`, `setAdd {member}`, `setDelete {members}`, `setRename {member, to}`, `zSetAdd {member, score}`, `zSetDelete {members}`, `zSetRename {member, to}`, `streamAdd {fields: [[field, value], …]}`, `streamDelete {ids}`, and `create {type, field?, value?, score?}` (a new key: fails when it exists). The console refuses commands that would take the shared connection over (`SUBSCRIBE`, `MONITOR`, `QUIT`…) and `SELECT` (the database is a parameter).
