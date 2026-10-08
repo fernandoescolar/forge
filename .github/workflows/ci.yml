@@ -34,5 +34,8 @@ jobs:
       - name: Extension API
         working-directory: packages/forge-api
         run: npm ci && npm test
+      - name: Antigravity ACP adapter
+        working-directory: packages/agy-acp
+        run: npm ci && npm test
       - name: Rust tests
         run: cargo test --workspace

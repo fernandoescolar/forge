@@ -1,0 +1,47 @@
+{
+  "name": "@forge-ide/agy-acp",
+  "version": "0.1.0",
+  "description": "Agent Client Protocol adapter for Google Antigravity's agy CLI",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/fernandoescolar/forge/tree/main/packages/agy-acp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fernandoescolar/forge.git",
+    "directory": "packages/agy-acp"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "antigravity",
+    "agy",
+    "gemini",
+    "forge-ide"
+  ],
+  "bin": {
+    "forge-agy-acp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/test"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/test/*.test.js",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
