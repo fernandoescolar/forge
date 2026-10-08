@@ -7,9 +7,14 @@ publish = false
 description = "Native ACP agent panel for Forge"
 
 [dependencies]
+askpass = { path = "../../vendor/zed/crates/askpass" }
 base64 = "0.22"
+forge-http = { path = "../forge-http" }
+forge-run = { path = "../forge-run" }
+forge-tests = { path = "../forge-tests" }
 forge-ui = { path = "../forge-ui" }
 settings = { path = "../../vendor/zed/crates/settings" }
+dap = { path = "../../vendor/zed/crates/dap" }
 db = { path = "../../vendor/zed/crates/db" }
 acp-client = { path = "../acp-client" }
 anyhow.workspace = true
@@ -19,7 +24,9 @@ editor = { path = "../../vendor/zed/crates/editor" }
 file_icons = { path = "../../vendor/zed/crates/file_icons" }
 fs = { path = "../../vendor/zed/crates/fs" }
 futures = "0.3"
+git = { path = "../../vendor/zed/crates/git" }
 git_ui = { path = "../../vendor/zed/crates/git_ui" }
+git_ui_core = { path = "../../vendor/zed/crates/git_ui_core" }
 zed_actions = { path = "../../vendor/zed/crates/zed_actions" }
 fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
@@ -46,6 +53,7 @@ theme = { path = "../../vendor/zed/crates/theme" }
 tokio.workspace = true
 ui = { path = "../../vendor/zed/crates/ui" }
 url.workspace = true
+uuid.workspace = true
 util = { path = "../../vendor/zed/crates/util" }
 workspace = { path = "../../vendor/zed/crates/workspace" }
 chrono = "0.4"

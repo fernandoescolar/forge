@@ -97,7 +97,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
             .child(h_flex().gap_1().child(Icon::new(IconName::ToolThink).size(IconSize::Small).color(Color::Muted)).child(Label::new("Thinking").size(LabelSize::Small).color(Color::Muted)))
             .child(div().opacity(0.7).child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))))
             .into_any_element(),
-        Entry::Tool { id, title, kind, status, detail, terminal, diffs } => {
+        Entry::Tool { id, title, kind, status, detail, terminal, diffs, command } => {
             let terminal_view = terminal.as_ref().and_then(|t| thread.terminal_view(t));
             // The permission request about this tool call, shown inside its card.
             let permission = thread.entries.iter().find_map(|e| match e {
@@ -128,6 +128,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                         .items_start()
                         .child(if waiting { Icon::new(IconName::Warning).size(IconSize::Small).color(Color::Warning) } else { Icon::new(icon).size(IconSize::Small).color(color) })
                         .child(wrapping(Label::new(title.clone()).size(LabelSize::Small)))
+                        .when_some(command.clone(), |el, c| el.child(div().flex_none().max_w(px(320.)).child(Label::new(c).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx).truncate())))
                         .when_some((!kind.is_empty()).then(|| kind.clone()), |el, k| el.child(div().flex_none().child(Label::new(k).size(LabelSize::XSmall).color(Color::Muted)))),
                 )
                 .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx)))
@@ -223,6 +224,10 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                 .child(status)
                 .into_any_element()
         }
+        Entry::Commit { message, files, origin, state, .. } => render_commit(thread, handle, ix, message, files, *origin, state, cx),
+        Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
+        Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
+        Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
             .items_start()
@@ -289,6 +294,8 @@ pub(crate) fn render_permission_answer(handle: &WeakEntity<Thread>, request_id: 
     for o in options {
         let (rid, oid, name) = (request_id.to_string(), o.id.clone(), o.name.clone());
         let (style, icon) = match o.kind.as_str() {
+            crate::thread::COMMIT_IN_FORGE => (ButtonStyle::Outlined, IconName::GitCommit),
+            crate::thread::PUSH_IN_FORGE => (ButtonStyle::Outlined, IconName::ArrowUp),
             "allow_once" => (ButtonStyle::Filled, IconName::Check),
             "allow_always" => (ButtonStyle::Outlined, IconName::CheckDouble),
             k if k.starts_with("reject") => (ButtonStyle::Subtle, IconName::Close),
@@ -308,6 +315,251 @@ pub(crate) fn render_permission_answer(handle: &WeakEntity<Thread>, request_id: 
         row = row.child(Button::new(SharedString::from(format!("perm-dismiss-{request_id}")), "Dismiss").on_click(on_thread(handle, move |t, _, cx| t.answer_permission(rid.clone(), None, cx))));
     }
     row.into_any_element()
+}
+
+/// A commit the agent proposes: its message and files, and how the user makes it.
+#[allow(clippy::too_many_arguments)]
+fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, message: &str, files: &[PathBuf], origin: crate::commit_proposal::Origin, state: &crate::commit_proposal::CommitState, cx: &App) -> AnyElement {
+    use crate::commit_proposal::{CommitState, Origin, short};
+    let colors = cx.theme().colors().clone();
+    let root = thread.root().clone();
+    let open = state.is_open();
+    let headline = match origin {
+        Origin::Tool => "The agent proposes a commit",
+        Origin::Command => "The agent tried to run git commit; make it from here",
+    };
+    let file_rows = files.iter().map(|f| {
+        let shown = f.strip_prefix(&root).unwrap_or(f).to_string_lossy().into_owned();
+        h_flex().gap_1().child(Icon::new(IconName::File).size(IconSize::XSmall).color(Color::Muted)).child(wrapping(Label::new(shown).size(LabelSize::Small).buffer_font(cx)))
+    });
+    let footer = match state {
+        CommitState::Committed { sha, .. } => h_flex()
+            .gap_1()
+            .child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success))
+            .child(Label::new(format!("Committed as {}", short(sha))).size(LabelSize::Small).color(Color::Success))
+            .into_any_element(),
+        CommitState::Declined => Label::new("→ Declined").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        CommitState::Committing => Label::new("Committing…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        CommitState::InPanel { .. } => h_flex()
+            .gap_1()
+            .flex_wrap()
+            .child(wrapping(Label::new("Staged and waiting in the Git panel: commit there.").size(LabelSize::Small).color(Color::Accent)))
+            .child(Button::new(("commit-decline", ix), "Decline").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.decline_commit_proposal(ix, cx))))
+            .into_any_element(),
+        CommitState::Waiting | CommitState::Failed(_) => h_flex()
+            .gap_1()
+            .flex_wrap()
+            .child(
+                Button::new(("commit-now", ix), "Commit")
+                    .style(ButtonStyle::Filled)
+                    .disabled(message.trim().is_empty())
+                    .start_icon(Icon::new(IconName::GitCommit).size(IconSize::Small))
+                    .on_click(on_thread(handle, move |t, _, cx| t.commit_proposal(ix, cx))),
+            )
+            // The Git panel shows the project's repository, not a thread's worktree.
+            .when(!thread.in_worktree(), |el| {
+                el.child(
+                    Button::new(("commit-panel", ix), "Edit in Git panel")
+                        .style(ButtonStyle::Outlined)
+                        .start_icon(Icon::new(IconName::Pencil).size(IconSize::Small))
+                        .on_click(on_thread(handle, move |t, window, cx| t.commit_proposal_in_panel(ix, window, cx))),
+                )
+            })
+            .child(Button::new(("commit-decline", ix), "Decline").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.decline_commit_proposal(ix, cx))))
+            .into_any_element(),
+    };
+    let shown_message = match state {
+        CommitState::Committed { message, .. } => message.clone(),
+        _ if message.trim().is_empty() => "(no message: write one in the Git panel)".to_string(),
+        _ => message.to_string(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(h_flex().gap_2().child(Icon::new(IconName::GitCommit).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted })).child(wrapping(Label::new(headline).size(LabelSize::Small))))
+        .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(Label::new(shown_message).size(LabelSize::Small).buffer_font(cx)))
+        .child(v_flex().gap_0p5().children(file_rows))
+        .when_some(if let CommitState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(format!("The commit failed: {e}")).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+/// A question from the agent: its options as buttons, a box for another answer, and Skip.
+fn render_question(handle: &WeakEntity<Thread>, ix: usize, question: &str, options: &[String], input: &gpui::Entity<editor::Editor>, answer: Option<&str>, cx: &App) -> AnyElement {
+    let colors = cx.theme().colors().clone();
+    let open = answer.is_none();
+    let body = match answer {
+        Some("") => Label::new("→ Skipped: the agent decides").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        Some(answer) => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(wrapping(Label::new(answer.to_string()).size(LabelSize::Small))).into_any_element(),
+        None => v_flex()
+            .gap_1()
+            .when(!options.is_empty(), |el| {
+                el.child(h_flex().gap_1().flex_wrap().children(options.iter().enumerate().map(|(oi, option)| {
+                    let option = option.clone();
+                    Button::new(("question-option", ix * 10 + oi), option.clone())
+                        .style(if oi == 0 { ButtonStyle::Filled } else { ButtonStyle::Outlined })
+                        .on_click(on_thread(handle, move |t, _, cx| t.answer_question(ix, Some(option.clone()), cx)))
+                })))
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(("question-input", ix))
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.editor_background)
+                            // Enter sends what was written.
+                            .on_action({
+                                let handle = handle.clone();
+                                move |_: &menu::Confirm, _, cx| {
+                                    handle.update(cx, |t, cx| t.answer_question(ix, None, cx)).ok();
+                                }
+                            })
+                            .child(input.clone()),
+                    )
+                    .child(Button::new(("question-send", ix), "Answer").on_click(on_thread(handle, move |t, _, cx| t.answer_question(ix, None, cx))))
+                    .child(Button::new(("question-skip", ix), "Skip").style(ButtonStyle::Subtle).tooltip(Tooltip::text("Let the agent decide")).on_click(on_thread(handle, move |t, _, cx| t.answer_question(ix, Some(String::new()), cx)))),
+            )
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1p5()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().warning_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().warning_background))
+        .child(h_flex().gap_2().items_start().child(Icon::new(IconName::Info).size(IconSize::Small).color(if open { Color::Warning } else { Color::Muted })).child(wrapping(Label::new(question.to_string()).size(LabelSize::Small).weight(FontWeight::MEDIUM))))
+        .child(body)
+        .into_any_element()
+}
+
+/// A language-server edit the agent asks for: what it does and the files it touches.
+fn render_edit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, plan: &crate::forge_tools::EditPlan, state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+    use crate::forge_tools::{EditKind, EditState};
+    use crate::push_proposal::plural;
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    let root = thread.root().clone();
+    let files = plan.files.iter().map(|f| {
+        let shown = f.strip_prefix(&root).unwrap_or(f).to_string_lossy().into_owned();
+        h_flex().gap_1().child(Icon::new(IconName::File).size(IconSize::XSmall).color(Color::Muted)).child(wrapping(Label::new(shown).size(LabelSize::Small).buffer_font(cx)))
+    });
+    let (headline, button) = match &plan.kind {
+        EditKind::Rename { symbol, new_name } => (
+            h_flex()
+                .gap_1()
+                .child(Label::new("The agent wants to rename").size(LabelSize::Small))
+                .child(Label::new(symbol.clone()).size(LabelSize::Small).buffer_font(cx))
+                .child(Label::new("→").size(LabelSize::Small).color(Color::Muted))
+                .child(Label::new(new_name.clone()).size(LabelSize::Small).buffer_font(cx).color(Color::Accent)),
+            "Rename",
+        ),
+        EditKind::CodeAction { title } => (h_flex().gap_1().child(Label::new("The agent wants to apply").size(LabelSize::Small)).child(wrapping(Label::new(title.clone()).size(LabelSize::Small).color(Color::Accent))), "Apply"),
+        EditKind::Format => (h_flex().child(Label::new("The agent wants to format this file").size(LabelSize::Small)), "Format"),
+    };
+    let detail = match plan.places {
+        Some(places) => format!("{} in {}, with the language server", plural(places, "place"), plural(plan.files.len(), "file")),
+        None => "With the language server; the changes join this conversation's".to_string(),
+    };
+    let footer = match state {
+        EditState::Applied => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(Label::new("Done: the files are in this conversation's changes").size(LabelSize::Small).color(Color::Success)).into_any_element(),
+        EditState::Declined => Label::new("→ Declined").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Applying => Label::new("Working…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Waiting | EditState::Failed(_) => h_flex()
+            .gap_1()
+            .child(Button::new(("edit-apply", ix), button).style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.apply_edit_proposal(ix, window, cx))))
+            .child(Button::new(("edit-decline", ix), "Decline").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.decline_edit(ix, cx))))
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(h_flex().gap_2().child(Icon::new(IconName::Pencil).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted })).child(headline))
+        .child(Label::new(detail).size(LabelSize::XSmall).color(Color::Muted))
+        .child(v_flex().gap_0p5().children(files))
+        .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+/// A push the agent proposes: the branch, where it goes and its commits.
+fn render_push(handle: &WeakEntity<Thread>, ix: usize, plan: &crate::push_proposal::PushPlan, origin: crate::commit_proposal::Origin, state: &crate::push_proposal::PushState, cx: &App) -> AnyElement {
+    use crate::commit_proposal::Origin;
+    use crate::push_proposal::{PushState, plural};
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    let headline = match origin {
+        Origin::Tool => "The agent proposes a push",
+        Origin::Command => "The agent tried to run git push; make it from here",
+    };
+    let route = format!("{} → {}{}", plan.branch, plan.target(), if plan.set_upstream { " (new branch, becomes its upstream)" } else { "" });
+    let commits = plan.commits.iter().map(|(sha, subject)| {
+        h_flex()
+            .gap_1p5()
+            .child(div().flex_none().child(Label::new(sha.clone()).size(LabelSize::Small).buffer_font(cx).color(Color::Muted)))
+            .child(wrapping(Label::new(subject.clone()).size(LabelSize::Small)))
+    });
+    let summary = match plan.commits.len() {
+        0 => "No new commits".to_string(),
+        n if n >= 50 => "50 or more commits".to_string(),
+        n => plural(n, "commit"),
+    };
+    let footer = match state {
+        PushState::Pushed => h_flex()
+            .gap_1()
+            .child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success))
+            .child(Label::new(format!("Pushed to {}", plan.target())).size(LabelSize::Small).color(Color::Success))
+            .into_any_element(),
+        PushState::Declined => Label::new("→ Declined").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        PushState::Pushing => Label::new("Pushing…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        PushState::Waiting | PushState::Failed(_) => h_flex()
+            .gap_1()
+            .flex_wrap()
+            .child(
+                Button::new(("push-now", ix), "Push")
+                    .style(ButtonStyle::Filled)
+                    .start_icon(Icon::new(IconName::ArrowUp).size(IconSize::Small))
+                    .on_click(on_thread(handle, move |t, window, cx| t.push_proposal(ix, window, cx))),
+            )
+            .child(Button::new(("push-decline", ix), "Decline").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.decline_push_proposal(ix, cx))))
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(h_flex().gap_2().child(Icon::new(IconName::ArrowUp).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted })).child(wrapping(Label::new(headline).size(LabelSize::Small))))
+        .child(h_flex().gap_1().child(Icon::new(IconName::GitBranch).size(IconSize::XSmall).color(Color::Muted)).child(wrapping(Label::new(route).size(LabelSize::Small).buffer_font(cx))))
+        .child(Label::new(summary).size(LabelSize::XSmall).color(Color::Muted))
+        .child(v_flex().gap_0p5().children(commits))
+        .when_some(if let PushState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(format!("The push failed: {e}")).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
 }
 
 pub(crate) fn render_diff(thread: &Thread, handle: &WeakEntity<Thread>, diff: &DiffView, cx: &App) -> AnyElement {

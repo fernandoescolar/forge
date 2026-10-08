@@ -41,6 +41,17 @@ pub enum Status {
     Busy,
 }
 
+/// The extra answer to a `git commit` permission request: make the commit from Forge.
+pub(crate) const COMMIT_IN_FORGE: &str = "forge_commit";
+/// The same for `git push`.
+pub(crate) const PUSH_IN_FORGE: &str = "forge_push";
+
+/// A `git commit` (with its message) or `git push` the agent asked to run.
+enum GitRedirect {
+    Commit(String),
+    Push,
+}
+
 pub(crate) struct PermissionOption {
     pub id: String,
     pub name: String,
@@ -54,7 +65,8 @@ pub(crate) enum Entry {
     User(String, Vec<String>),
     Agent(Entity<Markdown>),
     Thought(Entity<Markdown>),
-    Tool { id: String, title: String, kind: String, status: String, detail: Option<String>, terminal: Option<String>, diffs: Vec<DiffView> },
+    /// `command`: the command line of a command whose title is the agent's description of it.
+    Tool { id: String, title: String, kind: String, status: String, detail: Option<String>, terminal: Option<String>, diffs: Vec<DiffView>, command: Option<String> },
     Plan(Vec<(String, String)>),
     /// `tool_call_id`: the tool call it asks about; its card shows the question when it is
     /// in the thread (instead of a second card).
@@ -64,6 +76,16 @@ pub(crate) enum Entry {
     System(String, Color),
     /// The changed files checked after a turn (`None` while the language servers catch up).
     Check(Option<Vec<crate::verify::FileCheck>>),
+    /// A commit the agent proposes (see `commit_proposal`); `reply` answers its tool call.
+    Commit { message: String, files: Vec<PathBuf>, origin: crate::commit_proposal::Origin, state: crate::commit_proposal::CommitState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// A push the agent proposes (see `push_proposal`); `reply` answers its tool call.
+    Push { plan: crate::push_proposal::PushPlan, origin: crate::commit_proposal::Origin, state: crate::push_proposal::PushState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// A language-server edit the agent asks for (rename, code action, formatting), waiting
+    /// for the user when writes are reviewed.
+    LspEdit { plan: crate::forge_tools::EditPlan, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// A question the agent asks (`ask_user`): its options, a box for another answer, and
+    /// the answer once given (`None` while waiting; skipped questions answer "").
+    Question { question: String, options: Vec<String>, input: Entity<editor::Editor>, answer: Option<String>, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
     /// Sign-in card: the agent's login methods, run without leaving Forge.
     Auth { methods: Vec<AuthMethod>, terminal: Option<Entity<TerminalView>>, state: AuthState },
 }
@@ -80,6 +102,8 @@ pub(crate) enum AuthState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentLocation {
     pub path: PathBuf,
+    /// What the agent does there: the kind of its tool call (`read`, `edit`, `search`…).
+    pub kind: Option<String>,
     /// Zero-based.
     pub line: Option<u32>,
 }
@@ -91,6 +115,8 @@ pub enum ThreadEvent {
     RestoreInput(String),
     /// The list of changed files (or a file's latest content) changed.
     ChangesUpdated,
+    /// The agent asked to show the user its changes (`show_changes`), at a file if given.
+    ShowChanges(Option<PathBuf>),
 }
 
 /// What the agent reported about tokens (ACP `usage_update` and each turn's `usage`;
@@ -313,6 +339,9 @@ pub struct Thread {
     /// Terminals the agent created (shared with the `TerminalHost`) and their embedded views.
     terminals: TerminalRegistry,
     terminal_views: HashMap<String, Entity<TerminalView>>,
+    /// Terminals that show the output of commands the agent ran itself (`_meta.terminal_info`),
+    /// by their id; their views are in `terminal_views`.
+    display_terminals: HashMap<String, Entity<terminal::Terminal>>,
     approved_edits: ApprovedEdits,
     /// What the agent may do without asking (see `permissions`).
     permissions: crate::permissions::SharedPermissions,
@@ -322,6 +351,13 @@ pub struct Thread {
     accepts_images: bool,
     /// MCP servers (ACP JSON) passed to every session.
     mcp_servers: Vec<Value>,
+    /// This thread's place on Forge's own MCP server (`forge_mcp`), for agents that take
+    /// HTTP MCP servers.
+    forge_mcp: Option<crate::forge_mcp::Registration>,
+    /// Permission requests to run `git commit` or `git push`, and what Forge offers instead.
+    git_redirects: HashMap<String, GitRedirect>,
+    /// The session got Forge's tools.
+    forge_tools: bool,
     /// Already told the user the agent isn't signed in (once per connection).
     warned_auth: bool,
     /// Login methods the connected agent offers (from `initialize`).
@@ -423,7 +459,7 @@ impl Thread {
         let fs = Arc::new(ProjectFs::new(&project, root.clone(), policy, cx));
         let terminals = TerminalRegistry::default();
         let terminal_host = Arc::new(ZedTerminals::new(&project, terminals.clone(), cx));
-        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host).with_terminal_auth());
+        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host).with_terminal_auth().with_display_terminals());
 
         // broadcast (tokio) → unbounded (GPUI): the thread consumes events on the UI thread.
         let (tx, mut rx) = mpsc::unbounded();
@@ -466,6 +502,17 @@ impl Thread {
         })
         .detach();
 
+        let forge_mcp = crate::forge_mcp::register(&Tokio::handle(cx)).map(|(registration, mut requests)| {
+            cx.spawn_in(window, async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
+                while let Some(request) = requests.next().await {
+                    if this.update_in(cx, |this, window, cx| this.handle_tool_request(request, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            registration
+        });
         let mcp_servers: Vec<Value> = config.as_ref().map(|c| c.mcp_servers.iter().map(|m| m.to_acp()).collect()).unwrap_or_default();
         let agents = config.as_ref().map(|c| c.agents.clone()).unwrap_or_default();
         Self {
@@ -496,12 +543,16 @@ impl Thread {
             project: project.downgrade(),
             terminals,
             terminal_views: HashMap::new(),
+            display_terminals: HashMap::new(),
             approved_edits,
             permissions,
             _permissions_subscription: permissions_subscription,
             embedded_context: false,
             accepts_images: false,
             mcp_servers,
+            forge_mcp,
+            git_redirects: HashMap::new(),
+            forge_tools: false,
             warned_auth: false,
             auth_methods: vec![],
             retry_prompt: None,
@@ -648,7 +699,7 @@ impl Thread {
 
     /// Writes waiting for the user's decision.
     pub fn pending_reviews(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. })).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
     }
 
     /// Where the agent last read or wrote.
@@ -698,11 +749,30 @@ impl Thread {
         files
     }
 
+    /// A terminal that only shows output, embedded like the agent's own terminals.
+    fn add_display_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.project.upgrade() else { return };
+        if self.display_terminals.contains_key(id) {
+            return;
+        }
+        let path_style = project.read(cx).path_style(cx);
+        let builder = terminal::TerminalBuilder::new_display_only(Default::default(), terminal::terminal_settings::AlternateScroll::On, None, 0, cx.background_executor(), path_style);
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let (workspace, project) = (self.workspace.clone(), self.project.clone());
+        let view = cx.new(|cx| {
+            let mut view = TerminalView::new(terminal.clone(), workspace, None, project, window, cx);
+            view.set_embedded_mode(Some(15), cx);
+            view
+        });
+        self.display_terminals.insert(id.to_string(), terminal);
+        self.terminal_views.insert(id.to_string(), view);
+    }
+
     pub(crate) fn terminal_view(&self, id: &str) -> Option<Entity<TerminalView>> {
         self.terminal_views.get(id).cloned()
     }
 
-    fn changed(&self, cx: &mut Context<Self>) {
+    pub(crate) fn changed(&self, cx: &mut Context<Self>) {
         cx.emit(ThreadEvent::Updated);
         cx.notify();
     }
@@ -756,7 +826,8 @@ impl Thread {
         });
         let (rt, root, id) = (self.runtime.clone(), self.root.clone(), spec.id.clone());
         let resume_id = resume.as_ref().map(|r| r.session_id.clone());
-        let mcp = self.mcp_servers.clone();
+        let mut mcp = self.mcp_servers.clone();
+        let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
         let spec_for_auth = spec.clone();
         cx.spawn_in(window, async move |this, cx| {
             let mut env: Vec<(String, String)> = match shell_env {
@@ -783,6 +854,10 @@ impl Thread {
                         rt.start(spec).await?;
                     }
                     let init = rt.initialize(&id, PROTOCOL_VERSION).await?;
+                    // Forge's own tools, for agents that take HTTP MCP servers.
+                    if let (Some(server), true) = (forge_server, init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool).unwrap_or(false)) {
+                        mcp.push(server);
+                    }
                     let can_load = init.pointer("/agentCapabilities/loadSession").and_then(Value::as_bool).unwrap_or(false);
                     if let (Some(sid), true) = (resume_id, can_load) {
                         // Agents may not know the session anymore (e.g. it was restarted); fall back.
@@ -812,6 +887,7 @@ impl Thread {
                         this.agent_name = init.pointer("/agentInfo/name").and_then(Value::as_str).map(str::to_string);
                         this.embedded_context = init.pointer("/agentCapabilities/promptCapabilities/embeddedContext").and_then(Value::as_bool).unwrap_or(false);
                         this.accepts_images = init.pointer("/agentCapabilities/promptCapabilities/image").and_then(Value::as_bool).unwrap_or(false);
+                        this.forge_tools = this.forge_mcp.is_some() && init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool).unwrap_or(false);
                         this.connected = Some((id.clone(), sid));
                         // Needs the connection: it changes the session's mode.
                         this.apply_policy_mode(cx);
@@ -919,6 +995,9 @@ impl Thread {
         }
         let extras = crate::context::gather(&specials, self.workspace.clone(), self.project.clone(), self.root.clone(), cx);
         let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file()));
+        if !self.rules_sent && self.forge_tools {
+            blocks.push(json!({ "type": "text", "text": crate::forge_mcp::INSTRUCTIONS }));
+        }
         self.rules_sent = true;
         let retry_text = text.clone();
         self.entries.push(Entry::User(text, labels));
@@ -1119,6 +1198,10 @@ impl Thread {
                     Entry::Plan(items) => RecordEntry::Plan { items: items.clone() },
                     Entry::Permission { title, resolved, .. } => RecordEntry::System { text: format!("Permission: {title} → {}", resolved.clone().unwrap_or_else(|| "pending".into())) },
                     Entry::Review { diff, outcome, .. } => RecordEntry::System { text: format!("Edit {}: {}", diff.edit.path, outcome.unwrap_or("pending")) },
+                    Entry::Commit { message, state, .. } => RecordEntry::System { text: format!("Commit \"{}\": {}", message.lines().next().unwrap_or_default(), crate::commit_proposal::outcome(state)) },
+                    Entry::Push { plan, state, .. } => RecordEntry::System { text: format!("Push of {} to {}: {}", plan.branch, plan.target(), crate::push_proposal::outcome(plan, state)) },
+                    Entry::Question { question, answer, .. } => RecordEntry::System { text: format!("Asked: {question} → {}", answer.as_deref().map(|a| if a.is_empty() { "skipped" } else { a }).unwrap_or("not answered")) },
+                    Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
             })
@@ -1174,7 +1257,7 @@ impl Thread {
                 RecordEntry::Agent { text } => Entry::Agent(cx.new(|cx| Markdown::new(text.clone().into(), Some(self.languages.clone()), None, cx))),
                 RecordEntry::Thought { text } => Entry::Thought(cx.new(|cx| Markdown::new(text.clone().into(), Some(self.languages.clone()), None, cx))),
                 RecordEntry::Tool { title, kind, status } => {
-                    Entry::Tool { id: String::new(), title: title.clone(), kind: kind.clone(), status: status.clone(), detail: None, terminal: None, diffs: vec![] }
+                    Entry::Tool { id: String::new(), title: title.clone(), kind: kind.clone(), status: status.clone(), detail: None, terminal: None, diffs: vec![], command: None }
                 }
                 RecordEntry::Plan { items } => Entry::Plan(items.clone()),
                 RecordEntry::System { text } => Entry::System(text.clone(), Color::Muted),
@@ -1338,7 +1421,7 @@ impl Thread {
         let edit = Edit { path: review.path.to_string_lossy().into_owned(), old_text: review.old_text, new_text: review.new_text };
         let hunks: Vec<(Hunk, bool)> = hunks(edit.old_text.as_deref().unwrap_or_default(), &edit.new_text).into_iter().map(|h| (h, true)).collect();
         let first_change = hunks.first().map(|(h, _): &(Hunk, bool)| h.new.start);
-        self.location = Some(AgentLocation { path: review.path.clone(), line: first_change });
+        self.location = Some(AgentLocation { path: review.path.clone(), line: first_change, kind: Some("edit".into()) });
         // Editable: the user can adjust the proposal before accepting it.
         let diff = DiffView::editable(edit, self.languages.clone(), window, cx);
         self.entries.push(Entry::Review { diff, hunks, reply: Some(review.reply), outcome: None });
@@ -1435,6 +1518,10 @@ impl Thread {
         let waiting = self.entries.iter().rev().find_map(|e| match e {
             Entry::Permission { title, resolved: None, .. } => Some(title.clone()),
             Entry::Review { diff, outcome: None, .. } => Some(format!("review the change to {}", std::path::Path::new(&diff.edit.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            Entry::Commit { reply: Some(_), .. } => Some("the proposed commit".to_string()),
+            Entry::Push { reply: Some(_), .. } => Some("the proposed push".to_string()),
+            Entry::LspEdit { plan, reply: Some(_), .. } => Some(plan.summary()),
+            Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
         });
         if let Some(title) = waiting {
@@ -1451,6 +1538,14 @@ impl Thread {
             Some(Entry::Thought(_)) => ("Thinking".into(), false),
             Some(Entry::Agent(_)) => ("Writing the answer".into(), false),
             _ => ("Working".into(), false),
+        })
+    }
+
+    /// The title of the tool call running now, if any.
+    pub(crate) fn running_tool(&self) -> Option<&str> {
+        self.entries.iter().rev().take_while(|e| !matches!(e, Entry::User(..))).find_map(|e| match e {
+            Entry::Tool { title, status, .. } if status == "in_progress" || status == "pending" => Some(title.as_str()),
+            _ => None,
         })
     }
 
@@ -1874,8 +1969,476 @@ impl Thread {
         roots
     }
 
+    /// What Forge's tools work on, for this thread.
+    fn ide(&self) -> crate::forge_tools::Ide {
+        crate::forge_tools::Ide { project: self.project.clone(), workspace: self.workspace.clone(), root: self.root.clone() }
+    }
+
+    /// A call to a tool of Forge's MCP server (see `forge_mcp`).
+    fn handle_tool_request(&mut self, request: crate::forge_mcp::ToolRequest, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::commit_proposal::Origin;
+        use crate::forge_tools::{self as tools, str_arg};
+        let crate::forge_mcp::ToolRequest { name, args, reply } = request;
+        match name.as_str() {
+            "propose_commit" => {
+                let Some(message) = str_arg(&args, "message") else {
+                    let _ = reply.send(Err("`message` is empty.".into()));
+                    return;
+                };
+                let files = args.get("files").and_then(Value::as_array).map(|fs| fs.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                self.propose_commit(message, files, Origin::Tool, Some(reply), cx);
+            }
+            "propose_push" => self.propose_push(str_arg(&args, "remote"), Origin::Tool, Some(reply), cx),
+            "rename_symbol" | "apply_code_action" | "format_file" => self.propose_edit(name, args, reply, window, cx),
+            "ask_user" => {
+                let Some(question) = str_arg(&args, "question") else {
+                    let _ = reply.send(Err("`question` is empty.".into()));
+                    return;
+                };
+                let options: Vec<String> = args.get("options").and_then(Value::as_array).map(|xs| xs.iter().filter_map(Value::as_str).map(str::trim).filter(|o| !o.is_empty()).take(6).map(str::to_string).collect()).unwrap_or_default();
+                let input = cx.new(|cx| {
+                    let mut editor = editor::Editor::single_line(window, cx);
+                    editor.set_placeholder_text(if options.is_empty() { "Your answer…" } else { "Or write another answer…" }, window, cx);
+                    editor
+                });
+                self.entries.push(Entry::Question { question, options, input, answer: None, reply: Some(reply) });
+                self.changed(cx);
+            }
+            "notify" => {
+                let Some(message) = str_arg(&args, "message") else {
+                    let _ = reply.send(Err("`message` is empty.".into()));
+                    return;
+                };
+                self.notify_user(message.clone(), cx);
+                let _ = reply.send(Ok("The user was notified.".into()));
+            }
+            "show_changes" => {
+                let answer = if self.changes.is_empty() {
+                    Ok("You haven't changed any file in this conversation.".to_string())
+                } else {
+                    cx.emit(ThreadEvent::ShowChanges(str_arg(&args, "path").map(|p| self.root.join(p))));
+                    Ok(format!("Opened the review of your changes ({} files) for the user.", self.changes.len()))
+                };
+                let _ = reply.send(answer);
+            }
+            _ => {
+                let ide = self.ide();
+                cx.spawn_in(window, async move |_, cx| {
+                    let answer = match name.as_str() {
+                        "run_tests" => tools::run_tests(ide, args, cx).await,
+                        "diagnostics" => tools::diagnostics(ide, args, cx).await,
+                        "go_to_definition" => tools::definition(ide, args, cx).await,
+                        "find_references" => tools::references(ide, args, cx).await,
+                        "hover" => tools::hover(ide, args, cx).await,
+                        "workspace_symbols" => tools::workspace_symbols(ide, args, cx).await,
+                        "code_actions" => tools::code_actions(ide, args, cx).await,
+                        "run_app" => tools::run_app(ide, args, cx).await,
+                        "app_output" => tools::app_output(ide, args, cx).await,
+                        "stop_app" => tools::stop_app(ide, cx).await,
+                        "show_file" => tools::show_file(ide, args, cx).await,
+                        "http_request" => tools::http_request(ide, args, cx).await,
+                        "set_breakpoint" => crate::forge_debug::set_breakpoint(ide, args, cx).await,
+                        "remove_breakpoint" => crate::forge_debug::remove_breakpoint(ide, args, cx).await,
+                        "start_debugging" => crate::forge_debug::start_debugging(ide, args, cx).await,
+                        "debug_step" => crate::forge_debug::debug_step(ide, args, cx).await,
+                        "debug_evaluate" => crate::forge_debug::debug_evaluate(ide, args, cx).await,
+                        "stop_debugging" => crate::forge_debug::stop_debugging(ide, cx).await,
+                        other => Err(format!("Unknown tool: {other}")),
+                    };
+                    let _ = reply.send(answer);
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Answers the question at `ix`: with `answer`, or with what the user wrote when `None`.
+    /// An empty answer skips it.
+    pub(crate) fn answer_question(&mut self, ix: usize, answer: Option<String>, cx: &mut Context<Self>) {
+        let Some(Entry::Question { input, answer: given, reply, .. }) = self.entries.get_mut(ix) else { return };
+        if given.is_some() {
+            return;
+        }
+        let text = answer.unwrap_or_else(|| input.read(cx).text(cx).trim().to_string());
+        if let Some(reply) = reply.take() {
+            let _ = reply.send(if text.is_empty() { Ok("The user skipped the question: decide yourself, and say what you chose.".into()) } else { Ok(format!("The user answered: {text}")) });
+        }
+        *given = Some(text);
+        self.changed(cx);
+    }
+
+    /// `notify`: a toast in the workspace, and the message in the thread.
+    fn notify_user(&mut self, message: String, cx: &mut Context<Self>) {
+        struct AgentNotification;
+        let name = self.agent_label();
+        if let Some(workspace) = self.workspace.upgrade() {
+            let text = format!("{name}: {message}");
+            workspace.update(cx, |ws, cx| ws.show_toast(workspace::Toast::new(workspace::notifications::NotificationId::unique::<AgentNotification>(), text), cx));
+        }
+        self.system(format!("Notified you: {message}"), Color::Accent);
+        self.changed(cx);
+    }
+
+    /// A language-server edit: a card when the user reviews writes, else made right away.
+    fn propose_edit(&mut self, name: String, args: Value, reply: oneshot::Sender<crate::forge_mcp::ToolReply>, window: &mut Window, cx: &mut Context<Self>) {
+        let review = self.config.as_ref().is_none_or(|c| c.review_writes) && !self.permissions.get().skips_review();
+        let ide = self.ide();
+        cx.spawn_in(window, async move |this, cx| {
+            let plan = match crate::forge_tools::edit_plan(&name, &ide, &args, cx).await {
+                Ok(plan) => plan,
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                    return;
+                }
+            };
+            if review {
+                this.update(cx, |this, cx| {
+                    this.entries.push(Entry::LspEdit { plan, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
+                    this.changed(cx);
+                })
+                .ok();
+                return;
+            }
+            let applied = crate::forge_tools::apply_edit(&ide, &plan, cx).await;
+            let answer = this.update(cx, |this, cx| this.edited(&plan, applied, cx)).unwrap_or_else(|_| Err("The conversation was closed.".into()));
+            let _ = reply.send(answer);
+        })
+        .detach();
+    }
+
+    /// Records the files an edit changed (they join the conversation's changes) and says
+    /// what happened.
+    fn edited(&mut self, plan: &crate::forge_tools::EditPlan, applied: Result<Vec<WriteRecord>, String>, cx: &mut Context<Self>) -> crate::forge_mcp::ToolReply {
+        let records = applied?;
+        if records.is_empty() {
+            return Ok(format!("Nothing to change: {} changed no file.", plan.summary()));
+        }
+        let files: Vec<String> = records.iter().map(|r| self.ide().show(&r.path)).collect();
+        for record in records {
+            self.record_write(record, cx);
+        }
+        Ok(format!("Done ({}), in {}: {}", plan.summary(), crate::push_proposal::plural(files.len(), "file"), files.join(", ")))
+    }
+
+    pub(crate) fn apply_edit_proposal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::forge_tools::EditState;
+        let plan = match self.entries.get_mut(ix) {
+            Some(Entry::LspEdit { plan, state, .. }) if state.is_open() => {
+                *state = EditState::Applying;
+                plan.clone()
+            }
+            _ => return,
+        };
+        self.changed(cx);
+        let ide = self.ide();
+        cx.spawn_in(window, async move |this, cx| {
+            let applied = crate::forge_tools::apply_edit(&ide, &plan, cx).await;
+            this.update(cx, |this, cx| {
+                let answer = this.edited(&plan, applied, cx);
+                if let Some(Entry::LspEdit { state, reply, .. }) = this.entries.get_mut(ix) {
+                    match &answer {
+                        Ok(_) => {
+                            *state = EditState::Applied;
+                            if let Some(reply) = reply.take() {
+                                let _ = reply.send(answer);
+                            }
+                        }
+                        // Stays open: the user can try again or decline.
+                        Err(e) => *state = EditState::Failed(e.clone()),
+                    }
+                }
+                this.changed(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn decline_edit(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(Entry::LspEdit { plan, state, reply }) = self.entries.get_mut(ix) {
+            if state.is_open() {
+                *state = crate::forge_tools::EditState::Declined;
+                if let Some(reply) = reply.take() {
+                    let _ = reply.send(Err(format!("The user declined: they don't want to {}. Nothing changed.", plan.summary())));
+                }
+            }
+        }
+        self.changed(cx);
+    }
+
+    /// Shows a commit card for `files` (relative to the thread's folder; every change when
+    /// empty).
+    fn propose_commit(&mut self, message: String, files: Vec<String>, origin: crate::commit_proposal::Origin, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>>, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let resolved = cx.background_spawn(async move { crate::commit_proposal::resolve_files(&root, &files) }).await;
+            this.update(cx, |this, cx| {
+                match resolved {
+                    Ok(files) => {
+                        let state = crate::commit_proposal::CommitState::Waiting;
+                        this.entries.push(Entry::Commit { message, files, origin, state, reply });
+                    }
+                    Err(e) => {
+                        let e = format!("{e:#}");
+                        this.system(format!("The agent proposed a commit, but {e}."), Color::Warning);
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(format!("Nothing to commit: {e}")));
+                        }
+                    }
+                }
+                this.changed(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The commit card at `ix`, while the user can still act on it: its message and files.
+    fn open_commit(&self, ix: usize) -> Option<(String, Vec<PathBuf>)> {
+        match self.entries.get(ix) {
+            Some(Entry::Commit { message, files, state, .. }) if state.is_open() => Some((message.clone(), files.clone())),
+            _ => None,
+        }
+    }
+
+    /// Commits the proposal at `ix` as it is.
+    pub(crate) fn commit_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some((message, files)) = self.open_commit(ix) else { return };
+        self.set_commit_state(ix, crate::commit_proposal::CommitState::Committing, cx);
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { crate::commit_proposal::commit(&root, &files, &message) }).await;
+            let state = match result {
+                Ok((sha, message)) => crate::commit_proposal::CommitState::Committed { sha, message },
+                Err(e) => crate::commit_proposal::CommitState::Failed(format!("{e:#}")),
+            };
+            this.update(cx, |this, cx| this.set_commit_state(ix, state, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Stages the proposal's files and puts its message in the Git panel, where the user
+    /// edits and commits it; the card follows HEAD to see the commit made.
+    pub(crate) fn commit_proposal_in_panel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::commit_proposal::{CommitState, head, last_commit, stage_only};
+        let Some((message, files)) = self.open_commit(ix) else { return };
+        let (root, workspace) = (self.root.clone(), self.workspace.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let staged = cx.background_spawn({
+                let root = root.clone();
+                async move { stage_only(&root, &files).map(|()| head(&root)) }
+            });
+            let before = match staged.await {
+                Ok(before) => before,
+                Err(e) => {
+                    this.update(cx, |this, cx| this.set_commit_state(ix, CommitState::Failed(format!("{e:#}")), cx)).ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| this.set_commit_state(ix, CommitState::InPanel { head: before.clone() }, cx)).ok();
+            workspace
+                .update_in(cx, |ws, window, cx| {
+                    let Some(panel) = ws.panel::<git_ui::git_panel::GitPanel>(cx) else { return };
+                    panel.read(cx).commit_message_buffer(cx).update(cx, |b, cx| b.set_text(message, cx));
+                    ws.focus_panel::<git_ui::git_panel::GitPanel>(window, cx);
+                })
+                .ok();
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
+                let waiting = this.read_with(cx, |t, _| matches!(t.entries.get(ix), Some(Entry::Commit { state: CommitState::InPanel { .. }, .. }))).unwrap_or(false);
+                if !waiting {
+                    break;
+                }
+                let root = root.clone();
+                let before = before.clone();
+                let made = cx.background_spawn(async move { (head(&root) != before).then(|| last_commit(&root).ok()).flatten() }).await;
+                if let Some((sha, message)) = made {
+                    this.update(cx, |this, cx| this.set_commit_state(ix, CommitState::Committed { sha, message }, cx)).ok();
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn decline_commit_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.open_commit(ix).is_some() {
+            self.set_commit_state(ix, crate::commit_proposal::CommitState::Declined, cx);
+        }
+    }
+
+    /// Moves the card at `ix` on; a decision (commit made or declined) answers the agent.
+    fn set_commit_state(&mut self, ix: usize, new: crate::commit_proposal::CommitState, cx: &mut Context<Self>) {
+        use crate::commit_proposal::CommitState;
+        if let Some(Entry::Commit { state, reply, .. }) = self.entries.get_mut(ix) {
+            *state = new;
+            if matches!(state, CommitState::Committed { .. } | CommitState::Declined) {
+                if let Some(reply) = reply.take() {
+                    let _ = reply.send(crate::commit_proposal::report(state));
+                }
+            }
+        }
+        self.changed(cx);
+    }
+
+    /// Shows a push card for the thread's current branch (to `remote`, or its upstream).
+    fn propose_push(&mut self, remote: Option<String>, origin: crate::commit_proposal::Origin, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>>, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let plan = cx.background_spawn(async move { crate::push_proposal::plan(&root, remote.as_deref()) }).await;
+            this.update(cx, |this, cx| {
+                match plan {
+                    Ok(plan) => {
+                        let state = crate::push_proposal::PushState::Waiting;
+                        this.entries.push(Entry::Push { plan, origin, state, reply });
+                    }
+                    Err(e) => {
+                        let e = format!("{e:#}");
+                        this.system(format!("The agent proposed a push, but {e}."), Color::Warning);
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(format!("Nothing to push: {e}")));
+                        }
+                    }
+                }
+                this.changed(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pushes as the card at `ix` says, through Zed's repository: credentials are asked as
+    /// in the Git panel.
+    pub(crate) fn push_proposal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::push_proposal::PushState;
+        let plan = match self.entries.get(ix) {
+            Some(Entry::Push { plan, state, .. }) if state.is_open() => plan.clone(),
+            _ => return,
+        };
+        // The repository the thread's folder is in (a worktree's commits are in it too).
+        let repo = self.project.upgrade().and_then(|project| {
+            let store = project.read(cx).git_store().read(cx);
+            store.repositories().values().filter(|r| self.root.starts_with(&r.read(cx).work_directory_abs_path)).max_by_key(|r| r.read(cx).work_directory_abs_path.as_os_str().len()).cloned()
+        });
+        let Some(repo) = repo else {
+            self.set_push_state(ix, PushState::Failed("Forge doesn't know this folder's repository.".into()), cx);
+            return;
+        };
+        self.set_push_state(ix, PushState::Pushing, cx);
+        let (workspace, window_handle) = (self.workspace.clone(), window.window_handle());
+        cx.spawn_in(window, async move |this, cx| {
+            let operation: gpui::SharedString = format!("git push {} {}", plan.remote, plan.branch).into();
+            let askpass = askpass::AskPassDelegate::new_with_cancellation(cx, move |prompt, tx, cancellation, cx| {
+                window_handle
+                    .update(cx, |_, window, cx| {
+                        workspace
+                            .update(cx, |ws, cx| ws.toggle_modal(window, cx, |window, cx| git_ui_core::askpass_modal::AskPassModal::new(operation.clone(), prompt.into(), tx, cancellation, window, cx)))
+                            .ok();
+                    })
+                    .ok();
+            });
+            let options = plan.set_upstream.then_some(git::repository::PushOptions::SetUpstream);
+            let pushed = repo.update(cx, |repo, cx| repo.push(plan.branch.clone().into(), plan.remote_branch.clone().into(), plan.remote.clone().into(), options, askpass, cx));
+            let state = match pushed.await {
+                Ok(Ok(_)) => PushState::Pushed,
+                Ok(Err(e)) => PushState::Failed(format!("{e:#}")),
+                Err(_) => PushState::Failed("The push was canceled.".into()),
+            };
+            this.update(cx, |this, cx| this.set_push_state(ix, state, cx)).ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn decline_push_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if matches!(self.entries.get(ix), Some(Entry::Push { state, .. }) if state.is_open()) {
+            self.set_push_state(ix, crate::push_proposal::PushState::Declined, cx);
+        }
+    }
+
+    /// Moves the card at `ix` on; a decision (pushed or declined) answers the agent.
+    fn set_push_state(&mut self, ix: usize, new: crate::push_proposal::PushState, cx: &mut Context<Self>) {
+        use crate::push_proposal::PushState;
+        if let Some(Entry::Push { plan, state, reply, .. }) = self.entries.get_mut(ix) {
+            *state = new;
+            if matches!(state, PushState::Pushed | PushState::Declined) {
+                if let Some(reply) = reply.take() {
+                    let _ = reply.send(crate::push_proposal::report(plan, state));
+                }
+            }
+        }
+        self.changed(cx);
+    }
+
+    /// Records the files a finished edit tool call changed on disk (see `apply_update`).
+    fn record_tool_edits(&mut self, tool_call_id: &str, cx: &mut Context<Self>) {
+        // Each file's diff: before and after, when the tool call carried whole files.
+        let edits: Vec<(PathBuf, Option<String>, String)> = self
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Tool { id, diffs, .. } if id == tool_call_id => Some(diffs.iter().map(|d| (PathBuf::from(&d.edit.path), d.edit.old_text.clone(), d.edit.new_text.clone())).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if edits.is_empty() {
+            return;
+        }
+        let fs = <dyn fs::Fs>::global(cx);
+        cx.spawn(async move |this, cx| {
+            let mut now = Vec::new();
+            for (path, old_text, new_text) in edits {
+                now.push((fs.load(&path).await.ok(), path, old_text, new_text));
+            }
+            this.update(cx, |this, cx| {
+                for (on_disk, path, old_text, new_text) in now {
+                    // Deleted or unreadable: nothing to show.
+                    let Some(on_disk) = on_disk else { continue };
+                    // Only whole-file diffs say what the file was: a diff of the edited
+                    // snippet doesn't end as the file on disk does.
+                    if !same_text(&new_text, &on_disk) || old_text.as_deref() == Some(on_disk.as_str()) {
+                        continue;
+                    }
+                    // Already recorded with this content (it went through `ProjectFs`).
+                    if this.changes.iter().any(|c| c.path == path && c.current == on_disk) {
+                        continue;
+                    }
+                    this.record_write(WriteRecord { path, old_text, new_text: on_disk }, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// It works in its own git worktree.
+    pub(crate) fn in_worktree(&self) -> bool {
+        self.worktree.is_some()
+    }
+
     pub(crate) fn answer_permission(&mut self, request_id: String, option: Option<(String, String)>, cx: &mut Context<Self>) {
         let Some((agent, _)) = self.connected.clone() else { return };
+        // The agent's `git commit` or `git push` becomes a proposal: it is told no, the user
+        // makes it here.
+        if option.as_ref().is_some_and(|(id, _)| id == COMMIT_IN_FORGE || id == PUSH_IN_FORGE) {
+            let reject = self.entries.iter().find_map(|e| match e {
+                Entry::Permission { request_id: r, options, .. } if *r == request_id => options.iter().find(|o| o.kind.starts_with("reject")).map(|o| o.id.clone()),
+                _ => None,
+            });
+            let origin = crate::commit_proposal::Origin::Command;
+            match self.git_redirects.remove(&request_id) {
+                Some(GitRedirect::Commit(message)) => {
+                    self.answer_permission(request_id, reject.map(|id| (id, "Moved to a commit you make from Forge".to_string())), cx);
+                    self.propose_commit(message, vec![], origin, None, cx);
+                }
+                Some(GitRedirect::Push) => {
+                    self.answer_permission(request_id, reject.map(|id| (id, "Moved to a push you make from Forge".to_string())), cx);
+                    self.propose_push(None, origin, None, cx);
+                }
+                None => {}
+            }
+            return;
+        }
+        self.git_redirects.remove(&request_id);
         let allowed = option.as_ref().is_some_and(|(id, _)| {
             self.entries.iter().any(|e| matches!(e, Entry::Permission { request_id: r, options, .. } if *r == request_id && options.iter().any(|o| &o.id == id && o.allow)))
         });
@@ -1931,7 +2494,7 @@ impl Thread {
             }
             AgentEvent::PermissionRequested { agent_id, request_id, params } if ours(&agent_id) => {
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("The agent wants to run a tool").to_string();
-                let options = params
+                let mut options: Vec<PermissionOption> = params
                     .get("options")
                     .and_then(Value::as_array)
                     .map(|xs| {
@@ -1956,6 +2519,18 @@ impl Thread {
                     crate::permissions::Decision::Ask => None,
                 };
                 let tool_call_id = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).map(str::to_string);
+                // A `git commit` or `git push`: offer to make it from Forge instead (the commit
+                // first when the command does both).
+                let command = params.get("toolCall").and_then(crate::permissions::tool_command).unwrap_or_default();
+                let redirect = match crate::permissions::git_commit(&command) {
+                    Some(message) => Some((GitRedirect::Commit(message), COMMIT_IN_FORGE, "Commit from Forge instead")),
+                    None if crate::permissions::git_push(&command) => Some((GitRedirect::Push, PUSH_IN_FORGE, "Push from Forge instead")),
+                    None => None,
+                };
+                if let Some((redirect, id, name)) = redirect {
+                    options.insert(0, PermissionOption { id: id.into(), name: name.into(), allow: false, kind: id.into() });
+                    self.git_redirects.insert(request_id.clone(), redirect);
+                }
                 self.entries.push(Entry::Permission { request_id: request_id.clone(), tool_call_id, title, options, resolved: None, diffs });
                 // The policy allows it: answer as the user would, and say so in the thread.
                 if let Some((option_id, reason)) = auto {
@@ -2000,8 +2575,16 @@ impl Thread {
         self.changed(cx);
     }
 
-    fn apply_update(&mut self, u: Value, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(location) = tool_location(&u) {
+    pub(crate) fn apply_update(&mut self, u: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mut location) = tool_location(&u) {
+            // Updates often leave the kind out: it is the tool call's.
+            if location.kind.is_none() {
+                let id = u.get("toolCallId").and_then(Value::as_str).unwrap_or_default();
+                location.kind = self.entries.iter().find_map(|e| match e {
+                    Entry::Tool { id: tid, kind, .. } if tid == id && !kind.is_empty() => Some(kind.clone()),
+                    _ => None,
+                });
+            }
             self.location = Some(location);
         }
         let text = u.pointer("/content/text").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -2025,23 +2608,42 @@ impl Thread {
             }
             "tool_call" => {
                 let diffs = self.diff_views(Edit::all_from_tool_call(&u), window, cx);
+                // A command the agent runs itself: its output goes to a terminal shown in the
+                // tool call, as for the commands it runs in Forge's terminals.
+                let display = u.pointer("/_meta/terminal_info/terminal_id").and_then(Value::as_str).map(str::to_string);
+                if let Some(id) = &display {
+                    self.add_display_terminal(id, window, cx);
+                }
+                let (title, command) = tool_title(&u, &self.root);
                 self.entries.push(Entry::Tool {
                     id: str_of("toolCallId").unwrap_or_default(),
-                    title: str_of("title").unwrap_or_else(|| "Tool call".into()),
+                    title: title.unwrap_or_else(|| "Tool call".into()),
+                    command,
                     kind: str_of("kind").unwrap_or_default(),
                     status: str_of("status").unwrap_or_else(|| "pending".into()),
                     detail: tool_detail(&u),
-                    terminal: tool_terminal(&u),
+                    terminal: tool_terminal(&u).or(display),
                     diffs,
                 })
             }
             "tool_call_update" => {
                 let id = str_of("toolCallId").unwrap_or_default();
+                if let Some(output) = u.pointer("/_meta/terminal_output") {
+                    let terminal = output.get("terminal_id").and_then(Value::as_str).and_then(|t| self.display_terminals.get(t));
+                    if let (Some(terminal), Some(data)) = (terminal, output.get("data").and_then(Value::as_str)) {
+                        terminal.update(cx, |t, cx| t.write_output(data.as_bytes(), cx));
+                    }
+                }
                 let edits = Edit::all_from_tool_call(&u);
                 let mut new_diffs = (!edits.is_empty()).then(|| self.diff_views(edits, window, cx));
+                let (new_title, new_command) = tool_title(&u, &self.root);
+                let completed = str_of("status").as_deref() == Some("completed");
                 for entry in &mut self.entries {
-                    if let Entry::Tool { id: tid, title, status, detail, terminal, diffs, .. } = entry {
+                    if let Entry::Tool { id: tid, title, status, detail, terminal, diffs, command, .. } = entry {
                         if *tid == id {
+                            if new_command.is_some() {
+                                *command = new_command.clone();
+                            }
                             if let Some(t) = tool_terminal(&u) {
                                 *terminal = Some(t);
                             }
@@ -2051,7 +2653,7 @@ impl Thread {
                             if let Some(s) = str_of("status") {
                                 *status = s;
                             }
-                            if let Some(t) = str_of("title") {
+                            if let Some(t) = new_title.clone() {
                                 *title = t;
                             }
                             if let Some(d) = tool_detail(&u) {
@@ -2059,6 +2661,12 @@ impl Thread {
                             }
                         }
                     }
+                }
+                // Agents that write files themselves (Claude Code's adapter does) bypass
+                // `ProjectFs`: their finished edits join the changes here, from the file
+                // before (the tool call's diff) and as it is now on disk.
+                if completed {
+                    self.record_tool_edits(&id, cx);
                 }
             }
             "usage_update" => self.usage.apply_update(&u),
@@ -2118,7 +2726,49 @@ fn tool_location(u: &Value) -> Option<AgentLocation> {
     Some(AgentLocation {
         path: PathBuf::from(location.get("path")?.as_str()?),
         line: location.get("line").and_then(Value::as_u64).map(|l| l as u32),
+        kind: u.get("kind").and_then(Value::as_str).map(str::to_string),
     })
+}
+
+/// A tool call's title, and for a command, its command line when the title is the agent's
+/// description of it (Claude Code's `rawInput.description`). Command lines lose the
+/// `cd <folder> &&` agents put first, and say `.` for the thread's folder.
+fn tool_title(u: &Value, root: &std::path::Path) -> (Option<String>, Option<String>) {
+    let title = u.get("title").and_then(Value::as_str).map(str::to_string);
+    let input = u.get("rawInput");
+    // Forge's own tools: their title, and what they were asked.
+    let name = u.pointer("/_meta/claudeCode/toolName").or_else(|| u.get("name")).and_then(Value::as_str).or(title.as_deref());
+    if let Some(forge_title) = name.and_then(crate::forge_mcp::tool_title).filter(|_| name.is_some_and(|n| n.starts_with("mcp__"))) {
+        return (Some(forge_title), input.and_then(crate::forge_mcp::tool_summary));
+    }
+    let command = input.and_then(|i| i.get("command")).and_then(Value::as_str).map(str::to_string).or_else(|| (u.get("kind").and_then(Value::as_str) == Some("execute")).then(|| title.clone()).flatten());
+    let Some(command) = command.filter(|c| !c.trim().is_empty()) else { return (title, None) };
+    let command = tidy_command(&command, root);
+    match input.and_then(|i| i.get("description")).and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty()) {
+        Some(description) => (Some(description.to_string()), Some(command)),
+        None => (Some(command), None),
+    }
+}
+
+/// `command` as the user reads it: see [`tool_title`].
+fn tidy_command(command: &str, root: &std::path::Path) -> String {
+    let mut rest = command.trim();
+    // `cd <dir> && …` / `cd <dir>; …`, maybe more than one.
+    while let Some(after_cd) = rest.strip_prefix("cd ") {
+        let cut = [after_cd.find("&&").map(|i| (i, 2)), after_cd.find(';').map(|i| (i, 1))].into_iter().flatten().min_by_key(|(i, _)| *i);
+        let Some((i, len)) = cut else { break };
+        rest = after_cd[i + len..].trim_start();
+    }
+    let root = root.to_string_lossy();
+    if root.len() <= 1 {
+        return rest.to_string();
+    }
+    rest.replace(&format!("{root}/"), "").replace(root.as_ref(), ".")
+}
+
+/// The same text but for trailing whitespace (agents may trim it as they write).
+fn same_text(a: &str, b: &str) -> bool {
+    a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
 }
 
 /// The terminal a tool call embeds (`{"type": "terminal", "terminalId"}` content).
@@ -2126,20 +2776,74 @@ fn tool_terminal(u: &Value) -> Option<String> {
     u.get("content")?.as_array()?.iter().find_map(|c| (c.get("type")?.as_str()? == "terminal").then(|| c.get("terminalId")?.as_str().map(str::to_string)).flatten())
 }
 
-/// One-line summary of a tool call's content (diff target or first text block).
+/// Lines of a tool call's text shown at most (the last ones: a command's ending matters).
+const DETAIL_LINES: usize = 200;
+
+/// What a tool call's content says: the diff target, or its first text block (a command's
+/// output, often in a code fence, shown without it).
 fn tool_detail(u: &Value) -> Option<String> {
     let content = u.get("content")?.as_array()?;
     content.iter().find_map(|c| match c.get("type").and_then(Value::as_str)? {
         "diff" => Some(format!("edit {}", c.get("path")?.as_str()?)),
         "content" => {
-            let text = c.pointer("/content/text")?.as_str()?;
-            let first: String = text.lines().next().unwrap_or_default().chars().take(160).collect();
-            Some(first)
+            let text = unfence(c.pointer("/content/text")?.as_str()?);
+            let lines: Vec<&str> = text.lines().collect();
+            let shown = match lines.len().checked_sub(DETAIL_LINES) {
+                Some(cut) if cut > 0 => format!("… {cut} more lines\n{}", lines[cut..].join("\n")),
+                _ => text.to_string(),
+            };
+            (!shown.trim().is_empty()).then_some(shown)
         }
         _ => None,
     })
 }
 
+/// `text` without the code fence around it (```` ```console ```` … ```` ``` ````), if it has one.
+fn unfence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else { return text };
+    let Some(body_start) = rest.find('\n') else { return "" };
+    let body = &rest[body_start + 1..];
+    body.trim_end().strip_suffix("```").unwrap_or(body).trim_end_matches('\n')
+}
+
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn titles_commands_by_their_description() {
+        let root = std::path::Path::new("/work/app");
+        let call = json!({ "kind": "execute", "title": "cd /work/app && git status", "rawInput": { "command": "cd /work/app && git status", "description": "Show working tree status" } });
+        assert_eq!(tool_title(&call, root), (Some("Show working tree status".into()), Some("git status".into())));
+        let bare = json!({ "kind": "execute", "title": "cd \"/work/app\"; ls /work/app/src /tmp" });
+        assert_eq!(tool_title(&bare, root), (Some("ls src /tmp".into()), None));
+        let read = json!({ "kind": "read", "title": "Read main.rs" });
+        assert_eq!(tool_title(&read, root), (Some("Read main.rs".into()), None));
+        let forge = json!({ "kind": "other", "title": "mcp__forge__find_references", "rawInput": { "path": "src/a.rs", "line": 12, "symbol": "parse" } });
+        assert_eq!(tool_title(&forge, root), (Some("Find references".into()), Some("src/a.rs:12 parse".into())));
+        assert_eq!(tidy_command("cd sub", root), "cd sub", "a lone cd stays");
+        assert_eq!(tidy_command("cd /work/app && cd src && cargo test", root), "cargo test");
+    }
+
+    fn text(t: &str) -> Value {
+        json!({ "content": [{ "type": "content", "content": { "type": "text", "text": t } }] })
+    }
+
+    #[test]
+    fn shows_command_output_without_its_fence() {
+        assert_eq!(tool_detail(&text("```console\nline 1\nline 2\n```")).as_deref(), Some("line 1\nline 2"));
+        assert_eq!(tool_detail(&text("```\nok\n```\n")).as_deref(), Some("ok"));
+        assert_eq!(tool_detail(&text("plain\ntext")).as_deref(), Some("plain\ntext"));
+        assert_eq!(tool_detail(&text("```console\n```")), None, "nothing to show");
+        let long: String = (1..=250).map(|i| format!("{i}\n")).collect();
+        let shown = tool_detail(&text(&format!("```console\n{long}```"))).unwrap();
+        assert!(shown.starts_with("… 50 more lines\n51\n") && shown.ends_with("\n250"), "{shown}");
+        assert_eq!(tool_detail(&json!({ "content": [{ "type": "diff", "path": "/a.rs" }] })).as_deref(), Some("edit /a.rs"));
+    }
+}
 
 #[cfg(test)]
 mod usage_tests {

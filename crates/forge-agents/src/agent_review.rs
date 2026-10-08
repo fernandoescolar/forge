@@ -298,6 +298,11 @@ use gpui::TaskExt as _;
 struct AgentHunkRenderer;
 
 impl editor::DiffHunkRenderer for AgentHunkRenderer {
+    /// Never staged (it isn't git's diff): filled red and green, not hollow.
+    fn render_hunk_as_staged(&self, _status: &buffer_diff::DiffHunkStatus, _cx: &App) -> bool {
+        false
+    }
+
     fn render_hunk_controls(
         &self,
         row: u32,

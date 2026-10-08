@@ -109,12 +109,18 @@ pub struct DiffView {
 impl DiffView {
     /// A read-only view of the change.
     pub fn new(edit: Edit, languages: Arc<LanguageRegistry>, window: &mut Window, cx: &mut App) -> Self {
-        Self::build(edit, languages, false, window, cx)
+        Self::build(edit, languages, false, false, window, cx)
+    }
+
+    /// The whole file with the change shown in it, scrollable and with line numbers: for
+    /// a pane, where the change is seen in place.
+    pub fn whole_file(edit: Edit, languages: Arc<LanguageRegistry>, window: &mut Window, cx: &mut App) -> Self {
+        Self::build(edit, languages, false, true, window, cx)
     }
 
     /// A change the user can edit before accepting it; the diff follows their edits.
     pub fn editable(edit: Edit, languages: Arc<LanguageRegistry>, window: &mut Window, cx: &mut App) -> Self {
-        Self::build(edit, languages, true, window, cx)
+        Self::build(edit, languages, true, false, window, cx)
     }
 
     /// The proposal as the user left it, if they changed it.
@@ -127,25 +133,28 @@ impl DiffView {
         self.editor.update(cx, |editor, _| editor.set_read_only(true));
     }
 
-    fn build(edit: Edit, languages: Arc<LanguageRegistry>, editable: bool, window: &mut Window, cx: &mut App) -> Self {
+    fn build(edit: Edit, languages: Arc<LanguageRegistry>, editable: bool, whole_file: bool, window: &mut Window, cx: &mut App) -> Self {
         let capability = if editable { Capability::ReadWrite } else { Capability::ReadOnly };
         let multibuffer = cx.new(|_| MultiBuffer::without_headers(capability));
         let buffer = cx.new(|cx| Buffer::local(edit.new_text.clone(), cx));
         let editor = cx.new(|cx| {
+            let sizing_behavior = if whole_file { SizingBehavior::Default } else { SizingBehavior::SizeByContent };
             let mut editor = Editor::new(
-                EditorMode::Full { scale_ui_elements_with_buffer_font_size: false, show_active_line_background: false, sizing_behavior: SizingBehavior::SizeByContent },
+                EditorMode::Full { scale_ui_elements_with_buffer_font_size: false, show_active_line_background: false, sizing_behavior },
                 multibuffer.clone(),
                 None,
                 window,
                 cx,
             );
-            editor.set_show_gutter(false, cx);
+            // Filled red and green: a proposal isn't git's diff, staged or not.
+            editor.set_diff_hunk_renderer(Some(Arc::new(editor::HiddenUnstagedDiffHunkRenderer)), cx);
+            editor.set_show_gutter(whole_file, cx);
             editor.disable_inline_diagnostics();
             editor.disable_expand_excerpt_buttons(cx);
             editor.set_show_vertical_scrollbar(false, cx);
             editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
             editor.set_soft_wrap_mode(language::language_settings::SoftWrap::None, cx);
-            editor.scroll_manager.set_forbid_vertical_scroll(true);
+            editor.scroll_manager.set_forbid_vertical_scroll(!whole_file);
             editor.set_show_indent_guides(false, cx);
             editor.set_read_only(!editable);
             editor.set_show_breakpoints(false, cx);
@@ -168,11 +177,15 @@ impl DiffView {
             multibuffer.update(cx, |multibuffer, cx| {
                 let hunks: Vec<_> = {
                     let b = buffer.read(cx);
-                    diff.read(cx)
-                        .snapshot(cx)
-                        .hunks_intersecting_range(Anchor::min_for_buffer(b.remote_id())..Anchor::max_for_buffer(b.remote_id()), b)
-                        .map(|h| h.buffer_range.to_point(b))
-                        .collect()
+                    if whole_file {
+                        vec![language::Point::zero()..b.max_point()]
+                    } else {
+                        diff.read(cx)
+                            .snapshot(cx)
+                            .hunks_intersecting_range(Anchor::min_for_buffer(b.remote_id())..Anchor::max_for_buffer(b.remote_id()), b)
+                            .map(|h| h.buffer_range.to_point(b))
+                            .collect()
+                    }
                 };
                 multibuffer.set_excerpts_for_path(PathKey::for_buffer(&buffer, cx), buffer.clone(), hunks, excerpt_context_lines(cx), cx);
                 multibuffer.add_diff(diff.clone(), cx);

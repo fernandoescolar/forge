@@ -156,13 +156,14 @@ pub struct AcpRuntime {
     terminals: Option<Arc<dyn TerminalHost>>,
     /// The host can run an agent's login command in an interactive terminal.
     terminal_auth: bool,
+    display_terminals: bool,
     agents: Arc<DashMap<String, Arc<AgentProcess>>>,
     permissions: Arc<PermissionWaiters>,
 }
 
 impl AcpRuntime {
     pub fn new(events: EventBus, workspace: Arc<dyn WorkspaceEngine>) -> Self {
-        Self { events, workspace, terminals: None, terminal_auth: false, agents: Default::default(), permissions: Default::default() }
+        Self { events, workspace, terminals: None, terminal_auth: false, display_terminals: false, agents: Default::default(), permissions: Default::default() }
     }
 
     /// Lets agents run commands (`terminal/*`); advertised in `initialize` only when set.
@@ -175,6 +176,14 @@ impl AcpRuntime {
     /// agents describe their login commands in `authMethods`.
     pub fn with_terminal_auth(mut self) -> Self {
         self.terminal_auth = true;
+        self
+    }
+
+    /// Advertise that the host shows the output of commands agents run themselves
+    /// (`_meta["terminal_output"]`): tool calls then carry `_meta.terminal_info`,
+    /// `terminal_output` and `terminal_exit` instead of the output as text.
+    pub fn with_display_terminals(mut self) -> Self {
+        self.display_terminals = true;
         self
     }
 
@@ -276,7 +285,7 @@ impl AgentService for AcpRuntime {
                     "fs": {"readTextFile": true, "writeTextFile": true},
                     "terminal": self.terminals.is_some(),
                     "auth": {"terminal": self.terminal_auth},
-                    "_meta": {"terminal-auth": self.terminal_auth},
+                    "_meta": {"terminal-auth": self.terminal_auth, "terminal_output": self.display_terminals},
                 },
                 "clientInfo": {"name": "Forge IDE", "version": env!("CARGO_PKG_VERSION")},
             }),
@@ -585,11 +594,12 @@ mod tests {
             let (events, _rx) = tokio::sync::broadcast::channel(16);
             let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
             let acp = AcpRuntime::new(events, ws);
-            let acp = if enabled { acp.with_terminal_auth() } else { acp };
+            let acp = if enabled { acp.with_terminal_auth().with_display_terminals() } else { acp };
             acp.start(mock_agent()).await.unwrap();
             let caps = acp.initialize("mock", PROTOCOL_VERSION).await.unwrap()["echoClientCapabilities"].clone();
             assert_eq!(caps["auth"]["terminal"], enabled);
             assert_eq!(caps["_meta"]["terminal-auth"], enabled);
+            assert_eq!(caps["_meta"]["terminal_output"], enabled);
         }
     }
 

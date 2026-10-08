@@ -309,14 +309,20 @@ impl TestPanel {
     /// Runs the tests under `key` in the debugger, stopping at breakpoints.
     fn debug_node(&mut self, key: &NodeKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.project_of(key).map(|p| self.projects[p].clone()) else { return };
-        let Some(plan) = runner::debug_plan(&project, &Self::scope_of(key)) else { return };
-        let Some(workspace) = self.workspace.upgrade() else { return };
-        let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
-        let label: gpui::SharedString = match key {
+        let label = match key {
             NodeKey::Method(fqn) => format!("Debug {}", fqn.rsplit(['.', ':', '>']).next().unwrap_or(fqn).trim()),
             _ => format!("Debug {}", project.name),
-        }
-        .into();
+        };
+        self.debug_scope(&project.path, Self::scope_of(key), label.into(), window, cx);
+    }
+
+    /// Runs `scope` of the project whose manifest is `manifest` in the debugger (as a test's
+    /// Debug button does). False when Forge can't debug those tests (Jest, Vitest).
+    pub fn debug_scope(&mut self, manifest: &std::path::Path, scope: Scope, label: gpui::SharedString, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(project) = self.projects.iter().find(|p| p.path == manifest).cloned() else { return false };
+        let Some(plan) = runner::debug_plan(&project, &scope) else { return false };
+        let Some(workspace) = self.workspace.upgrade() else { return false };
+        let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
         let scenario = match plan {
             runner::DebugPlan::Build(template, adapter) => {
                 self.project.read(cx).dap_store().update(cx, |store, cx| store.debug_scenario_for_build_task(template, dap::adapters::DebugAdapterName(adapter.into()), label, cx))
@@ -337,6 +343,7 @@ impl TestPanel {
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+        true
     }
 
     fn project_of(&self, key: &NodeKey) -> Option<usize> {
@@ -498,6 +505,32 @@ impl TestPanel {
         if let Some(project) = self.projects.iter().position(|p| p.path == manifest) {
             self.start(vec![(project, Scope::Project)], window, cx);
         }
+    }
+
+    /// Runs `scope` in each project whose manifest is given, as the panel's own buttons do
+    /// (progress here, results in the gutter). Nothing happens while another run is going.
+    pub fn run_scopes(&mut self, jobs: Vec<(PathBuf, Scope)>, window: &mut Window, cx: &mut Context<Self>) {
+        let jobs = jobs.into_iter().filter_map(|(manifest, scope)| Some((self.projects.iter().position(|p| p.path == manifest)?, scope))).collect();
+        self.start(jobs, window, cx);
+    }
+
+    /// The test projects found, with their tests.
+    pub fn projects(&self) -> &[TestProject] {
+        &self.projects
+    }
+
+    /// The last results of a test method, by its FQN (one per theory row and framework).
+    pub fn results_for(&self, method_fqn: &str) -> &[CaseResult] {
+        self.results.get(method_fqn).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// The output of the last run, and why it failed when it couldn't run.
+    pub fn last_log(&self) -> Option<&str> {
+        self.last_log.as_deref()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     pub fn is_running(&self) -> bool {

@@ -426,9 +426,47 @@ pub fn send_at_cursor(workspace: &mut Workspace, row: Option<u32>, window: &mut 
     dispatch(workspace, file, resolved, environment, window, cx);
 }
 
+/// How a request sent from code (see [`send_request_at`], [`send_adhoc`]) went: what was
+/// sent, in which environment, and what came back (or why it failed).
+pub struct Outcome {
+    pub request: Resolved,
+    pub environment: Option<String>,
+    pub response: Result<Exchange, String>,
+}
+
+/// Sends the request on `row` (zero-based) of the `.http` file `file`, as ⌘↩ there would:
+/// with the selected environment, shown in the file's response tab.
+pub fn send_request_at(workspace: &mut Workspace, file: &Path, row: u32, window: &mut Window, cx: &mut Context<Workspace>) -> Result<futures::channel::oneshot::Receiver<Outcome>> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("can't read {}", file.display()))?;
+    let spec = parse::request_at(&text, row).ok_or_else(|| anyhow!("there is no request on line {}", row + 1))?;
+    send_spec(workspace, file, &text, spec, window, cx)
+}
+
+/// Sends a request that isn't in a `.http` file, resolved as if it were in `file` (its
+/// environments and `{{variables}}`), and shown in that file's response tab.
+pub fn send_adhoc(workspace: &mut Workspace, file: &Path, method: &str, url: &str, headers: Vec<(String, String)>, body: Option<String>, window: &mut Window, cx: &mut Context<Workspace>) -> Result<futures::channel::oneshot::Receiver<Outcome>> {
+    let spec = parse::RequestSpec { name: None, method: method.to_uppercase(), url: url.to_string(), headers, body: body.map(parse::Body::Text), row: 0 };
+    send_spec(workspace, file, "", spec, window, cx)
+}
+
+fn send_spec(workspace: &mut Workspace, file: &Path, text: &str, spec: parse::RequestSpec, window: &mut Window, cx: &mut Context<Workspace>) -> Result<futures::channel::oneshot::Receiver<Outcome>> {
+    let envs = Environments::find(file.parent().unwrap_or(Path::new("/")));
+    let state = cx.global::<HttpState>();
+    let environment = envs.pick(state.environment.as_deref());
+    let resolved = resolve(&spec, text, file, environment.as_deref(), &envs, &state.responses)?;
+    let (tx, rx) = futures::channel::oneshot::channel();
+    dispatch_reporting(workspace, file.to_path_buf(), resolved, environment, Some(tx), window, cx);
+    Ok(rx)
+}
+
 /// Sends `resolved` for the `.http` file `file`: its response tab shows the response as
 /// it arrives. A request the file was still waiting on is dropped, which stops it.
 pub(crate) fn dispatch(workspace: &mut Workspace, file: PathBuf, resolved: Resolved, environment: Option<String>, window: &mut Window, cx: &mut Context<Workspace>) {
+    dispatch_reporting(workspace, file, resolved, environment, None, window, cx);
+}
+
+/// [`dispatch`], telling `done` how it went.
+fn dispatch_reporting(workspace: &mut Workspace, file: PathBuf, resolved: Resolved, environment: Option<String>, done: Option<futures::channel::oneshot::Sender<Outcome>>, window: &mut Window, cx: &mut Context<Workspace>) {
     let client = cx.http_client();
     let view = response_view(workspace, &file, window, cx);
     set_text(&view, format!("// Sending {} {}…\n", resolved.method, resolved.url), false, cx);
@@ -469,6 +507,9 @@ pub(crate) fn dispatch(workspace: &mut Workspace, file: PathBuf, resolved: Resol
             }
         })
         .ok();
+        if let Some(done) = done {
+            let _ = done.send(Outcome { request: resolved, environment, response: result.map_err(|e| format!("{e:#}")) });
+        }
     });
     cx.global_mut::<HttpState>().requests.insert(task_file, task);
 }

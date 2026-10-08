@@ -227,7 +227,7 @@ impl ThreadView {
         let mut rows = v_flex().py_0p5();
         let count = ixs.len();
         for (n, ix) in ixs.into_iter().enumerate() {
-            let Entry::Tool { id, title, kind, status, detail, terminal, diffs } = &thread.entries[ix] else { continue };
+            let Entry::Tool { id, title, kind, status, detail, terminal, diffs, command } = &thread.entries[ix] else { continue };
             let permission = thread.entries.iter().find_map(|e| match e {
                 Entry::Permission { request_id, tool_call_id: Some(tid), options, resolved, diffs, .. } if tid == id => Some((request_id.clone(), options, resolved.clone(), diffs)),
                 _ => None,
@@ -267,7 +267,9 @@ impl ThreadView {
                 .when(has_body, |el| el.cursor_pointer().hover(|el| el.bg(colors.element_hover)))
                 .child(div().w_3().flex_none().when(has_body, |el| el.child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall).color(Color::Muted))))
                 .child(div().flex_none().child(status_icon))
-                .child(div().flex_1().min_w_0().child(Label::new(title.clone()).size(LabelSize::Small).color(if running || waiting { Color::Default } else { Color::Muted }).truncate()))
+                .child(div().min_w_0().max_w(gpui::relative(0.6)).child(Label::new(title.clone()).size(LabelSize::Small).color(if running || waiting { Color::Default } else { Color::Muted }).truncate()))
+                // The command line next to the agent's description of it.
+                .child(div().flex_1().min_w_0().when_some(command.clone(), |el, c| el.child(Label::new(c).size(LabelSize::Small).color(Color::Muted).buffer_font(cx).truncate())))
                 .when(added + removed > 0, |el| {
                     el.child(div().flex_none().child(Label::new(format!("+{added}")).size(LabelSize::Small).color(Color::Created)))
                         .child(div().flex_none().child(Label::new(format!("−{removed}")).size(LabelSize::Small).color(Color::Deleted)))

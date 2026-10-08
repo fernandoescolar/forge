@@ -105,9 +105,17 @@ pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf]) -
     if permissions.mode == PermissionMode::SuperUser {
         return Decision::Allow("super user mode");
     }
+    // They only propose: the user decides in the thread.
+    if is_forge_tool(tool_call) {
+        return Decision::Allow("Forge's own tools ask you themselves");
+    }
     let outside = tool_paths(tool_call).iter().any(|p| !inside(p, roots));
     let kind = tool_call.get("kind").and_then(Value::as_str).unwrap_or("other");
     if let Some(command) = tool_command(tool_call) {
+        // Commits and pushes go through Forge's Git UI (see `git_commit`), whatever the mode.
+        if publishes_git(&command) {
+            return Decision::Ask;
+        }
         if allowed_command(&command, &permissions.allow_commands) {
             return Decision::Allow("always-allowed command");
         }
@@ -159,7 +167,7 @@ fn tool_paths(tool_call: &Value) -> Vec<PathBuf> {
 }
 
 /// The command line of an `execute` tool call.
-fn tool_command(tool_call: &Value) -> Option<String> {
+pub fn tool_command(tool_call: &Value) -> Option<String> {
     let input = tool_call.get("rawInput");
     let from_input = input.and_then(|i| i.get("command")).and_then(|c| match c {
         Value::String(s) => Some(s.clone()),
@@ -177,6 +185,127 @@ fn tool_command(tool_call: &Value) -> Option<String> {
     let start = title.find('`')? + 1;
     let end = start + title[start..].find('`')?;
     Some(title[start..end].to_string())
+}
+
+/// A tool of Forge's own MCP server (`forge_mcp`).
+fn is_forge_tool(tool_call: &Value) -> bool {
+    let prefix = format!("mcp__{}__", crate::forge_mcp::SERVER_NAME);
+    let named = |v: Option<&Value>| v.and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix));
+    named(tool_call.pointer("/_meta/claudeCode/toolName")) || named(tool_call.get("name"))
+}
+
+/// The shell words of `command` that run git, each with its subcommand: `git commit`,
+/// `git -C dir push`… (also after `&&`, `;` or `|`).
+fn git_subcommands(command: &str) -> Vec<String> {
+    let words: Vec<&str> = command.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')')).filter(|w| !w.is_empty()).collect();
+    let mut found = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if *word != "git" {
+            continue;
+        }
+        // Skip git's own options (and the values of those that take one).
+        let mut j = i + 1;
+        while let Some(w) = words.get(j) {
+            if matches!(*w, "-C" | "-c" | "--git-dir" | "--work-tree") {
+                j += 2;
+            } else if w.starts_with('-') {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if let Some(sub) = words.get(j) {
+            found.push(sub.to_string());
+        }
+    }
+    found
+}
+
+/// The command commits or pushes: Forge never answers those for the user.
+pub fn publishes_git(command: &str) -> bool {
+    git_subcommands(command).iter().any(|s| s == "commit" || s == "push")
+}
+
+/// The command pushes (`git push`, also chained after other commands).
+pub fn git_push(command: &str) -> bool {
+    git_subcommands(command).iter().any(|s| s == "push")
+}
+
+/// The commit message of a `git commit` command line, when it commits: every `-m`/`--message`
+/// (joined by blank lines, as git does), or the heredoc of `-m "$(cat <<'EOF' … EOF)"`.
+/// `Some("")` when it commits without a message Forge can read.
+pub fn git_commit(command: &str) -> Option<String> {
+    if !git_subcommands(command).iter().any(|s| s == "commit") {
+        return None;
+    }
+    if let Some(start) = command.find("<<") {
+        let marker = command[start + 2..].trim_start_matches('-').trim_start();
+        let tag: String = marker.trim_start_matches(['\'', '"']).chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if let (false, Some(body_start)) = (tag.is_empty(), command[start..].find('\n')) {
+            let body = &command[start + body_start + 1..];
+            let lines: Vec<&str> = body.lines().take_while(|l| l.trim() != tag).collect();
+            return Some(lines.join("\n").trim().to_string());
+        }
+    }
+    let words = shell_words(command);
+    let mut messages = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = &words[i];
+        // `-m`, `--message`, or short flags ending in it (`-am`).
+        let short_m = w.starts_with('-') && !w.starts_with("--") && w.ends_with('m') && w[1..].chars().all(|c| c.is_ascii_alphabetic());
+        if (short_m || w == "--message") && i + 1 < words.len() {
+            messages.push(words[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if let Some(m) = w.strip_prefix("--message=").or_else(|| w.strip_prefix("-m").filter(|m| !m.is_empty() && !w.starts_with("--"))) {
+            messages.push(m.to_string());
+        }
+        i += 1;
+    }
+    Some(messages.join("\n\n").trim().to_string())
+}
+
+/// Splits a command line into words with shell quoting (no expansion).
+fn shell_words(command: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut in_word) = (Vec::new(), String::new(), None::<char>, false);
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                    in_word = true;
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
 }
 
 /// Relative paths are the agent's working directory: the workspace.
@@ -208,6 +337,41 @@ mod tests {
 
     fn perms(mode: PermissionMode) -> Permissions {
         Permissions { mode, allow_commands: vec!["dotnet build".into(), "git status".into()], files_outside_workspace: false }
+    }
+
+    #[test]
+    fn commits_and_pushes_always_ask() {
+        let mut allow_git = perms(PermissionMode::AllowWorkspace);
+        allow_git.allow_commands.push("git".into());
+        let run = |command: &str| json!({"kind": "execute", "title": "Run", "rawInput": {"command": command}});
+        assert_eq!(decide(&allow_git, &run("git commit -m 'Fix'"), &roots()), Decision::Ask);
+        assert_eq!(decide(&allow_git, &run("git add -A && git -C . push origin main"), &roots()), Decision::Ask);
+        assert!(matches!(decide(&allow_git, &run("git log --oneline"), &roots()), Decision::Allow(_)));
+        assert!(matches!(decide(&allow_git, &run("echo commit"), &roots()), Decision::Allow(_)));
+    }
+
+    #[test]
+    fn forge_tools_go_ahead() {
+        let propose = json!({"kind": "other", "title": "propose_commit", "_meta": {"claudeCode": {"toolName": "mcp__forge__propose_commit"}}});
+        assert!(matches!(decide(&perms(PermissionMode::Ask), &propose, &roots()), Decision::Allow(_)));
+        let other = json!({"kind": "other", "title": "x", "_meta": {"claudeCode": {"toolName": "mcp__github__create_pr"}}});
+        assert_eq!(decide(&perms(PermissionMode::Ask), &other, &roots()), Decision::Ask);
+    }
+
+    #[test]
+    fn reads_commit_messages() {
+        assert_eq!(git_commit("git status"), None);
+        assert_eq!(git_commit("git push"), None);
+        assert_eq!(git_commit("git commit -m \"Fix the parser\""), Some("Fix the parser".into()));
+        assert_eq!(git_commit("git add a.rs && git commit -m 'Subject' -m 'Body line'"), Some("Subject\n\nBody line".into()));
+        assert_eq!(git_commit("git commit --message=\"Add it\" --no-verify"), Some("Add it".into()));
+        assert_eq!(git_commit("git commit -am Quick"), Some("Quick".into()));
+        assert_eq!(git_commit("git commit -mInline"), Some("Inline".into()));
+        let heredoc = "git commit -m \"$(cat <<'EOF'\nFix the parser\n\nIt skipped tabs.\nEOF\n)\"";
+        assert_eq!(git_commit(heredoc), Some("Fix the parser\n\nIt skipped tabs.".into()));
+        assert_eq!(git_commit("git commit"), Some(String::new()));
+        assert!(git_push("git add -A && git commit -m x && git push -u origin HEAD"));
+        assert!(!git_push("git log origin/main..HEAD"));
     }
 
     #[test]

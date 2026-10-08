@@ -107,6 +107,11 @@ pub struct RunController {
 }
 
 impl RunController {
+    /// The terminal of the target running now (or that ran last, while it is open).
+    pub fn terminal(&self) -> Option<Entity<Terminal>> {
+        self.terminal.as_ref().and_then(WeakEntity::upgrade)
+    }
+
     /// The controller of `workspace`, once it has been set up.
     pub fn for_workspace(workspace: &Entity<Workspace>, cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<Controllers>()?.0.get(&workspace.entity_id())?.upgrade()

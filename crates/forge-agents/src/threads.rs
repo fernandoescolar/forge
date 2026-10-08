@@ -287,6 +287,9 @@ pub struct ThreadView {
     seen_entries: usize,
     /// The file the agent is working in, shown next to the thread while it works.
     follow: Option<Follow>,
+    /// The write waiting for review in the followed file, shown in the follow pane as a diff
+    /// of what the agent proposes: its entry and the view.
+    follow_review: Option<(usize, crate::diff::DiffView)>,
     follow_paused: bool,
     follow_hidden: bool,
     /// The changed-files list under the conversation is open (it is, until folded).
@@ -354,6 +357,7 @@ impl ThreadView {
             images: Vec::new(),
             seen_entries: 0,
             follow: None,
+            follow_review: None,
             follow_paused: false,
             follow_hidden: false,
             changes_open: true,
@@ -375,6 +379,7 @@ impl ThreadView {
                     this.list.scroll_to_end();
                 }
                 this.sync_follow(window, cx);
+                this.sync_follow_review(window, cx);
                 this.tick_while_working(cx);
                 cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
@@ -390,6 +395,7 @@ impl ThreadView {
                 this.update_follow_diff(window, cx);
                 cx.notify();
             }
+            ThreadEvent::ShowChanges(focus) => this.open_review(focus.clone(), window, cx),
         })
     }
 
@@ -490,6 +496,38 @@ impl ThreadView {
 
     /// Shows the followed file against its content before the agent, when the agent
     /// changed it; back to the plain file once those changes are kept or undone.
+    /// Shows the write waiting for review in the followed file, or stops showing it once
+    /// it is answered.
+    fn sync_follow_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = self.follow.as_ref().and_then(|f| self.thread.read(cx).pending_review_for(&f.location.path)).map(|(ix, _, _)| ix);
+        match pending {
+            Some(ix) if self.follow_review.as_ref().map(|(shown, _)| *shown) != Some(ix) => {
+                let thread = self.thread.read(cx);
+                let Some(crate::thread::Entry::Review { diff, .. }) = thread.entries.get(ix) else { return };
+                // The proposal as the thread's card has it (the user may have edited it there).
+                let mut edit = diff.edit.clone();
+                if let Some(text) = diff.edited_text(cx) {
+                    edit.new_text = text;
+                }
+                let languages = thread.languages().clone();
+                let first_change = crate::diff::hunks(edit.old_text.as_deref().unwrap_or_default(), &edit.new_text).first().map(|h| h.new.start);
+                let view = crate::diff::DiffView::whole_file(edit, languages, window, cx);
+                if let Some(line) = first_change {
+                    let editor = view.editor.clone();
+                    // Once the file is in the view: the first change in sight.
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                        cx.update(|window, cx| show_line(&editor, Some(line), window, cx)).ok();
+                    })
+                    .detach();
+                }
+                self.follow_review = Some((ix, view));
+            }
+            Some(_) => {}
+            None => self.follow_review = None,
+        }
+    }
+
     fn update_follow_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(follow) = self.follow.as_ref() else { return };
         let Some(editor) = follow.editor.clone() else { return };
@@ -609,18 +647,17 @@ impl ThreadView {
                 );
             }
         }
-        Some(
+        Some(centered(
             v_flex()
-                .mx_4()
+                .w_full()
                 .mb_2()
                 .rounded_md()
                 .border_1()
                 .border_color(colors.border)
                 .bg(colors.surface_background)
                 .child(header)
-                .when(self.changes_open, |el| el.child(div().border_t_1().border_color(colors.border_variant).child(list)))
-                .into_any_element(),
-        )
+                .when(self.changes_open, |el| el.child(div().border_t_1().border_color(colors.border_variant).child(list))),
+        ))
     }
 
     /// The review tab: every changed file against before the agent, at `focus` if given,
@@ -706,6 +743,38 @@ impl ThreadView {
         let agent_at = self.thread.read(cx).location().cloned();
         let review = self.thread.read(cx).pending_review_for(&follow.location.path);
         let line_label = follow.location.line.map(|l| format!("line {}", l + 1)).unwrap_or_default();
+        // While a command runs, its terminal; otherwise the file the agent is in.
+        let terminal = self.follow_terminal(cx).and_then(|_| {
+            let thread = self.thread.read(cx);
+            let (_, terminal) = thread.running_terminal()?;
+            thread.terminal_view(&terminal)
+        });
+        // What the pane shows, said as what the agent does: "Editing src/main.rs  line 12",
+        // "Running cargo test".
+        let what = if terminal.is_some() {
+            let running = self.thread.read(cx).running_tool().unwrap_or("a command").to_string();
+            h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(Icon::new(IconName::Terminal).size(IconSize::Small).color(Color::Accent))
+                .child(Label::new("Running").size(LabelSize::Small).color(Color::Accent))
+                .child(Label::new(running).size(LabelSize::Small).truncate())
+        } else {
+            let verb = match follow.location.kind.as_deref() {
+                _ if review.is_some() => "Proposing a change to",
+                Some("edit" | "delete" | "move") => "Editing",
+                Some("read") => "Reading",
+                Some("search") => "Searching in",
+                _ => "Looking at",
+            };
+            h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(Icon::new(IconName::File).size(IconSize::Small).color(Color::Muted))
+                .child(div().flex_none().child(Label::new(verb).size(LabelSize::Small).color(if self.follow_paused { Color::Muted } else { Color::Accent })))
+                .child(Label::new(shown).size(LabelSize::Small).buffer_font(cx).truncate())
+                .child(Label::new(line_label).size(LabelSize::XSmall).color(Color::Muted))
+        };
         let status = if self.follow_paused {
             let at = agent_at
                 .map(|l| {
@@ -716,14 +785,16 @@ impl ThreadView {
                     }
                 })
                 .unwrap_or_default();
-            h_flex().gap_2().child(Label::new(format!("Paused · the agent is at {at}")).size(LabelSize::XSmall).color(Color::Muted)).child(
+            h_flex().gap_2().child(Label::new(format!("Paused · the agent is in {at}")).size(LabelSize::XSmall).color(Color::Muted)).child(
                 Button::new("follow-jump", "Jump to agent").style(ButtonStyle::Subtle).size(ButtonSize::Compact).on_click(cx.listener(|this, _, window, cx| this.jump_to_agent(window, cx))),
             )
         } else {
-            h_flex()
-                .gap_2()
-                .child(h_flex().gap_1().child(div().size(px(7.)).rounded_full().bg(Color::Accent.color(cx))).child(Label::new("Following the agent").size(LabelSize::XSmall).color(Color::Accent)))
-                .child(Button::new("follow-pause", "Pause following").style(ButtonStyle::Subtle).size(ButtonSize::Compact).on_click(cx.listener(|this, _, _, cx| this.pause_follow(cx))))
+            h_flex().child(
+                IconButton::new("follow-pause", IconName::DebugPause)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Stay here (stop following the agent)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.pause_follow(cx))),
+            )
         };
         let header = h_flex()
             .justify_between()
@@ -732,35 +803,35 @@ impl ThreadView {
             .py_1p5()
             .border_b_1()
             .border_color(colors.border)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .min_w_0()
-                    .child(Icon::new(IconName::File).size(IconSize::Small).color(Color::Muted))
-                    .child(Label::new(shown).size(LabelSize::Small).buffer_font(cx).truncate())
-                    .child(Label::new(line_label).size(LabelSize::XSmall).color(Color::Muted)),
-            )
+            .child(what)
             .child(
                 h_flex().gap_1().child(status).child(
                     IconButton::new("follow-close", IconName::Close).icon_size(IconSize::Small).tooltip(Tooltip::text("Close (the agent keeps working)")).on_click(cx.listener(|this, _, _, cx| this.close_follow(cx))),
                 ),
             );
-        let banner = review.map(|(_, added, removed)| {
+        // The proposed change, shown as a diff of what it adds and removes, to accept here.
+        let proposal = self.follow_review.as_ref().filter(|(ix, _)| review.is_some_and(|(r, _, _)| r == *ix)).map(|(ix, view)| (*ix, view.editor.clone()));
+        let banner = review.map(|(ix, added, removed)| {
+            let thread = self.thread.downgrade();
+            let answer = move |accept: bool| {
+                let thread = thread.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                    thread.update(cx, |t, cx| t.answer_review(ix, accept, cx)).ok();
+                }
+            };
             h_flex()
                 .gap_2()
                 .px_3()
                 .py_1()
                 .bg(cx.theme().status().info_background)
                 .child(Icon::new(IconName::Pencil).size(IconSize::XSmall).color(Color::Info))
-                .child(Label::new(format!("A change to this file (+{added} −{removed}) waits for your review in the thread.")).size(LabelSize::XSmall))
+                .child(div().flex_1().min_w_0().child(Label::new(format!("The agent proposes this change (+{added} −{removed})")).size(LabelSize::XSmall).truncate()))
+                .child(Button::new("follow-accept", "Accept").style(ButtonStyle::Filled).size(ButtonSize::Compact).start_icon(Icon::new(IconName::Check).size(IconSize::XSmall)).on_click(answer(true)))
+                .child(Button::new("follow-reject", "Reject").size(ButtonSize::Compact).start_icon(Icon::new(IconName::Close).size(IconSize::XSmall)).on_click(answer(false)))
         });
-        // While a command runs, its terminal; otherwise the file the agent is in.
-        let terminal = self.follow_terminal(cx).and_then(|_| {
-            let thread = self.thread.read(cx);
-            let (_, terminal) = thread.running_terminal()?;
-            thread.terminal_view(&terminal)
-        });
-        let activity = self.thread.read(cx).activity().map(|(text, waiting)| {
+        // What the agent is doing besides the pane's tool call: waiting for you, thinking…
+        let running = self.thread.read(cx).running_tool().map(str::to_string);
+        let activity = self.thread.read(cx).activity().filter(|(text, waiting)| *waiting || running.as_deref() != Some(text.as_str())).map(|(text, waiting)| {
             h_flex()
                 .gap_2()
                 .px_3()
@@ -772,6 +843,7 @@ impl ThreadView {
         });
         let body = match (&terminal, &follow.editor) {
             (Some(view), _) => div().flex_1().min_h_0().p_1().child(view.clone()).into_any_element(),
+            (None, _) if proposal.is_some() => div().flex_1().min_h_0().child(proposal.clone().map(|(_, editor)| editor).unwrap()).into_any_element(),
             (None, Some(editor)) => div().flex_1().min_h_0().child(editor.clone()).into_any_element(),
             (None, None) => div().p_4().child(Label::new("Opening…").size(LabelSize::Small).color(Color::Muted)).into_any_element(),
         };
@@ -996,9 +1068,9 @@ impl ThreadView {
         let elapsed = thread.checkpoints.last().map(|c| turns::duration(c.started.elapsed())).unwrap_or_default();
         let colors = cx.theme().colors().clone();
         let status = cx.theme().status().clone();
-        Some(
+        Some(centered(
             h_flex()
-                .mx_4()
+                .w_full()
                 .mb_2()
                 .px_3()
                 .py_1p5()
@@ -1016,9 +1088,8 @@ impl ThreadView {
                         .size(ButtonSize::Compact)
                         .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
                         .on_click(cx.listener(|this, _, window, cx| this.cancel(&Cancel, window, cx))),
-                )
-                .into_any_element(),
-        )
+                ),
+        ))
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1485,6 +1556,11 @@ impl Render for ThreadView {
     }
 }
 
+/// `element` in the conversation's column: as wide as the messages and the input, centered.
+fn centered(element: impl IntoElement) -> AnyElement {
+    h_flex().w_full().justify_center().px_4().child(v_flex().w_full().min_w_0().max_w(px(880.)).child(element)).into_any_element()
+}
+
 impl Focusable for ThreadView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.focus_handle(cx)
@@ -1541,6 +1617,207 @@ mod tests {
     fn draw(view: &Entity<ThreadView>, cx: &mut VisualTestContext) {
         let view = view.clone();
         cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), move |_, _| div().size_full().child(view));
+    }
+
+    /// (added, deleted) rows the editor shows as diff, expanded.
+    fn diff_rows(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> (usize, usize) {
+        editor.update(cx, |e, cx| {
+            let snapshot = e.buffer().read(cx).snapshot(cx);
+            snapshot.row_infos(multi_buffer::MultiBufferRow(0)).filter_map(|r| r.diff_status).fold((0, 0), |(a, d), s| match s.kind {
+                buffer_diff::DiffHunkStatusKind::Added => (a + 1, d),
+                buffer_diff::DiffHunkStatusKind::Deleted => (a, d + 1),
+                _ => (a, d),
+            })
+        })
+    }
+
+    /// While the agent edits the followed file, the pane shows the change as a diff: the
+    /// proposal while it waits for review, then the file against before the agent.
+    #[gpui::test]
+    async fn the_follow_pane_shows_changes_as_diffs(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+            crate::thread_picker::init(cx);
+            crate::agent_review::init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "a.txt": "old\nsame\n" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let agent = AgentSpec {
+            id: "mock".into(),
+            command: "python3".into(),
+            args: vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/mock-acp-agent.py").to_string_lossy().into_owned()],
+            env: vec![],
+            cwd: Some(tmp.path().to_path_buf()),
+        };
+        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        draw(&view, cx);
+        view.update_in(cx, |v, window, cx| {
+            v.input.update(cx, |e, cx| e.set_text("edit a.txt new", window, cx));
+            v.send(&Send, window, cx);
+        });
+        wait_for(cx, &thread, "the change to review", |t| t.pending_reviews() == 1).await;
+        cx.run_until_parked();
+        draw(&view, cx);
+        let proposal = view.read_with(cx, |v, _| v.follow_review.as_ref().map(|(_, d)| d.editor.clone())).expect("the pane shows the proposal");
+        let (added, deleted) = diff_rows(&proposal, cx);
+        assert!(added > 0 && deleted > 0, "the proposal shows added and deleted rows: {added} added, {deleted} deleted");
+
+        let review = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::Review { .. })).unwrap());
+        thread.update(cx, |t, cx| t.answer_review(review, true, cx));
+        wait_for(cx, &thread, "the turn to end", |t| t.status() == Status::Ready && t.pending_reviews() == 0).await;
+        cx.run_until_parked();
+        draw(&view, cx);
+        assert!(view.read_with(cx, |v, _| v.follow_review.is_none()), "answered: back to the file");
+        let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
+        let (added, deleted) = diff_rows(&editor, cx);
+        assert!(added > 0 && deleted > 0, "the file shows the agent's change: {added} added, {deleted} deleted");
+        // Filled red and green, not git's hollow staged hunks.
+        let staged = editor.update(cx, |e, cx| {
+            let snapshot = e.buffer().read(cx).snapshot(cx);
+            let statuses: Vec<_> = snapshot.row_infos(multi_buffer::MultiBufferRow(0)).filter_map(|r| r.diff_status).collect();
+            statuses.iter().map(|s| e.diff_hunk_renderer().render_hunk_as_staged(s, cx)).collect::<Vec<_>>()
+        });
+        assert!(staged.iter().all(|s| !s), "the follow pane's hunks render as staged (hollow): {staged:?}");
+        let staged = proposal.update(cx, |e, cx| {
+            let snapshot = e.buffer().read(cx).snapshot(cx);
+            let statuses: Vec<_> = snapshot.row_infos(multi_buffer::MultiBufferRow(0)).filter_map(|r| r.diff_status).collect();
+            statuses.iter().map(|s| e.diff_hunk_renderer().render_hunk_as_staged(s, cx)).collect::<Vec<_>>()
+        });
+        assert!(staged.iter().all(|s| !s), "the proposal's hunks render as staged (hollow): {staged:?}");
+    }
+
+    /// As with Claude Code in auto mode: the agent reads the file (the pane opens it), then
+    /// writes it straight away (no review); the pane shows the change as a diff.
+    #[gpui::test]
+    async fn the_follow_pane_shows_direct_writes_as_diffs(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+            crate::thread_picker::init(cx);
+            crate::agent_review::init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "a.txt": "old\nsame\n" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let agent = AgentSpec {
+            id: "mock".into(),
+            command: "python3".into(),
+            args: vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/mock-acp-agent.py").to_string_lossy().into_owned()],
+            env: vec![],
+            cwd: Some(tmp.path().to_path_buf()),
+        };
+        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        draw(&view, cx);
+        for message in ["read a.txt 0", "edit a.txt new"] {
+            view.update_in(cx, |v, window, cx| {
+                v.input.update(cx, |e, cx| e.set_text(message, window, cx));
+                v.send(&Send, window, cx);
+            });
+            wait_for(cx, &thread, "the turn to end", |t| t.status() == Status::Ready && t.entries.iter().filter(|e| matches!(e, Entry::Agent(_))).count() >= 1).await;
+            cx.run_until_parked();
+            draw(&view, cx);
+        }
+        wait_for(cx, &thread, "the change", |t| !t.changes.is_empty()).await;
+        cx.run_until_parked();
+        draw(&view, cx);
+        let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
+        let text = editor.update(cx, |e, cx| e.buffer().read(cx).snapshot(cx).text());
+        assert!(text.contains("new"), "the pane shows the written file: {text:?}");
+        let (added, deleted) = diff_rows(&editor, cx);
+        assert!(added > 0 && deleted > 0, "the pane shows the agent's change: {added} added, {deleted} deleted");
+    }
+
+    /// Claude Code's adapter writes files itself and only reports the edit (a tool call
+    /// with the whole file before and after): the edit still joins the changes, and the
+    /// follow pane shows it as a diff.
+    #[gpui::test]
+    async fn edits_the_agent_writes_itself_show_as_diffs(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+            crate::thread_picker::init(cx);
+            crate::agent_review::init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "a.rs": "fn a() {}\nfn b() {}\n" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let config = crate::config::AgentsConfig { agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        let (before, after) = ("fn a() {}\nfn b() {}\n", "fn a() {}\nfn c() {}\n");
+        let update = |u: serde_json::Value, cx: &mut VisualTestContext| {
+            thread.update_in(cx, |t, window, cx| {
+                t.apply_update(u, window, cx);
+                t.changed(cx);
+            });
+            cx.run_until_parked();
+        };
+        // The edit is announced (the pane opens the file), written by the agent, then done.
+        update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit a.rs", "kind": "edit", "status": "pending",
+            "locations": [{ "path": "/root/a.rs", "line": 1 }],
+            "content": [{ "type": "diff", "path": "/root/a.rs", "oldText": before, "newText": after }] }), cx);
+        draw(&view, cx);
+        fs.save("/root/a.rs".as_ref(), &after.into(), Default::default()).await.unwrap();
+        update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }), cx);
+        draw(&view, cx);
+        let changes = thread.read_with(cx, |t, _| t.changes.iter().map(|c| (c.path.clone(), c.original.clone(), c.current.clone())).collect::<Vec<_>>());
+        assert_eq!(changes, [(std::path::PathBuf::from("/root/a.rs"), Some(before.to_string()), after.to_string())]);
+        let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
+        let (added, deleted) = diff_rows(&editor, cx);
+        assert!(added > 0 && deleted > 0, "the pane shows the agent's change: {added} added, {deleted} deleted");
+
+        // A snippet's diff doesn't say what the file was: not recorded.
+        update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Edit a.rs", "kind": "edit", "status": "pending",
+            "content": [{ "type": "diff", "path": "/root/a.rs", "oldText": "fn c() {}", "newText": "fn d() {}" }] }), cx);
+        fs.save("/root/a.rs".as_ref(), &"fn a() {}\nfn d() {}\n".into(), Default::default()).await.unwrap();
+        update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed" }), cx);
+        let current = thread.read_with(cx, |t, _| t.changes[0].current.clone());
+        assert_eq!(current, after, "a snippet's diff isn't taken for the whole file");
     }
 
     /// Typing in a new thread connects the agent and answers; an edit waits in the thread
