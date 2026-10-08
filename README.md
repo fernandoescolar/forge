@@ -55,7 +55,6 @@ You need Rust (stable), Node 20+, `cmake` and Python 3. [docs/DEVELOPMENT.md](do
 | [**Architecture**](docs/ARCHITECTURE.md) | How Forge is put together: its crates, threads, the agent runtime and the extension host. |
 | [**Zed integration**](docs/ZED_INTEGRATION.md) | How Forge uses Zed as a library, the few patches it carries and how to move to a new Zed release. |
 | [**Development**](docs/DEVELOPMENT.md) | Building, testing, packaging, releases and the repository layout. |
-| [**Roadmap**](docs/ROADMAP.md) | What is done and what is left. |
 
 ## License
 

@@ -19,6 +19,7 @@ This guide goes from an empty folder to a packaged extension, then covers the co
 - [Programs and sidecars](#programs-and-sidecars)
 - [Settings, storage and secrets](#settings-storage-and-secrets)
 - [Dialogs, messages and the clipboard](#dialogs-messages-and-the-clipboard)
+- [Tools for agents](#tools-for-agents)
 - [Packaging and sharing](#packaging-and-sharing)
 - [Debugging](#debugging)
 - [API reference](#api-reference)
@@ -26,9 +27,9 @@ This guide goes from an empty folder to a packaged extension, then covers the co
 
 ## Your first extension
 
-The API package and the build tool live in this repository (`packages/forge-api`), so start from a checkout of Forge. The examples in `extensions/` show the layout.
+The API's types and the build tool, `forge-ext`, are the npm package [`@forge-ide/api`](https://www.npmjs.com/package/@forge-ide/api). An extension can live in any folder: install the package there and build with `npx forge-ext`. (In a checkout of Forge they are `packages/forge-api`, and the examples in `extensions/` show the layout.)
 
-**1. Create the folder** `extensions/hello/` with a `package.json`:
+**1. Create the folder** `hello/` with a `package.json`:
 
 ```json
 {
@@ -36,16 +37,23 @@ The API package and the build tool live in this repository (`packages/forge-api`
   "displayName": "Hello",
   "version": "0.1.0",
   "description": "My first Forge extension",
-  "forge": { "entry": "src/extension.tsx" }
+  "forge": { "entry": "src/extension.tsx" },
+  "scripts": { "build": "forge-ext build .", "watch": "forge-ext watch .", "pack": "forge-ext pack ." }
 }
+```
+
+and install the API (it brings `forge-ext` and the types):
+
+```bash
+npm install --save-dev @forge-ide/api
 ```
 
 **2. Write `src/extension.tsx`:**
 
 ```tsx
 import { useState } from 'react';
-import { forge, Button, Text, View } from '@forge/api';
-import type { ExtensionContext } from '@forge/api';
+import { forge, Button, Text, View } from '@forge-ide/api';
+import type { ExtensionContext } from '@forge-ide/api';
 
 function Hello() {
   const [clicks, setClicks] = useState(0);
@@ -68,16 +76,35 @@ export function activate(ctx: ExtensionContext) {
 **3. Build it:**
 
 ```bash
-node packages/forge-api/bin/forge-ext.mjs build extensions/hello    # or `watch` to rebuild on every change
+npm run build    # forge-ext build . — or `npm run watch` to rebuild on every change
 ```
 
-This bundles your code into `extensions/hello/dist/extension.js`. React and `@forge/api` are not bundled: Forge provides them, so every extension shares the same React.
+This bundles your code into `hello/dist/extension.js`. React and `@forge-ide/api` are not bundled: Forge provides them, so every extension shares the same React. (Extensions built when the API was called `@forge/api` keep working: Forge provides it under both names.)
 
-**4. Run it.** A debug build of Forge (`cargo run -p forge-native`) loads everything in `extensions/` at startup. With an installed Forge, use **Extensions › Install from Folder…** and pick the folder. After a rebuild, *Reload* in the extension's ⋯ menu (Extensions panel) loads it again, without restarting Forge.
+**4. Run it.** In Forge, use **Extensions › Install from Folder…** and pick the folder (a debug build of Forge, `cargo run -p forge-native`, also loads everything in this repository's `extensions/` at startup). After a rebuild, *Reload* in the extension's ⋯ menu (Extensions panel) loads it again, without restarting Forge.
 
 Your panel shows under View › Panels and in the dock, and *Hello: Say Hello* is in the command palette.
 
-For type checking, copy `tsconfig.json` from `extensions/workspace-notes`. It points `@forge/api` and React's types at `packages/forge-api`.
+For type checking, a `tsconfig.json` like this one is enough (`@forge-ide/api/globals` declares the timers and `console` the extension runtime provides):
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "lib": ["ES2022"],
+    "types": ["@forge-ide/api/globals"]
+  },
+  "include": ["src"]
+}
+```
+
+The examples in this repository's `extensions/` point their `tsconfig.json` at `packages/forge-api` instead, so they need no install.
 
 ## The manifest
 
@@ -346,12 +373,45 @@ await forge.clipboard.writeText('copied');
 const pasted = await forge.clipboard.readText();
 ```
 
+## Tools for agents
+
+An extension can offer agents tools: what it knows how to do, an agent can then do too. Agents in Forge (Claude, Codex, GitHub Copilot, Antigravity…) reach Forge's own tools through its MCP server, the `forge` server; your tools join them there.
+
+```ts
+ctx.subscriptions.push(
+  forge.agents.registerTool({
+    name: 'schema',                               // agents see it as `db_explorer__schema`
+    title: 'Database schema',                     // shown in the thread when an agent calls it
+    description: 'The tables of a connection, or the columns of one table.',
+    inputSchema: {
+      type: 'object',
+      properties: { connection: { type: 'string' }, table: { type: 'string' } },
+      required: ['connection'],
+    },
+    readOnly: true,
+    async run(args, call) {                       // call.cwd: the folder the agent works in
+      const columns = await describe(args.connection, args.table);
+      return columns.map((c) => `- ${c.name} ${c.type}`).join('\n');
+    },
+  }),
+);
+```
+
+- **Naming.** `name` is letters, digits, `-` and `_`. Agents see the tool as `<extension>__<name>` (non-alphanumerics become `_`), so it can't take the name of one of Forge's tools or another extension's.
+- **Describing it.** Agents choose tools by their `description`: say what it does, what it returns and when to use it. `inputSchema` is a JSON Schema for the arguments (`run` gets them parsed); leave it out for a tool without arguments.
+- **Answering.** `run` returns text (Markdown reads well), or `{ text, isError: true }` to tell the agent it failed. A thrown error is sent as a failure with its message. It may be `async`.
+- **Asking the user.** A tool marked `readOnly: true` (it changes nothing and starts nothing) runs when an agent calls it. Any other tool asks first: the call shows in the agent's thread with its arguments, and runs only if the user allows it; otherwise the agent hears no. With Settings › Agents › *Super user*, every tool runs without asking. Don't mark a tool `readOnly` to spare the question if it can change things.
+- **When agents see it.** Agents get the list of tools when a thread starts: a tool registered later shows in threads started after. Forge also names the extensions' tools in the instructions it gives agents with a thread's first message.
+- **Unloading.** Like everything an extension registers, its tools go away when it unloads; `dispose()` takes one away sooner.
+
+The Database Explorer (`extensions/db-explorer/src/agentTools.ts`) offers agents its SQL connections: `connections` and `schema` read, and `query` runs SQL the user approves.
+
 ## Packaging and sharing
 
 A `.forgeext` file is a zip of what an extension needs at run time: `package.json`, `dist/`, its web view pages and assets, and its sidecars for every platform they were built for. Sources and `node_modules` stay out. By default a package takes `package.json`, `dist`, `webview`, `assets`, `media`, `bin`, `README.md`, `CHANGELOG.md`, `LICENSE` and `icon.png`; list `forge.files` in the manifest to choose yourself.
 
 ```bash
-node packages/forge-api/bin/forge-ext.mjs pack extensions/hello          # → hello-0.1.0.forgeext
+npx forge-ext pack .          # → hello-0.1.0.forgeext
 ```
 
 *Export as Package…* in an extension's ⋯ menu (Extensions panel) does the same from Forge.
@@ -381,6 +441,7 @@ Extensions run with the user's rights: they can read files and run programs. Say
 | `forge.settings` | `get`, `onDidChange` |
 | `forge.window` | `showMessage`, `confirm`, `pickFiles`, `saveFile` |
 | `forge.clipboard` | `writeText`, `readText` |
+| `forge.agents` | `registerTool({ name, title, description, inputSchema, readOnly, run })` |
 | `ctx` | `id`, `path`, `subscriptions`, `storage`, `workspaceStorage`, `secrets` |
 
 Everything returning a `Disposable` (`{ dispose() }`) can go into `ctx.subscriptions`. The types are in `packages/forge-api/src/index.ts`, with a comment on each.
