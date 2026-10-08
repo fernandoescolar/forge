@@ -219,5 +219,6 @@ pub fn presets() -> Vec<AgentSpec> {
         npx("claude", "@agentclientprotocol/claude-agent-acp"),
         npx("codex", "@zed-industries/codex-acp"),
         AgentSpec { id: "gemini".into(), command: "gemini".into(), args: vec!["--experimental-acp".into()], env: vec![], cwd: None },
+        AgentSpec { id: "copilot".into(), command: "npx".into(), args: ["-y", "@github/copilot", "--acp", "--stdio"].map(String::from).to_vec(), env: vec![], cwd: None },
     ]
 }

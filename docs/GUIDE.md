@@ -157,7 +157,7 @@ The **Tests** panel (View › Panels › Tests, or Run › *Run All Tests*) find
 
 ## Agents
 
-Agents work in **threads**. A thread is one conversation with an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com), such as Claude Code, Codex or Gemini. You list agents in `agents.json`. There are three ways to start one:
+Agents work in **threads**. A thread is one conversation with an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com), such as Claude Code, Codex, Gemini or GitHub Copilot. You list agents in `agents.json`. There are three ways to start one:
 
 - **The thread tab** (⌘⇧A, or the spark in the title bar; ⌘⌥N starts a new one). The conversation fills the editor area. You see your messages, the agent's answers, its tool calls with their terminals, plans and permission requests. Under the input are the session's settings (mode, model and others the agent offers) and its usage. **Changes** lists every file the agent modified, with lines added and removed. Click a file, or *Review*, to see the changes as a diff in a tab, then keep or undo each file or all of them.
 - **In the code** (⌃↩ in any file). A question card opens right below the selection. It keeps the latest answer, the changes to review and a reply box.

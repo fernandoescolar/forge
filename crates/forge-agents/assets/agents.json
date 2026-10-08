@@ -11,6 +11,7 @@
   "agents": [
     { "id": "claude", "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp"] },
     { "id": "gemini", "command": "gemini", "args": ["--experimental-acp"] },
-    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp"] }
+    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp"] },
+    { "id": "copilot", "command": "npx", "args": ["-y", "@github/copilot", "--acp", "--stdio"] }
   ]
 }
