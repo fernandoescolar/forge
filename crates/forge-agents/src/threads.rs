@@ -2158,6 +2158,23 @@ mod tests {
 
     /// `ask` (behind "Fix with agent") connects a disconnected agent and sends the prompt;
     /// the conversation is saved and listed under Earlier in a new thread's rail.
+    /// Agents like Copilot CLI refuse `session/new` until signed in: the connection fails,
+    /// and the sign-in card still offers the login methods `initialize` listed.
+    #[gpui::test]
+    async fn a_session_refused_for_lack_of_sign_in_offers_the_login(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut agent = mock_auth_agent(&tmp.path().join("signed-in"));
+        agent.env.push(("MOCK_AUTH_ON_NEW_SESSION".into(), "1".into()));
+        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        thread.update_in(cx, |t, window, cx| t.connect(window, cx));
+        wait_for(cx, &thread, "the refused connection", |t| t.status() == Status::Disconnected && t.entries.iter().any(|e| matches!(e, Entry::System(text, _) if text.starts_with("Could not connect")))).await;
+        wait_for(cx, &thread, "sign-in card", |t| auth_card(t).is_some()).await;
+        assert_eq!(thread.read_with(cx, |t, _| t.auth_methods.iter().map(|m| m.id.clone()).collect::<Vec<_>>()), ["mock-login"]);
+    }
+
     #[gpui::test]
     async fn ask_connects_sends_and_saves(cx: &mut TestAppContext) {
         cx.executor().allow_parking();

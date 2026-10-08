@@ -829,6 +829,10 @@ impl Thread {
         let mut mcp = self.mcp_servers.clone();
         let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
         let spec_for_auth = spec.clone();
+        // The agent's `initialize` answer, kept even when `session/new` fails: its login
+        // methods are what that failure (not signed in) needs.
+        let initialized: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
+        let initialized_slot = initialized.clone();
         cx.spawn_in(window, async move |this, cx| {
             let mut env: Vec<(String, String)> = match shell_env {
                 Some(task) => task.await.unwrap_or_default().into_iter().collect(),
@@ -854,6 +858,7 @@ impl Thread {
                         rt.start(spec).await?;
                     }
                     let init = rt.initialize(&id, PROTOCOL_VERSION).await?;
+                    *initialized_slot.lock().unwrap() = Some(init.clone());
                     // Forge's own tools, for agents that take HTTP MCP servers.
                     if let (Some(server), true) = (forge_server, init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool).unwrap_or(false)) {
                         mcp.push(server);
@@ -914,6 +919,9 @@ impl Thread {
                     Err(e) => {
                         this.status = Status::Disconnected;
                         this.system(format!("Could not connect: {e:#}"), Color::Error);
+                        if let Some(init) = initialized.lock().unwrap().take() {
+                            this.auth_methods = parse_auth_methods(&init, &spec_for_auth);
+                        }
                         if is_auth_error(&format!("{e:#}")) {
                             this.show_auth("Signing in should fix this.", cx);
                         }
@@ -1408,6 +1416,8 @@ impl Thread {
             "Run `gemini` in a terminal and complete the login, then press + for a new session.".into()
         } else if launches("codex") {
             "Run `codex login` in a terminal, then press + for a new session.".into()
+        } else if launches("copilot") {
+            "Run `npx @github/copilot login` in a terminal (or `copilot login`), then press + for a new session.".into()
         } else {
             "Sign in with the agent's own CLI, then press + for a new session.".into()
         }

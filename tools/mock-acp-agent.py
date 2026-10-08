@@ -16,6 +16,8 @@ prompts until the marker file (MOCK_AUTH_MARKER, default $TMPDIR/forge-mock-auth
 import json, os, sys, tempfile, uuid
 
 REQUIRE_AUTH = os.environ.get("MOCK_REQUIRE_AUTH") == "1"
+# Like Copilot CLI: refuse to start a session at all until signed in.
+AUTH_ON_NEW = os.environ.get("MOCK_AUTH_ON_NEW_SESSION") == "1"
 AUTH_MARKER = os.environ.get("MOCK_AUTH_MARKER") or os.path.join(tempfile.gettempdir(), "forge-mock-auth")
 
 
@@ -227,6 +229,8 @@ for line in sys.stdin:
             result = {"echoClientCapabilities": client_capabilities, "protocolVersion": params.get("protocolVersion", 1), "agentInfo": {"name": "Forge Mock ACP", "version": "0.2"},
                       "agentCapabilities": {"loadSession": True, "promptCapabilities": {"image": True}}, "authMethods": auth_methods}
         elif method == "session/new":
+            if AUTH_ON_NEW and not authed():
+                raise ValueError("Authentication required")
             sid = "mock-" + uuid.uuid4().hex[:10]
             sessions[sid] = {"cwd": params.get("cwd") or os.getcwd(), "history": []}
             sessions[sid]["mode"] = "default"
