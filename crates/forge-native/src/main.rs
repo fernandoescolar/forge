@@ -62,6 +62,16 @@ fn main() {
     let session = app
         .background_executor()
         .spawn(Session::new(uuid::Uuid::new_v4().to_string(), KeyValueStore::from_app_db(&app_db)));
+    // Opened from Finder or the Dock, Forge gets launchd's minimal PATH, without `dotnet`,
+    // `node` and the rest; take the login shell's environment like Zed does.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        app.background_executor()
+            .spawn(async {
+                #[cfg(unix)]
+                util::load_login_shell_environment().await.log_err();
+            })
+            .detach();
+    }
     let fs: Arc<dyn Fs> = RealFs::new(None, app.background_executor());
     // Files/folders dropped on the Dock icon or opened with "Open With → Forge".
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
