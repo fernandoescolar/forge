@@ -9,7 +9,9 @@
 //! right and bottom edges of the window.
 //!
 //! Panels can also be shown together in one dock ([`PanelGroups`]): drop a panel's button
-//! on another's, or use "Show with" in the button's menu.
+//! on the middle of another's, or use "Show with" in the button's menu. Dropped on a
+//! button's edge (or past the last one), it goes there instead, so the buttons can be put
+//! in any order ([`PanelOrder`]).
 
 use forge_extension_host::{ExtensionHost, panel::SLOT_KEYS};
 use forge_ui::{DraggedExtensionTab, DraggedPanel};
@@ -62,6 +64,104 @@ impl HiddenPanels {
         let value = serde_json::to_string(&self.0).unwrap_or_default();
         cx.background_spawn(async move { kvp.write_kvp(HIDDEN_KEY.to_string(), value).await.ok() }).detach();
         cx.notify();
+    }
+}
+
+/// The order of the panel buttons (by `Panel::persistent_name`), for every window,
+/// remembered across restarts. Panels it doesn't name go last, in the order Forge adds them.
+pub struct PanelOrder(Vec<String>);
+
+struct GlobalPanelOrder(Entity<PanelOrder>);
+impl gpui::Global for GlobalPanelOrder {}
+
+const ORDER_KEY: &str = "forge-panel-order";
+
+impl PanelOrder {
+    pub fn global(cx: &mut App) -> Entity<PanelOrder> {
+        if let Some(g) = cx.try_global::<GlobalPanelOrder>() {
+            return g.0.clone();
+        }
+        let saved = db::kvp::KeyValueStore::global(cx).read_kvp(ORDER_KEY).ok().flatten();
+        let names: Vec<String> = saved.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let entity = cx.new(|_| PanelOrder(names));
+        cx.set_global(GlobalPanelOrder(entity.clone()));
+        entity
+    }
+
+    /// Sorts `items` into button order (stably: the panels it doesn't name keep theirs).
+    fn sort<T>(&self, items: &mut [T], name: impl Fn(&T) -> &str) {
+        items.sort_by_key(|item| self.0.iter().position(|n| n == name(item)).unwrap_or(usize::MAX));
+    }
+
+    /// Puts `name` right before (or, `after`, right after) `target`, or last without one.
+    /// `current` is every panel, in button order.
+    fn place(&mut self, name: &str, target: Option<(&str, bool)>, current: Vec<String>, cx: &mut Context<Self>) {
+        let mut order: Vec<String> = current.into_iter().filter(|n| n != name).collect();
+        let at = target.and_then(|(t, after)| order.iter().position(|n| n == t).map(|ix| ix + after as usize)).unwrap_or(order.len());
+        order.insert(at, name.to_string());
+        if order == self.0 {
+            return;
+        }
+        self.0 = order;
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let value = serde_json::to_string(&self.0).unwrap_or_default();
+        cx.background_spawn(async move { kvp.write_kvp(ORDER_KEY.to_string(), value).await.ok() }).detach();
+        cx.notify();
+    }
+}
+
+/// Where a dragged panel button would land: on another button (shown together with it),
+/// or before or after it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Spot {
+    Before,
+    On,
+    After,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct DropHint {
+    target: &'static str,
+    spot: Spot,
+}
+
+/// Drops `dragged` on the button strip of the dock at `position`: shows it together with
+/// the button it is on, or puts its button where it was dropped (last, `last` being the
+/// strip's last button, when not over a button), moving it to that dock.
+fn drop_on_strip(
+    dragged: &DraggedPanel,
+    hint: Option<DropHint>,
+    position: DockPosition,
+    last: Option<&'static str>,
+    workspace: &WeakEntity<Workspace>,
+    registry: &Entity<PanelRegistry>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let name = dragged.panel.persistent_name();
+    if let Some(DropHint { target, spot: Spot::On }) = hint {
+        let with = registry.read(cx).entries.iter().find(|e| e.handle.persistent_name() == target).map(|e| e.handle.clone());
+        if let Some(with) = with.filter(|_| target != name) {
+            show_together(name, with, dragged.panel.clone(), workspace, window, cx);
+        }
+        return;
+    }
+    if !dragged.panel.position_is_valid(position, cx) {
+        return;
+    }
+    let target = match hint {
+        Some(hint) => Some((hint.target, hint.spot == Spot::After)),
+        None => last.map(|last| (last, true)),
+    };
+    if target.is_some_and(|(t, _)| t == name) {
+        return;
+    }
+    let order = PanelOrder::global(cx);
+    let mut current: Vec<String> = registry.read(cx).entries.iter().map(|e| e.handle.persistent_name().to_string()).collect();
+    order.read(cx).sort(&mut current, |n| n.as_str());
+    order.update(cx, |o, cx| o.place(name, target, current, cx));
+    if dragged.panel.position(window, cx) != position {
+        forge_ui::move_panel(dragged.panel.clone(), position, workspace.clone(), window, cx);
     }
 }
 
@@ -336,6 +436,8 @@ pub struct DockButtons {
     registry: Entity<PanelRegistry>,
     workspace: WeakEntity<Workspace>,
     extension_host: Option<Entity<ExtensionHost>>,
+    /// Where the panel being dragged over this strip would land.
+    drop_hint: Option<DropHint>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -355,10 +457,13 @@ impl DockButtons {
         // Hiding or showing a panel, from any window.
         let hidden = HiddenPanels::global(cx);
         subscriptions.push(cx.observe(&hidden, |_, _, cx| cx.notify()));
+        // Reordering the buttons, from any window.
+        let order = PanelOrder::global(cx);
+        subscriptions.push(cx.observe(&order, |_, _, cx| cx.notify()));
         if let Some(host) = &extension_host {
             subscriptions.push(cx.observe(host, |_, _, cx| cx.notify()));
         }
-        Self { position, draws_drop_zones, registry, workspace, extension_host, _subscriptions: subscriptions }
+        Self { position, draws_drop_zones, registry, workspace, extension_host, drop_hint: None, _subscriptions: subscriptions }
     }
 
     fn button(&self, ix: usize, handle: Arc<dyn PanelHandle>, title: SharedString, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -448,22 +553,49 @@ impl DockButtons {
                     })
             });
         let accent = cx.theme().colors().border_focused;
-        let (drop_target, drop_ws) = (handle.clone(), self.workspace.clone());
+        // Dropping a panel on the middle of this button shows the two together; on its
+        // leading or trailing edge, puts the panel's button before or after this one (the
+        // strip handles the drop).
+        let spot = self.drop_hint.filter(|h| h.target == handle_name && cx.has_active_drag()).map(|h| h.spot);
+        let this = cx.weak_entity();
+        let insertion_bar = |after: bool| {
+            let bar = div().absolute().bg(accent);
+            let bar = if vertical { bar.left_0().right_0().h(px(2.)) } else { bar.top_0().bottom_0().w(px(2.)) };
+            match (vertical, after) {
+                (true, false) => bar.top(px(-4.)),
+                (true, true) => bar.bottom(px(-4.)),
+                (false, false) => bar.left(px(-3.)),
+                (false, true) => bar.right(px(-3.)),
+            }
+        };
         Some(
             div()
                 .id(("forge-dock-drag", ix))
                 .debug_selector(|| format!("forge-dock-button-{}", handle_name))
+                .relative()
                 .rounded_md()
                 .border_1()
-                .border_color(gpui::transparent_black())
-                // Dropping a panel on this button shows the two together.
-                .drag_over::<DraggedPanel>(move |s, _, _, _| s.border_color(accent))
-                .on_drop(move |d: &DraggedPanel, window, cx| {
-                    forge_ui::end_drag(cx);
-                    if d.panel.panel_id() != drop_target.panel_id() {
-                        show_together(d.panel.persistent_name(), drop_target.clone(), d.panel.clone(), &drop_ws, window, cx);
+                .border_color(if spot == Some(Spot::On) { accent } else { gpui::transparent_black() })
+                .on_drag_move::<DraggedPanel>(move |e, _, cx| {
+                    let (b, p) = (e.bounds, e.event.position);
+                    if !b.contains(&p) {
+                        return;
                     }
+                    let hint = (e.drag(cx).panel.persistent_name() != handle_name).then(|| {
+                        let f = if vertical { (p.y - b.origin.y) / b.size.height } else { (p.x - b.origin.x) / b.size.width };
+                        let spot = if f < 0.3 { Spot::Before } else if f > 0.7 { Spot::After } else { Spot::On };
+                        DropHint { target: handle_name, spot }
+                    });
+                    this.update(cx, |this, cx| {
+                        if this.drop_hint != hint {
+                            this.drop_hint = hint;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                 })
+                .when(spot == Some(Spot::Before), |d| d.child(insertion_bar(false)))
+                .when(spot == Some(Spot::After), |d| d.child(insertion_bar(true)))
                 .child(button)
                 .on_drag(DraggedPanel { panel: handle, title, icon: Some(icon) }, |d, _, _, cx| forge_ui::drag_preview(d.title.clone(), d.icon, cx))
                 .into_any_element(),
@@ -542,27 +674,58 @@ impl DockButtons {
 
 impl Render for DockButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries: Vec<(Arc<dyn PanelHandle>, Rc<dyn Fn(&App) -> SharedString>)> =
-            self.registry.read(cx).entries.iter().map(|e| (e.handle.clone(), e.title.clone())).collect();
+        // Registry indexes keep the buttons' element ids stable when they are reordered.
+        let mut entries: Vec<(usize, Arc<dyn PanelHandle>, Rc<dyn Fn(&App) -> SharedString>)> =
+            self.registry.read(cx).entries.iter().enumerate().map(|(ix, e)| (ix, e.handle.clone(), e.title.clone())).collect();
+        PanelOrder::global(cx).read(cx).sort(&mut entries, |(_, handle, _)| handle.persistent_name());
         let hidden = HiddenPanels::global(cx);
         let mut buttons = Vec::new();
-        for (ix, (handle, title)) in entries.into_iter().enumerate() {
+        let mut last = None;
+        for (ix, handle, title) in entries {
             if handle.position(window, cx) != self.position || !handle.enabled(cx) || hidden.read(cx).is_hidden(handle.persistent_name()) {
                 continue;
             }
             let title = title(cx);
-            buttons.extend(self.button(ix, handle, title, window, cx));
+            let name = handle.persistent_name();
+            if let Some(button) = self.button(ix, handle, title, window, cx) {
+                buttons.push(button);
+                last = Some(name);
+            }
         }
         let drop_zones = (self.draws_drop_zones && forge_ui::drag_in_progress(cx)).then(|| self.drop_zones(window, cx));
+        // Dropping a panel's button on the strip: see `DockButtons::button`.
+        let (this, this_for_drop) = (cx.weak_entity(), cx.weak_entity());
+        let (ws, registry, position) = (self.workspace.clone(), self.registry.clone(), self.position);
+        let droppable = move |strip: gpui::Stateful<gpui::Div>| {
+            strip
+                .on_drag_move::<DraggedPanel>(move |e, _, cx| {
+                    if !e.bounds.contains(&e.event.position) {
+                        this.update(cx, |this, cx| {
+                            if this.drop_hint.take().is_some() {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    }
+                })
+                .on_drop(move |d: &DraggedPanel, window, cx| {
+                    forge_ui::end_drag(cx);
+                    let hint = this_for_drop.update(cx, |this, cx| {
+                        cx.notify();
+                        this.drop_hint.take()
+                    });
+                    drop_on_strip(d, hint.ok().flatten(), position, last, &ws, &registry, window, cx);
+                })
+        };
         if self.position == DockPosition::Bottom {
-            return h_flex().gap_0p5().children(buttons).children(drop_zones);
+            let row = h_flex().id("forge-dock-strip-bottom").gap_0p5().children(buttons);
+            return h_flex().child(droppable(row)).children(drop_zones);
         }
         // A strip along the window edge; nothing at all when no panel lives on that side.
         let colors = cx.theme().colors();
         h_flex().h_full().children(drop_zones).when(!buttons.is_empty(), |strip| {
             strip.child(
-                v_flex()
-                    .id(SharedString::from(format!("forge-dock-strip-{}", forge_ui::dock_name(self.position))))
+                droppable(v_flex().id(SharedString::from(format!("forge-dock-strip-{}", forge_ui::dock_name(self.position)))))
                     .h_full()
                     .flex_none()
                     .px_1()
@@ -783,6 +946,69 @@ mod tests {
         let shown = workspace.read_with(cx, |ws, cx| ws.left_dock().read(cx).shown_panels().iter().map(|p| p.persistent_name()).collect::<Vec<_>>());
         assert_eq!(shown, ["ForgeTestPanel", "ForgeOutputPanel"], "Output joined Tests in the left dock");
         cx.update(|_, cx| PanelGroups::global(cx).update(cx, |g, cx| g.leave("ForgeOutputPanel", cx)));
+    }
+
+    /// Dropping a button on another's trailing edge puts it after that one, in the same
+    /// strip, without grouping them; the order is remembered.
+    #[gpui::test]
+    async fn dropping_a_button_between_others_reorders_them(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let params = cx.update(test_app_state);
+        cx.update(|cx| {
+            theme_settings::init(::theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            forge_output::panel::init(cx);
+            forge_tests::init(cx);
+        });
+        let project = project::Project::test(params.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        workspace.update_in(cx, |ws, window, cx| {
+            let output = cx.new(|cx| forge_output::OutputPanel::new(ws, window, cx));
+            ws.add_panel(output.clone(), window, cx);
+            let tests = cx.new(|cx| forge_tests::TestPanel::new(ws, window, cx));
+            ws.add_panel(tests.clone(), window, cx);
+            let entries = vec![
+                DockEntry { handle: Arc::new(output), title: Rc::new(|_| "Output".into()) },
+                DockEntry { handle: Arc::new(tests), title: Rc::new(|_| "Tests".into()) },
+            ];
+            install(ws, entries, None, window, cx);
+        });
+        cx.run_until_parked();
+        // Put Output in the left strip, below Tests.
+        let output_button = cx.debug_bounds("forge-dock-button-ForgeOutputPanel").unwrap();
+        let tests_button = cx.debug_bounds("forge-dock-button-ForgeTestPanel").unwrap();
+        let below_tests = point(tests_button.center().x, tests_button.bottom() - px(2.));
+        cx.simulate_mouse_down(center(output_button), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(center(output_button) + point(px(20.), px(-20.)), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(below_tests, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(below_tests, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let in_left = workspace.read_with(cx, |ws, cx| ws.left_dock().read(cx).panel::<forge_output::OutputPanel>().is_some());
+        assert!(in_left, "Output moved to the left dock");
+        assert!(cx.update(|_, cx| PanelGroups::global(cx).read(cx).group_of("ForgeOutputPanel").is_none()), "not shown together");
+        let (output_button, tests_button) =
+            (cx.debug_bounds("forge-dock-button-ForgeOutputPanel").unwrap(), cx.debug_bounds("forge-dock-button-ForgeTestPanel").unwrap());
+        assert!(output_button.origin.y > tests_button.origin.y, "Output's button is below Tests'");
+
+        // Now drop Output on Tests' leading edge: it goes first.
+        let above_tests = point(tests_button.center().x, tests_button.top() + px(2.));
+        cx.simulate_mouse_down(center(output_button), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(center(output_button) + point(px(20.), px(-20.)), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(above_tests, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(above_tests, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let (output_button, tests_button) =
+            (cx.debug_bounds("forge-dock-button-ForgeOutputPanel").unwrap(), cx.debug_bounds("forge-dock-button-ForgeTestPanel").unwrap());
+        assert!(output_button.origin.y < tests_button.origin.y, "Output's button is above Tests' now");
+        let order = cx.update(|_, cx| PanelOrder::global(cx).read(cx).0.clone());
+        assert_eq!(order, ["ForgeOutputPanel", "ForgeTestPanel"]);
     }
 
     /// Drags the Output panel's status-bar icon onto the left drop zone with real mouse
