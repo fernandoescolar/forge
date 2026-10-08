@@ -1,0 +1,89 @@
+# Publishes the npm packages in packages/ for a package tag:
+#   api-v<version>       @forge-ide/api      (packages/forge-api)
+#   agy-acp-v<version>   @forge-ide/agy-acp  (packages/agy-acp)
+# The tag's version must be the one in the package's package.json. (These tags don't start
+# with `v`, so they don't trigger a Forge release.)
+#
+# npm authenticates this workflow with Trusted Publishing (OIDC): no token is stored. On
+# npmjs.com, each package's Settings › Trusted Publisher names this repository and this
+# workflow file (npm-publish.yml). npm only offers that for a package that exists, so each
+# package's first version is published by hand (`npm publish` in its folder). Packages are
+# published with provenance: a signed record of the commit and workflow that built them.
+name: Publish npm packages
+
+on:
+  push:
+    tags: ["api-v*", "agy-acp-v*"]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish
+        type: choice
+        options: [api, agy-acp]
+      dry-run:
+        description: Pack and check, but don't publish
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # For Trusted Publishing and provenance.
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing needs npm 11.5.1 or later.
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
+      - name: Which package
+        id: package
+        env:
+          INPUT_PACKAGE: ${{ inputs.package }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            name="${GITHUB_REF_NAME%-v*}"
+            version="${GITHUB_REF_NAME#*-v}"
+          else
+            name="$INPUT_PACKAGE"
+            version=""
+          fi
+          case "$name" in
+            api) dir=packages/forge-api ;;
+            agy-acp) dir=packages/agy-acp ;;
+            *) echo "::error::Unknown package tag $GITHUB_REF_NAME (api-v<version> or agy-acp-v<version>)"; exit 1 ;;
+          esac
+          declared="$(node -p "require('./$dir/package.json').version")"
+          if [ -n "$version" ] && [ "$version" != "$declared" ]; then
+            echo "::error::The tag says $version, but $dir/package.json says $declared"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Publishing $(node -p "require('./$dir/package.json').name")@$declared from $dir"
+      - name: Install
+        working-directory: ${{ steps.package.outputs.dir }}
+        run: npm ci
+      - name: Build and test
+        working-directory: ${{ steps.package.outputs.dir }}
+        run: npm run build && npm test
+      - name: Publish
+        working-directory: ${{ steps.package.outputs.dir }}
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            npm publish --dry-run
+          else
+            # Provenance needs CI (it fails publishing from a laptop), so it is asked for here.
+            npm publish --provenance
+          fi

@@ -3,7 +3,7 @@
 // forge-ext watch [dir]           the same, again on every change
 // forge-ext pack  [dir] [-o out]  builds it and packs it into a .forgeext file (a zip)
 //
-// React and @forge/api are provided by the host runtime, so they are mapped to its shared
+// React and @forge-ide/api are provided by the host runtime, so they are mapped to its shared
 // modules instead of being bundled: every extension renders through the same React.
 //
 // A package holds what the extension needs at run time: package.json, dist/, its pages and
@@ -27,7 +27,8 @@ const root = resolve(dir);
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const entry = join(root, pkg.forge?.entry ?? 'src/extension.tsx');
 
-const shared = ['react', 'react/jsx-runtime', '@forge/api'];
+// `@forge/api`: the API's name before it was published as `@forge-ide/api`.
+const shared = ['react', 'react/jsx-runtime', '@forge-ide/api', '@forge/api'];
 const hostModules = {
   name: 'forge-host-modules',
   setup(b) {

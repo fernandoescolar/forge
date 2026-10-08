@@ -1,7 +1,7 @@
 // A query editor: write SQL, run it (⌘Enter), see each result set and what the statements
 // did. Long queries can be cancelled.
 import { useEffect, useRef, useState } from 'react';
-import { forge, Button, DataGrid, Input, Select, Spinner, Tabs, Text, View } from '@forge/api';
+import { forge, Button, DataGrid, Input, Select, Spinner, Tabs, Text, View } from '@forge-ide/api';
 import { requestId, sql } from './client';
 import type { ResultSet } from './client';
 import * as store from './store';

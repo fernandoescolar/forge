@@ -2,8 +2,8 @@
 // explorer tree: what is expanded and the children loaded so far. A Redis database's keys
 // are found with SCAN a batch at a time (by a pattern) and shown as a tree split at `:`.
 import { useSyncExternalStore } from 'react';
-import { forge } from '@forge/api';
-import type { ExtensionContext } from '@forge/api';
+import { forge } from '@forge-ide/api';
+import type { ExtensionContext } from '@forge-ide/api';
 import { mongo, onSidecarExit, redis, sql } from './client';
 import type { ConnectParams, DbObject, Engine, RedisKey } from './client';
 

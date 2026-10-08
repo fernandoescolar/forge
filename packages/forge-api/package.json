@@ -1,24 +1,34 @@
 {
-  "name": "@forge/api",
+  "name": "@forge-ide/api",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Forge extension API: React rendered natively with GPUI",
-  "main": "src/index.ts",
-  "bin": { "forge-ext": "./bin/forge-ext.mjs" },
+  "description": "The API for Forge extensions (React rendered natively with GPUI), and forge-ext to build and pack them",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/fernandoescolar/forge/blob/main/docs/EXTENSIONS.md",
+  "repository": { "type": "git", "url": "git+https://github.com/fernandoescolar/forge.git", "directory": "packages/forge-api" },
+  "keywords": ["forge", "forge-ide", "extension", "react", "gpui"],
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/types/index.d.ts" },
+    "./globals": { "types": "./src/globals.d.ts" }
+  },
+  "bin": { "forge-ext": "bin/forge-ext.mjs" },
+  "files": ["bin", "dist/types", "src/globals.d.ts", "README.md"],
+  "publishConfig": { "access": "public" },
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node build.mjs && tsc -p tsconfig.types.json",
     "typecheck": "tsc --noEmit",
-    "test": "node build.mjs && node --test test/*.test.mjs"
+    "test": "node build.mjs && node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "react": "^19.3.0",
-    "react-reconciler": "^0.34.0"
+    "@types/react": "^19.3.0",
+    "esbuild": "^0.28.2"
   },
   "devDependencies": {
-    "@types/react": "^19.3.0",
     "@types/react-reconciler": "^0.32.0",
-    "esbuild": "^0.28.2",
+    "react": "^19.3.0",
+    "react-reconciler": "^0.34.0",
     "typescript": "^5.9.0"
   }
 }

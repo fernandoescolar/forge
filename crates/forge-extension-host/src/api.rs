@@ -1,4 +1,4 @@
-//! The parts of `@forge/api` that reach into the workspace beyond files: events, the active
+//! The parts of `@forge-ide/api` that reach into the workspace beyond files: events, the active
 //! editor (state, edits, selections, decorations), processes, terminals and storage.
 //!
 //! Positions are `{ line, column }`, zero-based, with columns counted in characters
@@ -484,7 +484,7 @@ mod tests {
     }
 
     /// An extension drives the active editor, keeps storage, runs a process and hears
-    /// about selections, through `@forge/api` in QuickJS.
+    /// about selections, through `@forge-ide/api` in QuickJS.
     #[gpui::test]
     async fn extensions_drive_the_active_editor(cx: &mut gpui::TestAppContext) {
         use std::time::{Duration, Instant};
@@ -502,7 +502,7 @@ mod tests {
         let cwd = tmp.path().to_string_lossy().replace('\\', "/");
         let code = format!(
             r#"var __forgeExtension = {{ activate(ctx) {{
-                const f = __forge.modules['@forge/api'].forge;
+                const f = __forge.modules['@forge-ide/api'].forge;
                 const mark = (id) => f.commands.register(id, id, () => {{}});
                 f.editor.onDidChangeSelection((s) => s && mark('sel-' + s.selections[0].start.line + ':' + s.selections[0].start.column));
                 f.workspace.onDidChangeActiveFile((p) => mark('active-' + p));

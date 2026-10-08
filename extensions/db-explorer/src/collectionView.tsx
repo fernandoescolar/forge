@@ -3,8 +3,8 @@
 // text to edit and save whole (replaceOne by _id), insert or delete. Documents are JSON with
 // the shell's helpers (ObjectId("…"), ISODate("…"), NumberLong("…")…), so types survive.
 import { useEffect, useRef, useState } from 'react';
-import { forge, Button, DataGrid, Input, Select, Spinner, Text, View } from '@forge/api';
-import type { Cell } from '@forge/api';
+import { forge, Button, DataGrid, Input, Select, Spinner, Text, View } from '@forge-ide/api';
+import type { Cell } from '@forge-ide/api';
 import { mongo, requestId, sql } from './client';
 import type { CollectionRef, Documents } from './client';
 import * as store from './store';

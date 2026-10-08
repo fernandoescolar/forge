@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { forge, View, Button, Text } from '@forge/api';
+import { forge, View, Button, Text } from '@forge-ide/api';
 
 function Counter() {
   const [n, setN] = useState(0);

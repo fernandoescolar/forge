@@ -5,8 +5,8 @@
 //
 // The databases are reached through `forge-sql` (sidecar/), a program shipped with the
 // extension in bin/<platform>/ and started with `forge.process.sidecar`.
-import { forge } from '@forge/api';
-import type { ExtensionContext } from '@forge/api';
+import { forge } from '@forge-ide/api';
+import type { ExtensionContext } from '@forge-ide/api';
 import { sql } from './client';
 import { Explorer } from './explorer';
 import * as store from './store';

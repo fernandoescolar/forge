@@ -3,8 +3,8 @@
 // into namespaces, filtered by a pattern). Double-click a table, view, collection or key to
 // open it; right-click anything for more.
 import { useEffect, useState } from 'react';
-import { forge, Button, Input, Scroll, Text, TreeItem, View } from '@forge/api';
-import type { MenuItem } from '@forge/api';
+import { forge, Button, Input, Scroll, Text, TreeItem, View } from '@forge-ide/api';
+import type { MenuItem } from '@forge-ide/api';
 import * as store from './store';
 import type { TreeNode, VisibleRow } from './store';
 import { openConnectionForm, openConsole, openKey, openNewKey, openQuery, openTable, redisKeyIcon } from './tabs';

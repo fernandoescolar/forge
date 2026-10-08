@@ -10,7 +10,7 @@
     "lib": ["ES2022"],
     "typeRoots": ["../../packages/forge-api/node_modules/@types"],
     "paths": {
-      "@forge/api": ["../../packages/forge-api/src/index.ts"],
+      "@forge-ide/api": ["../../packages/forge-api/src/index.ts"],
       "react": ["../../packages/forge-api/node_modules/@types/react"],
       "react/jsx-runtime": ["../../packages/forge-api/node_modules/@types/react/jsx-runtime"]
     }

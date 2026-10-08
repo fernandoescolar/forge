@@ -147,10 +147,10 @@ mod tests {
         std::fs::create_dir_all(ext.join("dist")).unwrap();
         std::fs::write(ext.join("package.json"), r#"{"name":"ext-typing","forge":{}}"#).unwrap();
         let code = r#"var __forgeExtension = { activate(ctx) {
-            const f = __forge.modules['@forge/api'].forge;
+            const f = __forge.modules['@forge-ide/api'].forge;
             const R = __forge.modules.react;
             const h = R.createElement;
-            const api = __forge.modules['@forge/api'];
+            const api = __forge.modules['@forge-ide/api'];
             function Form() {
                 const [v, setV] = R.useState('');
                 return h(api.View, {},
@@ -236,9 +236,9 @@ mod tests {
         std::fs::create_dir_all(ext.join("dist")).unwrap();
         std::fs::write(ext.join("package.json"), r#"{"name":"ext-lang","forge":{}}"#).unwrap();
         let code = r#"var __forgeExtension = { activate(ctx) {
-            const f = __forge.modules['@forge/api'].forge;
+            const f = __forge.modules['@forge-ide/api'].forge;
             const h = __forge.modules.react.createElement;
-            const api = __forge.modules['@forge/api'];
+            const api = __forge.modules['@forge-ide/api'];
             f.commands.register('open', 'Open', () => {
                 f.tabs.open({ id: 'ext-lang.doc', title: 'Doc', render: () => h(api.View, {},
                     h(api.Input, { value: '{ "a": 1 }', multiline: true, language: 'JSON' }),
@@ -293,9 +293,9 @@ mod tests {
         std::fs::create_dir_all(ext.join("dist")).unwrap();
         std::fs::write(ext.join("package.json"), r#"{"name":"ext-windows","forge":{}}"#).unwrap();
         let code = r#"var __forgeExtension = { activate(ctx) {
-            const f = __forge.modules['@forge/api'].forge;
+            const f = __forge.modules['@forge-ide/api'].forge;
             const h = __forge.modules.react.createElement;
-            const api = __forge.modules['@forge/api'];
+            const api = __forge.modules['@forge-ide/api'];
             let n = 0;
             f.commands.register('ready', 'Ready', () => {});
             f.commands.register('open', 'Open', () => {
@@ -385,8 +385,8 @@ mod tests {
         // Not executable on purpose: spawning a sidecar fixes that.
         std::fs::write(&sidecar, "#!/bin/sh\nwhile read line; do echo \"sidecar $line\"; done\n").unwrap();
         let code = r#"var __forgeExtension = { activate(ctx) {
-            const f = __forge.modules['@forge/api'].forge;
-            const api = __forge.modules['@forge/api'];
+            const f = __forge.modules['@forge-ide/api'].forge;
+            const api = __forge.modules['@forge-ide/api'];
             const h = __forge.modules.react.createElement;
             const mark = (id) => f.commands.register(id, id, () => {});
             f.commands.register('go', 'Go', async () => {

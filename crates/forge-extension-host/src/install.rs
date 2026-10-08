@@ -204,6 +204,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
+        // The API's old name, as extensions built before it was published use it.
         let bundle = |version: &str| format!("var __forgeExtension = {{ activate() {{ __forge.modules['@forge/api'].forge.commands.register('hello.{version}', '{version}', () => {{}}); }} }};");
         std::fs::write(installed.join("hello/dist/extension.js"), bundle("v1")).unwrap();
         cx.update(|cx| host.update(cx, |h, cx| h.reload("hello", cx))).unwrap();

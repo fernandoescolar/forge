@@ -4,7 +4,7 @@
 // URL, or Sentinel: the sentinels to ask for the master, and their own password.
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { forge, Button, Checkbox, Input, Scroll, Select, Spinner, Text, View } from '@forge/api';
+import { forge, Button, Checkbox, Input, Scroll, Select, Spinner, Text, View } from '@forge-ide/api';
 import { sql } from './client';
 import type { Engine } from './client';
 import * as store from './store';

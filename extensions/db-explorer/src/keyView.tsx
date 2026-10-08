@@ -4,8 +4,8 @@
 // for deletion until Save applies them all; a row at the bottom adds an entry. Values that
 // aren't UTF-8 show escaped (`\xNN`) and are written back from that form.
 import { useEffect, useRef, useState } from 'react';
-import { forge, Button, DataGrid, Input, Select, Spinner, Text, View } from '@forge/api';
-import type { Cell, GridRowState } from '@forge/api';
+import { forge, Button, DataGrid, Input, Select, Spinner, Text, View } from '@forge-ide/api';
+import type { Cell, GridRowState } from '@forge-ide/api';
 import { redis } from './client';
 import type { KeyRef, RedisEdit, RedisValue } from './client';
 import * as store from './store';

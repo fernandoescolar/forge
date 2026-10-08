@@ -2,7 +2,7 @@
 // prints them (`1) "a"`, `(integer) 5`, `(error) …`). Commands that would take the
 // connection over (SUBSCRIBE, MONITOR…) are refused; SELECT is the database menu.
 import { useEffect, useRef, useState } from 'react';
-import { Button, Input, Scroll, Select, Spinner, Text, View } from '@forge/api';
+import { Button, Input, Scroll, Select, Spinner, Text, View } from '@forge-ide/api';
 import { redis, requestId, sql } from './client';
 import * as store from './store';
 

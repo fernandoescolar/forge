@@ -2,8 +2,8 @@
 // double-click a cell, add rows, delete rows; nothing is written until Save, which applies
 // every change in one transaction.
 import { useEffect, useRef, useState } from 'react';
-import { forge, Button, DataGrid, Input, Spinner, Text, View } from '@forge/api';
-import type { GridRowState, MenuItem } from '@forge/api';
+import { forge, Button, DataGrid, Input, Spinner, Text, View } from '@forge-ide/api';
+import type { GridRowState, MenuItem } from '@forge-ide/api';
 import { requestId, sql } from './client';
 import type { Cell, Change, ColumnDetail } from './client';
 import * as store from './store';

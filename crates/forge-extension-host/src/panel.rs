@@ -505,7 +505,7 @@ mod tests {
         let manifest = r#"{"name":"ext-s","displayName":"Settings Test","forge":{"settings":{"properties":{
             "forge-test.size":{"type":"integer","default":3,"description":"A size."}}}}}"#;
         std::fs::write(ext.join("package.json"), manifest).unwrap();
-        let code = "var __forgeExtension = { activate() { const f = __forge.modules['@forge/api'].forge; \
+        let code = "var __forgeExtension = { activate() { const f = __forge.modules['@forge-ide/api'].forge; \
             f.settings.get('forge-test.size').then(v => f.commands.register('got-' + v, 'got', () => {})); \
             f.settings.onDidChange((k, v) => f.commands.register('changed-' + k + '-' + v, 'changed', () => {})); } };";
         std::fs::write(ext.join("dist/extension.js"), code).unwrap();
@@ -547,7 +547,7 @@ mod tests {
             std::fs::write(ext.join("package.json"), format!(r#"{{"name":"ext-{id}","forge":{{}}}}"#)).unwrap();
             std::fs::write(
                 ext.join("dist/extension.js"),
-                format!("var __forgeExtension = {{ activate() {{ __forge.modules['@forge/api'].forge.panels.register({{ id: '{id}', title: '{title}', render: () => null }}); }} }};"),
+                format!("var __forgeExtension = {{ activate() {{ __forge.modules['@forge-ide/api'].forge.panels.register({{ id: '{id}', title: '{title}', render: () => null }}); }} }};"),
             )
             .unwrap();
         }

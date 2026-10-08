@@ -622,7 +622,7 @@ mod tests {
         std::fs::write(ext.join("package.json"), r#"{"name":"menu-ext","displayName":"Menu Test","forge":{}}"#).unwrap();
         std::fs::write(
             ext.join("dist/extension.js"),
-            "var __forgeExtension = { activate() { const f = __forge.modules['@forge/api'].forge; \
+            "var __forgeExtension = { activate() { const f = __forge.modules['@forge-ide/api'].forge; \
              f.panels.register({ id: 'menu-ext.panel', title: 'Gadgets', render: () => null }); \
              f.commands.register('menu-ext.hello', 'Say Hello', () => f.commands.register('menu-ext.said', 'Said', () => {})); } };",
         )

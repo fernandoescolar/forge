@@ -1,5 +1,5 @@
-import { forge } from '@forge/api';
-import type { ExtensionContext } from '@forge/api';
+import { forge } from '@forge-ide/api';
+import type { ExtensionContext } from '@forge-ide/api';
 
 type FromPage = { type: 'hello' } | { type: 'open'; path: string };
 

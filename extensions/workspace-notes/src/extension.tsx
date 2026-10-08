@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { forge, Button, Checkbox, Divider, Icon, Input, Text, View } from '@forge/api';
-import type { ExtensionContext } from '@forge/api';
+import { forge, Button, Checkbox, Divider, Icon, Input, Text, View } from '@forge-ide/api';
+import type { ExtensionContext } from '@forge-ide/api';
 
 type Todo = { id: number; text: string; done: boolean };
 

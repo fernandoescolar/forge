@@ -49,7 +49,7 @@ test('extension renders a panel, handles a click and re-renders', async () => {
 
 test('host calls resolve promises', async () => {
   const { ctx, calls } = host();
-  const api = ctx.__forge.modules['@forge/api'];
+  const api = ctx.__forge.modules['@forge-ide/api'];
   const p = api.forge.workspace.readFile('a.txt');
   const call = calls.find((c) => c.method === 'workspace.readFile');
   ctx.__forge.resolve(call.id, true, JSON.stringify('hello'));
@@ -61,7 +61,7 @@ test('host calls resolve promises', async () => {
 
 test('webview panels route messages both ways', () => {
   const { ctx, calls } = host();
-  const api = ctx.__forge.modules['@forge/api'];
+  const api = ctx.__forge.modules['@forge-ide/api'];
   api.setActivating('/ext/demo');
   const panel = api.forge.webviews.register({ id: 'demo', title: 'Demo', html: 'index.html' });
   api.setActivating(null);
@@ -79,7 +79,7 @@ test('webview panels route messages both ways', () => {
 
 test('events reach listeners, and the host hears of each event once', async () => {
   const { ctx, calls } = host();
-  const api = ctx.__forge.modules['@forge/api'];
+  const api = ctx.__forge.modules['@forge-ide/api'];
   const seen = [];
   const a = api.forge.workspace.onDidSaveFile((p) => seen.push(['a', p]));
   api.forge.workspace.onDidSaveFile((p) => seen.push(['b', p]));
@@ -105,20 +105,31 @@ test('activate gets storage scoped to the extension', async () => {
   ]);
 });
 
+test('extensions built with the old name get their own forge too', () => {
+  const { ctx } = host();
+  ctx.__forge.prepare('old', '/ext/old');
+  const current = ctx.__forge.modules['@forge-ide/api'];
+  assert.equal(ctx.__forge.modules['@forge/api'], current, 'both names are the API prepared for this extension');
+  assert.ok(current.forge, 'with its own forge');
+  ctx.__forgeExtension = {};
+  ctx.__forge.activate('old', '/ext/old');
+});
+
 test('unloading an extension takes away what it registered', async () => {
   const { ctx, calls } = host();
-  const shared = ctx.__forge.modules['@forge/api'];
+  const shared = ctx.__forge.modules['@forge-ide/api'];
   ctx.__forge.prepare('a', '/ext/a');
   ctx.__forgeExtension = {
     activate() {
-      const { forge } = ctx.__forge.modules['@forge/api'];
+      const { forge } = ctx.__forge.modules['@forge-ide/api'];
       forge.commands.register('a.hello', 'Hello', () => {});
       forge.panels.register({ id: 'a-panel', title: 'A', render: () => null });
       forge.workspace.onDidSaveFile(() => { throw new Error('should be gone'); });
     },
   };
   ctx.__forge.activate('a', '/ext/a');
-  assert.equal(ctx.__forge.modules['@forge/api'], shared, 'the shared module is back after activation');
+  assert.equal(ctx.__forge.modules['@forge-ide/api'], shared, 'the shared module is back after activation');
+  assert.equal(ctx.__forge.modules['@forge/api'], shared, 'extensions built with the old name get the same module');
   calls.length = 0;
   ctx.__forge.deactivate('a');
   const undone = calls.map((c) => [c.method, c.args.id]);

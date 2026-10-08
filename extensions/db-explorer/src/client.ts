@@ -1,7 +1,7 @@
 // Talks to the forge-sql sidecar (sidecar/README.md): JSON requests, one per line, on its
 // input; responses, one per line, on its output. Started on first use and again if it dies.
-import { forge } from '@forge/api';
-import type { ChildProcess } from '@forge/api';
+import { forge } from '@forge-ide/api';
+import type { ChildProcess } from '@forge-ide/api';
 
 export type Engine = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'mssql' | 'mongodb' | 'redis';
 export type Cell = string | number | boolean | null;

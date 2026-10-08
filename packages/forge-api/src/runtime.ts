@@ -10,6 +10,17 @@ import * as Api from './index';
 import { native } from './native';
 
 const g = globalThis as any;
+
+/**
+ * The names extensions import the API by: `@forge-ide/api`, and `@forge/api`, its name
+ * before it was published, which extensions built then still use.
+ */
+const API_MODULES = ['@forge-ide/api', '@forge/api'];
+
+/** Every name of the API resolves to `api` for the next extension bundle that runs. */
+function provideApi(api: unknown) {
+  for (const name of API_MODULES) g.__forge.modules[name] = api;
+}
 import { dispatchEvent, unmountPanel } from './reconciler';
 
 // ---- extension lifecycle
@@ -17,11 +28,11 @@ type Extension = { activate?: (ctx: Api.ExtensionContext) => unknown; deactivate
 const contexts = new Map<string, Api.ExtensionContext>();
 
 g.__forge = {
-  modules: { react: React, 'react/jsx-runtime': JsxRuntime, '@forge/api': Api } as Record<string, unknown>,
+  modules: { react: React, 'react/jsx-runtime': JsxRuntime, ...Object.fromEntries(API_MODULES.map((name) => [name, Api])) } as Record<string, unknown>,
 
-  /** Before an extension's bundle runs: its imports of `@forge/api` get its own `forge`. */
+  /** Before an extension's bundle runs: its imports of the API get its own `forge`. */
   prepare(id: string, path: string) {
-    g.__forge.modules['@forge/api'] = { ...Api, forge: Api.forgeFor(id, path) };
+    provideApi({ ...Api, forge: Api.forgeFor(id, path) });
   },
 
   /** Activates the bundle just evaluated (it assigned `globalThis.__forgeExtension`). */
@@ -39,7 +50,7 @@ g.__forge = {
       console.error(`activate ${id}:`, e);
     } finally {
       Api.setActivating(null);
-      g.__forge.modules['@forge/api'] = Api;
+      provideApi(Api);
     }
   },
   /** Unloads an extension: its subscriptions, `deactivate`, then all it registered. */
@@ -54,7 +65,7 @@ g.__forge = {
     if (g.__forgeExtensions) delete g.__forgeExtensions[id];
     Api.disposeOwned(id);
     clearTimersOf(id);
-    g.__forge.modules['@forge/api'] = Api;
+    provideApi(Api);
   },
   dispatch(id: number, event: string, payloadJson: string) {
     dispatchEvent(id, event, payloadJson ? JSON.parse(payloadJson) : undefined);

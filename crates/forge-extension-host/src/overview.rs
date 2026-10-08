@@ -338,7 +338,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         for (id, code) in [
-            ("good", "var __forgeExtension = { activate() { const f = __forge.modules['@forge/api'].forge; f.panels.register({ id: 'good.panel', title: 'Good Panel', render: () => null }); f.commands.register('good.run', 'Do It', () => {}); } };"),
+            ("good", "var __forgeExtension = { activate() { const f = __forge.modules['@forge-ide/api'].forge; f.panels.register({ id: 'good.panel', title: 'Good Panel', render: () => null }); f.commands.register('good.run', 'Do It', () => {}); } };"),
             ("broken", "var __forgeExtension = { activate() { throw new Error('boom'); } };"),
         ] {
             let ext = tmp.path().join(id);

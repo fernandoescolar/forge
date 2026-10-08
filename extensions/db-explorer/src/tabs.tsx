@@ -1,5 +1,5 @@
 // Tabs the explorer opens in the editor area.
-import { forge } from '@forge/api';
+import { forge } from '@forge-ide/api';
 import { CollectionView } from './collectionView';
 import { ConnectionForm } from './connectionForm';
 import { ConsoleView } from './consoleView';

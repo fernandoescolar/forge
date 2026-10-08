@@ -1,7 +1,7 @@
 //! Forge extension host: React extensions run in QuickJS and render as native GPUI elements.
 //!
 //! ```text
-//!  extension.tsx ──► @forge/api reconciler (QuickJS thread) ──ops──► Tree ──► GPUI panel
+//!  extension.tsx ──► @forge-ide/api reconciler (QuickJS thread) ──ops──► Tree ──► GPUI panel
 //!                         ▲                                                      │
 //!                         └──────────────── events (click, input) ◄──────────────┘
 //! ```

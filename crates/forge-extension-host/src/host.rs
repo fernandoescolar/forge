@@ -1,4 +1,4 @@
-//! Owns the JS runtime and every extension panel's UI tree, and serves `@forge/api` calls.
+//! Owns the JS runtime and every extension panel's UI tree, and serves `@forge-ide/api` calls.
 
 use crate::{
     RUNTIME_JS,
