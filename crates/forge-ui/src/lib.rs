@@ -5,6 +5,7 @@
 //! extension panel inside an extension slot). Drop zones along the window edges are drawn
 //! by `forge-native` while [`drag_in_progress`] is true.
 
+pub mod agent_tools;
 pub mod dock_position;
 pub mod pick;
 pub mod process;

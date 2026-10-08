@@ -172,10 +172,10 @@ async fn handle(message: Value, tx: &mpsc::UnboundedSender<ToolRequest>) -> Opti
             "protocolVersion": params.get("protocolVersion").cloned().unwrap_or_else(|| json!("2025-06-18")),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "instructions": INSTRUCTIONS,
+            "instructions": instructions(),
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": all_tools() }),
         "tools/call" => call(&params, tx).await,
         _ => return Some(error(id, -32601, &format!("method not found: {method}"))),
     };
@@ -195,6 +195,10 @@ instead of search and replace. Use the language server's fixes and refactors wit
 - To find out why something misbehaves, debug instead of adding prints: `set_breakpoint`, `start_debugging` (an app or tests), \
 `debug_step`, `debug_evaluate`, `stop_debugging`. The user follows the session in the Debug panel.\n\
 - Point the user at code with `show_file`, and at your changes with `show_changes`.\n\
+- When the user says \"this\", \"here\" or \"the error\", call `user_context`: the file, line and selection they are on, their open files, \
+the problems near their cursor, their terminal's last output and their failing tests.\n\
+- When you learn something about this project that every future session should know (how to build or test it, a convention, \
+a trap), propose it with `remember`: the user keeps it in the project's instructions.\n\
 - When you need the user to decide something to go on, ask with `ask_user` (it waits for the answer) instead of ending your turn; \
 when a long task finishes, tell them with `notify`.";
 
@@ -235,9 +239,49 @@ fn lines_schema(apply: bool) -> Value {
     schema
 }
 
+/// What Forge tells agents about its tools, with the tools extensions add.
+pub fn instructions() -> String {
+    let extension_tools = forge_ui::agent_tools::agent_tools().list();
+    if extension_tools.is_empty() {
+        return INSTRUCTIONS.to_string();
+    }
+    let listed: Vec<String> = extension_tools.iter().map(|t| format!("`{}` ({}, from the {} extension)", t.name, t.title, t.extension)).collect();
+    format!("{INSTRUCTIONS}\n- The user's extensions add tools to the `forge` server too: {}. Prefer them for what they cover.", listed.join(", "))
+}
+
+/// Forge's tools and the ones extensions offer (`forge.agents.registerTool`).
+fn all_tools() -> Value {
+    let mut tools = tools();
+    if let Value::Array(list) = &mut tools {
+        for tool in forge_ui::agent_tools::agent_tools().list() {
+            let mut description = format!("{} (from the {} extension", tool.description, tool.extension);
+            description.push_str(if tool.read_only { ")" } else { "; the user may be asked first)" });
+            let mut entry = json!({ "name": tool.name, "title": tool.title, "description": description, "inputSchema": tool.input_schema });
+            if tool.read_only {
+                entry["annotations"] = json!({ "readOnlyHint": true });
+            }
+            list.push(entry);
+        }
+    }
+    tools
+}
+
 fn tools() -> Value {
     let none = json!({ "type": "object", "properties": {} });
     json!([{
+        "name": "user_context",
+        "title": "What the user is looking at",
+        "description": "What the user is working on right now in Forge: the file and line they are on and what they selected, the files they have open, \
+the problems the language servers report near their cursor, the end of the terminal they last used, and the tests that failed in their last run. \
+Call it when they refer to \"this\", \"here\", \"the error\" or \"the failing test\".",
+        "inputSchema": { "type": "object", "properties": {} }
+    }, {
+        "name": "remember",
+        "title": "Remember for the project",
+        "description": "Propose a note for the project's standing instructions (its AGENTS.md), which agents get at the start of every session: how to build \
+or test it, a convention, a trap you ran into. One short, self-contained note per call. The user may edit it, and keeps it or not; returns which.",
+        "inputSchema": { "type": "object", "properties": { "note": { "type": "string", "description": "The note, in a sentence or two, as an instruction." } }, "required": ["note"] }
+    }, {
         "name": "ask_user",
         "title": "Ask the user",
         "description": "Ask the user a question in the conversation and wait for the answer, instead of ending your turn to ask. \
@@ -463,6 +507,9 @@ or that it ended without stopping. Give `test_path` or `test_name` for tests, el
 /// (`mcp__forge__run_tests` or `run_tests`).
 pub fn tool_title(name: &str) -> Option<String> {
     let name = name.strip_prefix(&format!("mcp__{SERVER_NAME}__")).unwrap_or(name);
+    if let Some(tool) = forge_ui::agent_tools::agent_tools().get(name) {
+        return Some(tool.title);
+    }
     tools().as_array()?.iter().find(|t| t["name"] == name)?["title"].as_str().map(str::to_string)
 }
 
@@ -499,7 +546,7 @@ pub fn tool_summary(args: &Value) -> Option<String> {
 async fn call(params: &Value, tx: &mpsc::UnboundedSender<ToolRequest>) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let known = tools().as_array().is_some_and(|ts| ts.iter().any(|t| t["name"] == name.as_str()));
+    let known = all_tools().as_array().is_some_and(|ts| ts.iter().any(|t| t["name"] == name.as_str()));
     let reply = if !known {
         Err(format!("Unknown tool: {name}"))
     } else {
@@ -563,13 +610,14 @@ mod tests {
 
         let (_, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
         let tools = &serde_json::from_str::<Value>(&body).unwrap()["result"]["tools"];
-        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        // Forge's own (tests elsewhere may register extensions' tools, named `<extension>__<tool>`).
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__")).collect();
         assert_eq!(names, [
-            "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
+            "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
             "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
             "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes",
         ]);
-        assert_eq!(tools[8]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
+        assert_eq!(tools[10]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
 
         // The call waits until the thread answers.
         let call = tokio::spawn({

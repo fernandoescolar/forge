@@ -86,6 +86,12 @@ pub(crate) enum Entry {
     /// A question the agent asks (`ask_user`): its options, a box for another answer, and
     /// the answer once given (`None` while waiting; skipped questions answer "").
     Question { question: String, options: Vec<String>, input: Entity<editor::Editor>, answer: Option<String>, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// An agent's call to a tool an extension offers (`forge.agents.registerTool`), waiting
+    /// for the user unless the tool only reads.
+    ExtensionTool { tool: forge_ui::agent_tools::AgentTool, args: Value, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// A note the agent wants kept in the project's instructions (`remember`): editable
+    /// until the user answers; `file` is where it goes.
+    Remember { note: Entity<editor::Editor>, file: PathBuf, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
     /// Sign-in card: the agent's login methods, run without leaving Forge.
     Auth { methods: Vec<AuthMethod>, terminal: Option<Entity<TerminalView>>, state: AuthState },
 }
@@ -699,7 +705,7 @@ impl Thread {
 
     /// Writes waiting for the user's decision.
     pub fn pending_reviews(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
     }
 
     /// Where the agent last read or wrote.
@@ -1002,9 +1008,9 @@ impl Thread {
             blocks.push(serde_json::json!({ "type": "image", "mimeType": image.format.mime_type(), "data": data }));
         }
         let extras = crate::context::gather(&specials, self.workspace.clone(), self.project.clone(), self.root.clone(), cx);
-        let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file()));
+        let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file(), self.instructions_files()));
         if !self.rules_sent && self.forge_tools {
-            blocks.push(json!({ "type": "text", "text": crate::forge_mcp::INSTRUCTIONS }));
+            blocks.push(json!({ "type": "text", "text": crate::forge_mcp::instructions() }));
         }
         self.rules_sent = true;
         let retry_text = text.clone();
@@ -1209,6 +1215,8 @@ impl Thread {
                     Entry::Commit { message, state, .. } => RecordEntry::System { text: format!("Commit \"{}\": {}", message.lines().next().unwrap_or_default(), crate::commit_proposal::outcome(state)) },
                     Entry::Push { plan, state, .. } => RecordEntry::System { text: format!("Push of {} to {}: {}", plan.branch, plan.target(), crate::push_proposal::outcome(plan, state)) },
                     Entry::Question { question, answer, .. } => RecordEntry::System { text: format!("Asked: {question} → {}", answer.as_deref().map(|a| if a.is_empty() { "skipped" } else { a }).unwrap_or("not answered")) },
+                    Entry::Remember { note, state, .. } => RecordEntry::System { text: format!("Note \"{}\": {}", note.read(cx).text(cx).trim(), state.outcome()) },
+                    Entry::ExtensionTool { tool, state, .. } => RecordEntry::System { text: format!("{} ({}): {}", tool.title, tool.extension, state.outcome()) },
                     Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
@@ -1531,6 +1539,8 @@ impl Thread {
             Entry::Commit { reply: Some(_), .. } => Some("the proposed commit".to_string()),
             Entry::Push { reply: Some(_), .. } => Some("the proposed push".to_string()),
             Entry::LspEdit { plan, reply: Some(_), .. } => Some(plan.summary()),
+            Entry::ExtensionTool { tool, reply: Some(_), .. } => Some(format!("let {} run", tool.title)),
+            Entry::Remember { reply: Some(_), .. } => Some("keep a note".to_string()),
             Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
         });
@@ -1985,7 +1995,7 @@ impl Thread {
     }
 
     /// A call to a tool of Forge's MCP server (see `forge_mcp`).
-    fn handle_tool_request(&mut self, request: crate::forge_mcp::ToolRequest, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn handle_tool_request(&mut self, request: crate::forge_mcp::ToolRequest, window: &mut Window, cx: &mut Context<Self>) {
         use crate::commit_proposal::Origin;
         use crate::forge_tools::{self as tools, str_arg};
         let crate::forge_mcp::ToolRequest { name, args, reply } = request;
@@ -2014,6 +2024,27 @@ impl Thread {
                 self.entries.push(Entry::Question { question, options, input, answer: None, reply: Some(reply) });
                 self.changed(cx);
             }
+            "user_context" => {
+                let ide = self.ide();
+                cx.spawn_in(window, async move |_, cx| {
+                    let _ = reply.send(tools::user_context(ide, cx).await);
+                })
+                .detach();
+            }
+            "remember" => {
+                let Some(note) = str_arg(&args, "note") else {
+                    let _ = reply.send(Err("`note` is empty.".into()));
+                    return;
+                };
+                let file = crate::rules::project_file(&self.root, &self.instructions_files());
+                let editor = cx.new(|cx| {
+                    let mut editor = editor::Editor::auto_height(1, 8, window, cx);
+                    editor.set_text(note, window, cx);
+                    editor
+                });
+                self.entries.push(Entry::Remember { note: editor, file, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
+                self.changed(cx);
+            }
             "notify" => {
                 let Some(message) = str_arg(&args, "message") else {
                     let _ = reply.send(Err("`message` is empty.".into()));
@@ -2031,6 +2062,7 @@ impl Thread {
                 };
                 let _ = reply.send(answer);
             }
+            _ if forge_ui::agent_tools::agent_tools().get(&name).is_some() => self.extension_tool(name, args, reply, window, cx),
             _ => {
                 let ide = self.ide();
                 cx.spawn_in(window, async move |_, cx| {
@@ -2087,6 +2119,108 @@ impl Thread {
         }
         self.system(format!("Notified you: {message}"), Color::Accent);
         self.changed(cx);
+    }
+
+    /// A call to an extension's tool: run now when it only reads (or the user lets
+    /// everything run), else a card the user answers first.
+    fn extension_tool(&mut self, name: String, args: Value, reply: oneshot::Sender<crate::forge_mcp::ToolReply>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tool) = forge_ui::agent_tools::agent_tools().get(&name) else {
+            let _ = reply.send(Err(format!("Unknown tool: {name}")));
+            return;
+        };
+        if tool.read_only || self.permissions.get().mode == crate::permissions::PermissionMode::SuperUser {
+            let root = self.root.clone();
+            cx.spawn_in(window, async move |_, _| {
+                let _ = reply.send(forge_ui::agent_tools::agent_tools().run(&name, args, root).await);
+            })
+            .detach();
+            return;
+        }
+        self.entries.push(Entry::ExtensionTool { tool, args, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
+        self.changed(cx);
+    }
+
+    /// Answers the extension tool card at `ix`: runs the tool, or tells the agent no.
+    pub(crate) fn answer_extension_tool(&mut self, ix: usize, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::forge_tools::EditState;
+        let Some(Entry::ExtensionTool { tool, args, state, reply }) = self.entries.get_mut(ix) else { return };
+        if !state.is_open() {
+            return;
+        }
+        let Some(reply) = reply.take() else { return };
+        if !allow {
+            *state = EditState::Declined;
+            let _ = reply.send(Err(format!("The user didn't let {} run. Nothing was done.", tool.title)));
+            self.changed(cx);
+            return;
+        }
+        *state = EditState::Applying;
+        let (name, args, root) = (tool.name.clone(), args.clone(), self.root.clone());
+        self.changed(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = forge_ui::agent_tools::agent_tools().run(&name, args, root).await;
+            this.update(cx, |this, cx| {
+                if let Some(Entry::ExtensionTool { state, .. }) = this.entries.get_mut(ix) {
+                    *state = match &answer {
+                        Ok(_) => EditState::Applied,
+                        Err(e) => EditState::Failed(e.clone()),
+                    };
+                }
+                this.changed(cx);
+            })
+            .ok();
+            let _ = reply.send(answer);
+        })
+        .detach();
+    }
+
+    /// Answers the note card at `ix`: adds the note (as the user left it) to the project's
+    /// instructions file, or tells the agent no.
+    pub(crate) fn answer_remember(&mut self, ix: usize, keep: bool, cx: &mut Context<Self>) {
+        use crate::forge_tools::EditState;
+        let Some(Entry::Remember { note, file, state, reply }) = self.entries.get_mut(ix) else { return };
+        if !state.is_open() {
+            return;
+        }
+        let Some(reply) = reply.take() else { return };
+        let text = note.read(cx).text(cx).trim().to_string();
+        if !keep || text.is_empty() {
+            *state = EditState::Declined;
+            let _ = reply.send(Err("The user didn't keep the note.".into()));
+            self.changed(cx);
+            return;
+        }
+        *state = EditState::Applying;
+        note.update(cx, |e, _| e.set_read_only(true));
+        let (file, fs) = (file.clone(), <dyn fs::Fs>::global(cx));
+        let shown = file.strip_prefix(&self.root).unwrap_or(&file).to_string_lossy().into_owned();
+        self.changed(cx);
+        cx.spawn(async move |this, cx| {
+            let before = fs.load(&file).await.unwrap_or_default();
+            let after = crate::rules::with_note(&before, &text);
+            let written = async {
+                if let Some(dir) = file.parent() {
+                    fs.create_dir(dir).await?;
+                }
+                fs.atomic_write(file.clone(), after).await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                if let Some(Entry::Remember { state, .. }) = this.entries.get_mut(ix) {
+                    *state = match &written {
+                        Ok(()) => EditState::Applied,
+                        Err(e) => EditState::Failed(format!("{e:#}")),
+                    };
+                }
+                this.changed(cx);
+            })
+            .ok();
+            let _ = reply.send(match written {
+                Ok(()) => Ok(format!("Kept in {shown}: agents get it at the start of every new session.")),
+                Err(e) => Err(format!("Couldn't write {shown}: {e:#}")),
+            });
+        })
+        .detach();
     }
 
     /// A language-server edit: a card when the user reviews writes, else made right away.
@@ -2418,6 +2552,11 @@ impl Thread {
             .ok();
         })
         .detach();
+    }
+
+    /// The project's instructions files (agents.json `instructions_files`).
+    pub(crate) fn instructions_files(&self) -> Vec<String> {
+        self.config.as_ref().map(|c| c.instructions_files.clone()).unwrap_or_else(crate::config::default_instructions_files)
     }
 
     /// It works in its own git worktree.

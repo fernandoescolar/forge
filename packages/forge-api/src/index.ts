@@ -455,6 +455,36 @@ export type ConfirmOptions = { detail?: string; buttons?: string[]; level?: 'inf
 export type PickFilesOptions = { files?: boolean; directories?: boolean; multiple?: boolean; prompt?: string };
 export type SaveFileOptions = { directory?: string; name?: string };
 
+/** A JSON Schema for a tool's arguments (an object schema). */
+export type JsonSchema = { type: 'object'; properties?: Record<string, unknown>; required?: string[]; [key: string]: unknown };
+
+/** What a tool call gets besides its arguments. */
+export type AgentToolCall = {
+  /** The folder the agent works in: the project, or the thread's git worktree. */
+  cwd: string;
+};
+
+/** What a tool answers the agent: text, or `{ text, isError }` to say it failed. */
+export type AgentToolResult = string | { text: string; isError?: boolean };
+
+/** A tool agents can call (through Forge's MCP server, like Forge's own tools). */
+export type AgentToolOptions = {
+  /** Letters, digits, `-` and `_`. Agents see it as `<extension>__<name>`. */
+  name: string;
+  /** Shown in the thread when an agent calls it. */
+  title: string;
+  /** What it does and when to use it: agents choose tools by it. */
+  description: string;
+  /** Its arguments. Defaults to none. */
+  inputSchema?: JsonSchema;
+  /**
+   * It only reads (it changes nothing, starts nothing): agents call it without asking. Any
+   * other tool asks the user each time, in the thread, before it runs.
+   */
+  readOnly?: boolean;
+  run(args: any, call: AgentToolCall): AgentToolResult | Promise<AgentToolResult>;
+};
+
 export type TabOptions = {
   id: string;
   title: string;
@@ -535,6 +565,33 @@ export function runCommand(id: string) {
   const c = commands.get(id);
   if (!c) throw new Error(`unknown command ${id}`);
   return c();
+}
+
+/** Agent tools, by extension and tool name. */
+const agentTools = new Map<string, AgentToolOptions['run']>();
+const toolKey = (extension: string, name: string) => `${extension}\u0000${name}`;
+
+/**
+ * Called by the host when an agent calls a tool: runs it and sends its answer back
+ * (`agents.toolResult`), errors included.
+ */
+export async function runTool(call: number, extension: string, name: string, argsJson: string, contextJson: string) {
+  let text: string;
+  let isError = false;
+  try {
+    const run = agentTools.get(toolKey(extension, name));
+    if (!run) throw new Error(`${extension} has no tool ${name}`);
+    const result = await run(argsJson ? JSON.parse(argsJson) : {}, contextJson ? JSON.parse(contextJson) : { cwd: '' });
+    if (typeof result === 'string') text = result;
+    else if (result && typeof result === 'object' && typeof (result as { text?: unknown }).text === 'string') {
+      text = (result as { text: string }).text;
+      isError = !!(result as { isError?: boolean }).isError;
+    } else text = JSON.stringify(result ?? null);
+  } catch (e) {
+    text = e instanceof Error ? e.message : String(e);
+    isError = true;
+  }
+  notify('agents.toolResult', { call, text, isError });
 }
 
 /** What each extension registered (panels, commands, listeners), undone when it unloads. */
@@ -632,6 +689,32 @@ export function forgeFor(extension: string | null, root: string | null = null) {
       commands.set(id, handler);
       notify('commands.register', { id, title, extension });
       return own({ dispose: () => { commands.delete(id); notify('commands.unregister', { id }); } });
+    },
+  },
+  agents: {
+    /**
+     * Offers agents a tool (Forge's MCP server lists it to every agent thread started after
+     * this). Tools that aren't `readOnly` ask the user before each call.
+     */
+    registerTool(tool: AgentToolOptions): Disposable {
+      if (!extension) throw new Error('agent tools belong to an extension: register them in activate()');
+      if (!/^[A-Za-z0-9_-]+$/.test(tool.name)) throw new Error(`agent tool names are letters, digits, '-' and '_': ${tool.name}`);
+      const key = toolKey(extension, tool.name);
+      agentTools.set(key, tool.run);
+      notify('agents.registerTool', {
+        extension,
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+        readOnly: !!tool.readOnly,
+      });
+      return own({
+        dispose: () => {
+          agentTools.delete(key);
+          notify('agents.unregisterTool', { extension, name: tool.name });
+        },
+      });
     },
   },
   workspace: {

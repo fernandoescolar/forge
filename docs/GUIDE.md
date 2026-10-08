@@ -194,6 +194,7 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 - *Set a breakpoint* (with an optional condition) and *Start debugging* a run target or tests. The agent waits until the program stops and reads the stack and local variables. Then it can *Continue or step*, *Evaluate an expression* and *Stop debugging*. You follow the session in the Debug panel and the stopped line in the editor.
 - *Send an HTTP request* goes through the `.http` support: a request of a `.http` file, or one the agent writes, with your selected environment. The response tab shows it.
 - *Ask the user* puts a question in the thread, with options as buttons, a box for another answer, and *Skip*. The agent waits for your answer instead of ending its turn. *Notify the user* shows a notification, for example when a long task finishes.
+- *What the user is looking at* tells the agent where you are: the file and line, what you selected, your open files, the problems near your cursor, your terminal's last output and the tests that failed in your last run. So "fix this" or "why does this fail?" need no more explaining.
 - *Show a file* opens a file at a line or a range for you. *Show your changes* opens the thread's review of its changes.
 
 These calls appear in the thread with their names ("Run tests", "Find references") and what they were asked.
@@ -202,7 +203,9 @@ These calls appear in the thread with their names ("Run tests", "Find references
 
 **Threads in a worktree.** Agents › *New Thread in Worktree* starts a thread that works in a git worktree of its own (`.forge/worktrees/<name>`, on branch `forge/<name>`, from your last commit): it never touches the files you are editing, nor another thread's. A bar at the top of the thread shows its branch. *Apply to project* copies its changes into your files as uncommitted changes, to review in the Git panel. Your own uncommitted changes stay: each file is merged with yours, and only where you both changed the same lines are there conflict markers, which the merge editor resolves. *Remove…* deletes the worktree, with or without its branch, and ends the thread. Agents › *Worktrees…* applies or removes any of them, also after a restart.
 
-**Your instructions.** Agents read the repository's own `AGENTS.md` or `CLAUDE.md`. On top of that, Forge sends two files of yours with the first message of every new session: `.forge/AGENTS.md` in the project, and your `AGENTS.md` for every project. Edit them from Agents › *Edit Project Instructions* and *Edit Your Instructions*. The thread notes when they were sent.
+**Your instructions.** Forge sends standing instructions with the first message of every new session: your `AGENTS.md`, for every project, and the project's own, from `.forge/AGENTS.md` and `AGENTS.md` at its root (every one that exists, so agents that don't read `AGENTS.md` themselves get it too). `instructions_files` in `agents.json` changes which project files those are, relative to the project's root. Edit them from Agents › *Edit Project Instructions* (the first of those files that exists) and *Edit Your Instructions*. The thread notes when they were sent.
+
+**What agents learn.** When an agent finds out something every future session should know (how to build or test the project, a convention, a trap), it can propose a note. The note shows in the thread, editable, with *Remember* and *Don't*: kept, it goes under *Notes from agents* in the project's instructions file (the first one that exists, else `.forge/AGENTS.md`), so the next sessions start knowing it.
 
 **MCP servers** listed in `agents.json` are passed to every session:
 

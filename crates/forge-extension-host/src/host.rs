@@ -106,6 +106,8 @@ pub struct ExtensionHost {
     pub(crate) decorations: HashMap<PathBuf, HashMap<String, crate::api::Decoration>>,
     /// Programs started with `process.spawn`, by id.
     pub(crate) processes: HashMap<u64, crate::process::Process>,
+    /// Agents' calls to extension tools waiting for their answer.
+    pub(crate) agent_calls: crate::agent_tools::PendingCalls,
     pub(crate) next_process: u64,
 }
 
@@ -149,8 +151,12 @@ impl ExtensionHost {
             decorations: HashMap::new(),
             processes: HashMap::new(),
             next_process: 1,
+            agent_calls: Default::default(),
         });
         cx.set_global(GlobalHost(host.clone()));
+        // Agents' calls to extensions' tools run on the JS thread.
+        let agent_calls = host.read(cx).agent_calls.clone();
+        forge_ui::agent_tools::agent_tools().set_runner(std::sync::Arc::new(crate::agent_tools::JsToolRunner { js: js.clone(), pending: agent_calls, next: 1.into() }));
 
         let weak = host.downgrade();
         cx.spawn(async move |cx| {
@@ -321,6 +327,8 @@ impl ExtensionHost {
         let extension = self.extensions.remove(index);
         self.js.send(ToJs::Unload { id: id.to_string() });
         self.kill_processes_of(id);
+        // Unloading unregisters them too; this also covers an extension whose JS failed.
+        forge_ui::agent_tools::agent_tools().unregister_extension(id);
         cx.emit(HostEvent::Changed);
         cx.notify();
         Some(extension)
@@ -475,6 +483,18 @@ impl ExtensionHost {
                 self.commands.retain(|c| c.id != cmd.id);
                 self.commands.push(cmd);
                 cx.emit(HostEvent::Changed);
+                self.reply(id, Ok(Value::Null));
+            }
+            "agents.registerTool" => {
+                let result = crate::agent_tools::register(&args);
+                self.reply(id, result.map(|()| Value::Null));
+            }
+            "agents.unregisterTool" => {
+                crate::agent_tools::unregister(&args);
+                self.reply(id, Ok(Value::Null));
+            }
+            "agents.toolResult" => {
+                crate::agent_tools::answer(&self.agent_calls, &args);
                 self.reply(id, Ok(Value::Null));
             }
             "commands.unregister" => {

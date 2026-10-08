@@ -6,6 +6,7 @@
 //!                         └──────────────── events (click, input) ◄──────────────┘
 //! ```
 
+mod agent_tools;
 pub mod js;
 pub mod tree;
 pub mod webview;

@@ -11,6 +11,12 @@ fn yes() -> bool {
     true
 }
 
+/// Where Forge looks for a project's standing instructions for agents, relative to its root:
+/// every one that exists is sent (see `rules`), and agents' notes go to the first that does.
+pub fn default_instructions_files() -> Vec<String> {
+    vec![".forge/AGENTS.md".into(), "AGENTS.md".into()]
+}
+
 /// An MCP server offered to every agent session (ACP `McpServer`, stdio transport).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -50,6 +56,9 @@ pub struct AgentsConfig {
     /// What agents may do without asking.
     #[serde(default)]
     pub permissions: crate::permissions::Permissions,
+    /// The project's instructions files, relative to its root, in order (see `rules`).
+    #[serde(default = "default_instructions_files")]
+    pub instructions_files: Vec<String>,
 }
 
 impl AgentsConfig {
@@ -78,6 +87,7 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
         "review_writes": saved.review_writes,
         "verify_changes": saved.verify_changes,
         "permissions": saved.permissions,
+        "instructions_files": saved.instructions_files,
         "mcp_servers": saved.mcp_servers,
         "agents": saved.agents,
     }))
@@ -91,7 +101,8 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
          // them for errors and warnings. \"permissions\": what agents may do without asking\n\
          // (\"mode\": ask, allow_edits, allow_workspace or super_user; \"allow_commands\": command\n\
          // prefixes that never ask; \"files_outside_workspace\"). \"mcp_servers\": MCP servers\n\
-         // every agent session gets.\n\
+         // every agent session gets. \"instructions_files\": the project's instructions for agents,\n\
+         // relative to its root (every one found is sent; agents' notes go to the first found).\n\
          // Forge > Settings > Agents edits this file too.\n{body}\n"
     )
 }

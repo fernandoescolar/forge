@@ -1660,7 +1660,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1732,7 +1732,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1782,7 +1782,7 @@ mod tests {
         let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
-        let config = crate::config::AgentsConfig { agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1820,6 +1820,146 @@ mod tests {
         assert_eq!(current, after, "a snippet's diff isn't taken for the whole file");
     }
 
+    /// Tools extensions offer (`forge.agents.registerTool`) reach agents through Forge's MCP
+    /// server: one that only reads runs at once; any other waits for the user in the thread.
+    #[gpui::test]
+    async fn extension_tools_run_for_agents_with_the_users_leave(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        use forge_ui::agent_tools::{AgentTool, AgentToolReply, AgentToolRunner, agent_tools};
+        struct Echo;
+        impl AgentToolRunner for Echo {
+            fn run(&self, tool: &AgentTool, args: serde_json::Value, _cwd: std::path::PathBuf) -> futures::channel::oneshot::Receiver<AgentToolReply> {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                tx.send(Ok(format!("{} ran with {args}", tool.tool))).ok();
+                rx
+            }
+        }
+        let tool = |name: &str, read_only: bool| AgentTool {
+            name: forge_ui::agent_tools::mcp_name("demo-ext", name),
+            tool: name.into(),
+            extension: "demo-ext".into(),
+            title: format!("Demo {name}"),
+            description: format!("Does {name}."),
+            input_schema: json!({ "type": "object", "properties": {} }),
+            read_only,
+        };
+        agent_tools().register(tool("lookup", true));
+        agent_tools().register(tool("change", false));
+        agent_tools().set_runner(std::sync::Arc::new(Echo));
+        assert!(crate::forge_mcp::instructions().contains("`demo_ext__lookup` (Demo lookup, from the demo-ext extension)"));
+        assert_eq!(crate::forge_mcp::tool_title("mcp__forge__demo_ext__change").as_deref(), Some("Demo change"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        let call = |name: &str, cx: &mut VisualTestContext| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            let request = crate::forge_mcp::ToolRequest { name: name.into(), args: json!({ "q": 1 }), reply };
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+            cx.run_until_parked();
+            answer
+        };
+        let mut lookup = call("demo_ext__lookup", cx);
+        assert_eq!(lookup.try_recv().unwrap(), Some(Ok("lookup ran with {\"q\":1}".into())), "reading tools run at once");
+        assert!(thread.read_with(cx, |t, _| !t.entries.iter().any(|e| matches!(e, Entry::ExtensionTool { .. }))));
+
+        let mut allowed = call("demo_ext__change", cx);
+        assert_eq!(allowed.try_recv().unwrap(), None, "it waits for the user");
+        assert_eq!(thread.read_with(cx, |t, _| t.pending_reviews()), 1);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::ExtensionTool { .. })).unwrap());
+        draw(&_view, cx);
+        thread.update_in(cx, |t, window, cx| t.answer_extension_tool(card, true, window, cx));
+        cx.run_until_parked();
+        assert_eq!(allowed.try_recv().unwrap(), Some(Ok("change ran with {\"q\":1}".into())));
+
+        let mut denied = call("demo_ext__change", cx);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::ExtensionTool { .. })).unwrap());
+        thread.update_in(cx, |t, window, cx| t.answer_extension_tool(card, false, window, cx));
+        cx.run_until_parked();
+        assert!(matches!(denied.try_recv().unwrap(), Some(Err(e)) if e.contains("didn't let Demo change run")));
+        agent_tools().unregister_extension("demo-ext");
+    }
+
+    /// `remember` keeps a note (as the user edited it) in the project's instructions;
+    /// `user_context` says where the user is, though the thread is the active tab.
+    #[gpui::test]
+    async fn agents_remember_and_see_what_the_user_is_on(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "AGENTS.md": "# Repo\n", "a.rs": "fn one() {}\nfn two() {}\nfn three() {}\n" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+        // The user works in a.rs, with two lines selected; then the thread opens, in front of it.
+        let editor = workspace
+            .update_in(cx, |ws, window, cx| ws.open_abs_path("/root/a.rs".into(), workspace::OpenOptions::default(), window, cx))
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        editor.update_in(cx, |e, window, cx| e.change_selections(Default::default(), window, cx, |s| s.select_ranges([Point::new(1, 0)..Point::new(2, 5)])));
+        let config = crate::config::AgentsConfig { instructions_files: vec!["AGENTS.md".into(), ".forge/AGENTS.md".into()], agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        cx.run_until_parked();
+        let call = |name: &str, args: serde_json::Value, cx: &mut VisualTestContext| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(crate::forge_mcp::ToolRequest { name: name.into(), args, reply }, window, cx));
+            cx.run_until_parked();
+            answer
+        };
+
+        let mut context = call("user_context", json!({}), cx);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let text = loop {
+            if let Ok(Some(answer)) = context.try_recv() {
+                break answer.unwrap();
+            }
+            assert!(Instant::now() < deadline, "no context");
+            cx.run_until_parked();
+            cx.background_executor.timer(Duration::from_millis(20)).await;
+        };
+        assert!(text.contains("The user is in a.rs at line 2."), "{text}");
+        assert!(text.contains("They selected lines 2-3:\n```\nfn two() {}\nfn t"), "{text}");
+        assert!(text.contains("Open files: a.rs"), "{text}");
+
+        // A note, edited before keeping it, goes to the first instructions file that exists.
+        let mut kept = call("remember", json!({ "note": "Run cargo test." }), cx);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::Remember { .. })).unwrap());
+        let note = thread.read_with(cx, |t, _| match &t.entries[card] {
+            Entry::Remember { note, file, .. } => {
+                assert_eq!(file, &std::path::PathBuf::from("/root/AGENTS.md"));
+                note.clone()
+            }
+            _ => unreachable!(),
+        });
+        note.update_in(cx, |e, window, cx| e.set_text("Run cargo test -q before finishing.", window, cx));
+        thread.update(cx, |t, cx| t.answer_remember(card, true, cx));
+        cx.run_until_parked();
+        assert!(matches!(kept.try_recv().unwrap(), Some(Ok(text)) if text.contains("Kept in AGENTS.md")));
+        assert_eq!(fs.load("/root/AGENTS.md".as_ref()).await.unwrap(), "# Repo\n\n## Notes from agents\n\n- Run cargo test -q before finishing.\n");
+
+        let mut declined = call("remember", json!({ "note": "Something else." }), cx);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::Remember { .. })).unwrap());
+        thread.update(cx, |t, cx| t.answer_remember(card, false, cx));
+        assert!(matches!(declined.try_recv().unwrap(), Some(Err(_))));
+    }
+
     /// Typing in a new thread connects the agent and answers; an edit waits in the thread
     /// for review and is written once accepted; the rail and tab follow along.
     #[gpui::test]
@@ -1850,7 +1990,7 @@ mod tests {
             // The project lives in a fake file system; the process needs a real directory.
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2024,7 +2164,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let history = tmp.path().join("history");
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config_in(ws, Some(config), history, Some(worktree.clone()), window, cx));
@@ -2068,7 +2208,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         cx.update(|_, cx| crate::conflicts::init(cx));
@@ -2109,7 +2249,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("signed-in");
-        let config = crate::config::AgentsConfig { agents: vec![mock_auth_agent(&marker)], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![mock_auth_agent(&marker)], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
 
@@ -2166,7 +2306,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut agent = mock_auth_agent(&tmp.path().join("signed-in"));
         agent.env.push(("MOCK_AUTH_ON_NEW_SESSION".into(), "1".into()));
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         thread.update_in(cx, |t, window, cx| t.connect(window, cx));
@@ -2181,7 +2321,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
 
@@ -2238,7 +2378,7 @@ mod tests {
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         let permissions = crate::permissions::Permissions { allow_commands: vec!["echo".into()], ..Default::default() };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
         let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let permission = |t: &Thread| {
@@ -2315,7 +2455,7 @@ mod tests {
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         agent.cwd = Some(tmp.path().to_path_buf());
         let permissions = crate::permissions::Permissions { mode: crate::permissions::PermissionMode::AllowEdits, ..Default::default() };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2367,7 +2507,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         // The agent changed lines 2 and 4.
         thread.update(cx, |t, cx| {
@@ -2428,7 +2568,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         let message = |text: &str, cx: &mut VisualTestContext| {
             thread.update(cx, |t, _| {
@@ -2490,7 +2630,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         let message = |text: &str, cx: &mut VisualTestContext| {
             thread.update(cx, |t, _| {
@@ -2549,7 +2689,7 @@ mod tests {
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         agent.cwd = Some(tmp.path().to_path_buf());
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         // A write that waits for permission keeps the turn going.
@@ -2625,7 +2765,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2700,7 +2840,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let new = |cx: &mut VisualTestContext| {
             let config = config.clone();
             let history = tmp.path().join("history");
@@ -2729,7 +2869,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let agent = |id: &str| AgentSpec { id: id.into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent("a"), agent("b")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: Some("b".into()), permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a"), agent("b")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: Some("b".into()), permissions: Default::default() };
         let (_, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let workspace = view.read_with(cx, |v, _| v.workspace.upgrade().unwrap());
@@ -2748,7 +2888,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let agent = |id: &str| AgentSpec { id: id.into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { agents: vec![agent("a")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (first, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let workspace = view.read_with(cx, |v, _| v.workspace.upgrade().unwrap());

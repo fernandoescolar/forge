@@ -509,6 +509,93 @@ pub(crate) async fn run_tests(ide: Ide, args: Value, cx: &mut AsyncWindowContext
         }))
 }
 
+/// The file editor the user activated last, in any pane (when the agent asks, the active
+/// item is usually its own thread, often in the same pane).
+fn last_editor(workspace: &Workspace, cx: &gpui::App) -> Option<Entity<editor::Editor>> {
+    let recency = workspace.recently_activated_items(cx);
+    workspace
+        .items_of_type::<editor::Editor>(cx)
+        .filter(|e| e.read(cx).buffer().read(cx).as_singleton().is_some())
+        .max_by_key(|e| recency.get(&e.entity_id()).copied().unwrap_or(0))
+}
+
+/// What the user is looking at and working on: the file and line they are in (and what
+/// they selected), the files they have open, the problems near their cursor, the end of the
+/// terminal they last used, and the tests that failed in their last run.
+pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolReply {
+    use multi_buffer::ToPoint as _;
+    let gathered = ide
+        .workspace
+        .update_in(cx, |ws, _, cx| {
+            let mut text = String::new();
+            let mut at: Option<(PathBuf, u32)> = None;
+            match last_editor(ws, cx) {
+                Some(editor) => {
+                    let editor = editor.read(cx);
+                    let buffer = editor.buffer().read(cx);
+                    let path = buffer.as_singleton().and_then(|b| b.read(cx).file().and_then(|f| f.as_local()).map(|f| f.abs_path(cx)));
+                    let snapshot = buffer.snapshot(cx);
+                    let selection = editor.selections.newest_anchor();
+                    let (start, end) = (selection.start.to_point(&snapshot), selection.end.to_point(&snapshot));
+                    if let Some(path) = path {
+                        text.push_str(&format!("The user is in {} at line {}.\n", ide.show(&path), start.row + 1));
+                        at = Some((path, start.row));
+                    }
+                    if start != end {
+                        let selected: String = snapshot.text_for_range(start..end).collect();
+                        let selected = if selected.len() > 4000 { format!("{}…", &selected[..selected.floor_char_boundary(4000)]) } else { selected };
+                        text.push_str(&format!("They selected lines {}-{}:\n```\n{selected}\n```\n", start.row + 1, end.row + 1));
+                    }
+                }
+                None => text.push_str("The user has no file open in an editor.\n"),
+            }
+            let mut open: Vec<String> = ws
+                .items_of_type::<editor::Editor>(cx)
+                .filter_map(|e| e.read(cx).buffer().read(cx).as_singleton()?.read(cx).file()?.as_local().map(|f| ide.show(&f.abs_path(cx))))
+                .collect();
+            open.sort();
+            open.dedup();
+            if !open.is_empty() {
+                text.push_str(&format!("\nOpen files: {}\n", open.join(", ")));
+            }
+            if let Some(output) = crate::context::terminal_output(ws, cx) {
+                text.push_str(&format!("\nThe end of the terminal they last used:\n```\n{}\n```\n", tail(&output, 30)));
+            }
+            if let Some(panel) = ws.panel::<forge_tests::TestPanel>(cx) {
+                let panel = panel.read(cx);
+                let failed: Vec<String> = panel
+                    .projects()
+                    .iter()
+                    .flat_map(|p| p.classes.iter().flat_map(|c| &c.tests))
+                    .filter(|t| panel.results_for(&t.fqn).iter().any(|r| r.outcome == forge_tests::trx::Outcome::Failed))
+                    .map(|t| format!("{} ({})", t.fqn, ide.show(&t.file)))
+                    .take(10)
+                    .collect();
+                if !failed.is_empty() {
+                    text.push_str(&format!("\nTests that failed in their last run: {}\n", failed.join(", ")));
+                }
+            }
+            (text, at)
+        })
+        .map_err(|_| "The window is closed.".to_string())?;
+    let (mut text, at) = gathered;
+    // The problems the language servers report near the cursor.
+    if let Some((path, row)) = at {
+        let project = ide.project.clone();
+        let checks = crate::verify::read_problems(project, vec![path.clone()], Default::default(), cx).await;
+        let near: Vec<String> = checks
+            .iter()
+            .flat_map(|c| &c.problems)
+            .filter(|p| p.line + 5 >= row && p.line <= row + 5)
+            .map(|p| format!("line {} {}: {}", p.line + 1, if p.error { "error" } else { "warning" }, p.message))
+            .collect();
+        if !near.is_empty() {
+            text.push_str(&format!("\nProblems near their cursor in {}:\n{}\n", ide.show(&path), near.join("\n")));
+        }
+    }
+    Ok(text)
+}
+
 /// Response bodies quoted to the agent, at most (bytes).
 const BODY_BYTES: usize = 8_000;
 

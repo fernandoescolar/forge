@@ -125,7 +125,8 @@ pub fn init(cx: &mut App) {
             })
             .register_action(|ws, _: &OpenProjectInstructions, window, cx| {
                 let Some(root) = ws.visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf()) else { return };
-                open_config_file(ws, &root.join(forge_agents::rules::PROJECT_FILE), INSTRUCTIONS_TEMPLATE, window, cx)
+                let file = forge_agents::rules::project_file(&root, &forge_agents::rules::configured_files(cx));
+                open_config_file(ws, &file, INSTRUCTIONS_TEMPLATE, window, cx)
             })
             .register_action(|ws, _: &OpenUserInstructions, window, cx| {
                 open_config_file(ws, &forge_agents::rules::user_file(), INSTRUCTIONS_TEMPLATE, window, cx)

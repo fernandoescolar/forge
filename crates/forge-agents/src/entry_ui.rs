@@ -227,6 +227,8 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::Commit { message, files, origin, state, .. } => render_commit(thread, handle, ix, message, files, *origin, state, cx),
         Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
+        Entry::ExtensionTool { tool, args, state, .. } => render_extension_tool(handle, ix, tool, args, state, cx),
+        Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
@@ -444,6 +446,100 @@ fn render_question(handle: &WeakEntity<Thread>, ix: usize, question: &str, optio
         .when(open, |el| el.bg(cx.theme().status().warning_background))
         .child(h_flex().gap_2().items_start().child(Icon::new(IconName::Info).size(IconSize::Small).color(if open { Color::Warning } else { Color::Muted })).child(wrapping(Label::new(question.to_string()).size(LabelSize::Small).weight(FontWeight::MEDIUM))))
         .child(body)
+        .into_any_element()
+}
+
+/// A note the agent wants kept in the project's instructions: editable until answered.
+fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note: &gpui::Entity<editor::Editor>, file: &std::path::Path, state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    let shown = file.strip_prefix(thread.root()).unwrap_or(file).to_string_lossy().into_owned();
+    let footer = match state {
+        EditState::Applied => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(Label::new(format!("Kept in {shown}")).size(LabelSize::Small).color(Color::Success)).into_any_element(),
+        EditState::Declined => Label::new("→ Not kept").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Applying => Label::new("Saving…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Waiting | EditState::Failed(_) => h_flex()
+            .gap_1()
+            .child(Button::new(("remember-keep", ix), "Remember").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_remember(ix, true, cx))))
+            .child(Button::new(("remember-skip", ix), "Don't").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_remember(ix, false, cx))))
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(IconName::Book).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted }))
+                .child(Label::new("The agent wants to remember this for the project, in").size(LabelSize::Small))
+                .child(Label::new(shown).size(LabelSize::Small).buffer_font(cx)),
+        )
+        .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(note.clone()))
+        .when(open, |el| el.child(Label::new("Edit it before keeping it, if you like. Agents read it at the start of every new session.").size(LabelSize::XSmall).color(Color::Muted)))
+        .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+/// An agent's call to an extension's tool, waiting for the user: which extension, which
+/// tool, and with what.
+fn render_extension_tool(handle: &WeakEntity<Thread>, ix: usize, tool: &forge_ui::agent_tools::AgentTool, args: &serde_json::Value, state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    // Each argument on a line: `name: value`, long values cut.
+    let shown = |v: &serde_json::Value| {
+        let text = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+        if text.chars().count() > 300 { format!("{}…", text.chars().take(300).collect::<String>()) } else { text }
+    };
+    let rows: Vec<(String, String)> = match args {
+        serde_json::Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), shown(v))).collect(),
+        serde_json::Value::Null => vec![],
+        other => vec![(String::new(), shown(other))],
+    };
+    let footer = match state {
+        EditState::Applied => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(Label::new("Ran").size(LabelSize::Small).color(Color::Success)).into_any_element(),
+        EditState::Declined => Label::new("→ Not allowed").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Applying => Label::new("Running…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Waiting => h_flex()
+            .gap_1()
+            .child(Button::new(("ext-tool-allow", ix), "Allow").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_extension_tool(ix, true, window, cx))))
+            .child(Button::new(("ext-tool-deny", ix), "Deny").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_extension_tool(ix, false, window, cx))))
+            .into_any_element(),
+        EditState::Failed(e) => h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e.clone()).size(LabelSize::Small).color(Color::Error))).into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().warning_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().warning_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(IconName::Sparkle).size(IconSize::Small).color(if open { Color::Warning } else { Color::Muted }))
+                .child(Label::new("The agent wants to run").size(LabelSize::Small))
+                .child(Label::new(tool.title.clone()).size(LabelSize::Small).weight(FontWeight::MEDIUM))
+                .child(Label::new(format!("from the {} extension", tool.extension)).size(LabelSize::Small).color(Color::Muted)),
+        )
+        .when(!rows.is_empty(), |el| {
+            el.child(v_flex().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).children(rows.into_iter().map(|(k, v)| {
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .when(!k.is_empty(), |el| el.child(div().flex_none().child(Label::new(k).size(LabelSize::Small).color(Color::Muted))))
+                    .child(wrapping(Label::new(v).size(LabelSize::Small).buffer_font(cx)))
+            })))
+        })
+        .child(footer)
         .into_any_element()
 }
 

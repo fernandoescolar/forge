@@ -12,6 +12,7 @@ picker = { path = "../../vendor/zed/crates/picker" }
 db = { path = "../../vendor/zed/crates/db" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 anyhow = "1"
+futures = "0.3"
 log = "0.4"
 paths = { path = "../../vendor/zed/crates/paths" }
 schemars = "1.0"

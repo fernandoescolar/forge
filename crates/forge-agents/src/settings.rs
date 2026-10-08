@@ -88,6 +88,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
                     "allow_commands": { "type": "array", "title": "Commands that never ask", "description": "By prefix, such as `dotnet build` or `git status`." }
                 }
             },
+            "instructions_files": { "type": "array", "title": "Project instructions files", "description": "The project's instructions for agents, relative to its root, sent with every new session's first message (all that exist). Agents' notes go to the first that exists." },
             "mcp_servers": { "type": "array", "title": "MCP servers", "description": "Tool servers every agent session gets: name, command, args and env." },
             "agents": { "type": "array", "title": "Agents", "description": "The ACP agents threads can talk to. Manage agents adds them from a list." }
         }
@@ -96,6 +97,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
         "default_agent": ids.first(),
         "review_writes": true,
         "verify_changes": true,
+        "instructions_files": crate::config::default_instructions_files(),
         "permissions": { "mode": serde_json::to_value(PermissionMode::default()).unwrap_or_default(), "files_outside_workspace": false },
     });
     forge_ui::settings_registry::SettingsPage {
@@ -125,7 +127,7 @@ pub fn global(cx: &App) -> Entity<AgentSettings> {
 }
 
 fn empty() -> AgentsConfig {
-    AgentsConfig { agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], permissions: Default::default() }
+    AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], permissions: Default::default() }
 }
 
 impl AgentSettings {

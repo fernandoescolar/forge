@@ -126,6 +126,7 @@ export async function init(context: ExtensionContext) {
 const save = () => ctx.storage.set('connections', state.connections);
 
 export const connection = (id: string) => state.connections.find((c) => c.id === id);
+export const connections = () => state.connections;
 export const statusOf = (id: string): ConnectionState => state.status.get(id) ?? { status: 'disconnected' };
 
 export async function saveConnection(config: ConnectionConfig, password: string | null, sentinelPassword: string | null = null) {

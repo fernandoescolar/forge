@@ -75,6 +75,7 @@ g.__forge = {
   settingChanged: Api.deliverSettingChanged,
   event: Api.deliverEvent,
   runCommand: Api.runCommand,
+  runTool: Api.runTool,
   unmountPanel,
   fireTimer,
   /** The timer functions an extension's bundle runs with (see js.rs `ToJs::Load`). */

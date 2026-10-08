@@ -1,7 +1,7 @@
 // Database Explorer: browse SQL Server, PostgreSQL, MySQL/MariaDB and SQLite databases,
 // open tables and views, edit their rows and run your own queries; MongoDB's collections,
 // finding, aggregating and editing their documents; and Redis's keys (of every type, with
-// TTLs) and a console.
+// TTLs) and a console. Agents can use the SQL connections too (agentTools.ts).
 //
 // The databases are reached through `forge-sql` (sidecar/), a program shipped with the
 // extension in bin/<platform>/ and started with `forge.process.sidecar`.
@@ -11,11 +11,14 @@ import { sql } from './client';
 import { Explorer } from './explorer';
 import * as store from './store';
 import { openConnectionForm, openQuery } from './tabs';
+import { registerAgentTools } from './agentTools';
 
 export async function activate(ctx: ExtensionContext) {
   await store.init(ctx);
   store.onNeedPassword((id) => openConnectionForm(id, 'Type the password to connect (it is not saved).'));
 
+  // Agents can see the connections and their schema, and run queries the user approves.
+  ctx.subscriptions.push(...registerAgentTools());
   ctx.subscriptions.push(
     forge.panels.register({ id: 'db-explorer', title: 'Databases', icon: 'database_zap', layout: 'fill', render: () => <Explorer /> }),
     forge.commands.register('db-explorer.addConnection', 'Add Connection', () => openConnectionForm(null)),
