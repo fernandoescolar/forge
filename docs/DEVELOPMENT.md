@@ -15,6 +15,8 @@ sudo apt install libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-d
 
 (`vendor/zed/script/linux` lists them for other distributions.) Forge draws with Vulkan, under Wayland or X11; `FORGE_WINDOW_DECORATIONS=server` asks the desktop to draw the window's frame instead of Forge.
 
+Windows support is under way: everything compiles for `x86_64-pc-windows-msvc` (CI checks it on every push), but Forge isn't packaged or tested there yet. From macOS or Linux, [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) checks it: `cargo xwin check --workspace --tests --target x86_64-pc-windows-msvc`.
+
 Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.22.0`) and cloned shallowly:
 
 ```bash

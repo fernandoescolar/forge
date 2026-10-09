@@ -205,7 +205,9 @@ impl AgentService for AcpRuntime {
         if self.agents.contains_key(&spec.id) {
             return Err(IdeError::InvalidInput(format!("agent {} already started", spec.id)));
         }
-        let mut cmd = Command::new(&spec.command);
+        // The agent's own PATH if it sets one, else Forge's: `npx` is `npx.cmd` on Windows.
+        let path = spec.env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| std::ffi::OsString::from(v));
+        let mut cmd = Command::new(ide_api::program_path(&spec.command, path.as_deref()));
         cmd.args(&spec.args)
             .current_dir(spec.cwd.as_deref().unwrap_or(self.workspace.root()))
             .stdin(Stdio::piped())
@@ -536,22 +538,29 @@ mod tests {
     }
 
     /// GUI launches don't inherit the login shell's PATH; the host passes the project's shell
-    /// environment in `AgentSpec::env`, and the agent binary must be resolved with it.
+    /// environment in `AgentSpec::env`, and the agent binary must be resolved with it. On
+    /// Windows the agent is a `.cmd` script, as `npx` is.
     #[tokio::test]
     async fn agent_command_is_resolved_with_the_spec_path() {
-        use std::os::unix::fs::PermissionsExt as _;
         let bin = tempfile::tempdir().unwrap();
-        let shim = bin.path().join("forge-test-agent");
         let mock = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/mock-acp-agent.py");
-        std::fs::write(&shim, format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", mock.display())).unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let shim = bin.path().join("forge-test-agent");
+            std::fs::write(&shim, format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", mock.display())).unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        std::fs::write(bin.path().join("forge-test-agent.cmd"), format!("@python \"{}\" %*\r\n", mock.display())).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(16);
         let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
         let acp = AcpRuntime::new(events, ws);
-        let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
-        let spec = AgentSpec { id: "shim".into(), command: "forge-test-agent".into(), args: vec![], env: vec![("PATH".into(), path)], cwd: None };
+        let system_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&system_path))).unwrap();
+        let spec = AgentSpec { id: "shim".into(), command: "forge-test-agent".into(), args: vec![], env: vec![("PATH".into(), path.to_string_lossy().into_owned())], cwd: None };
         acp.start(spec).await.unwrap();
         assert_eq!(acp.initialize("shim", PROTOCOL_VERSION).await.unwrap()["protocolVersion"], 1);
     }

@@ -86,11 +86,7 @@ impl ExtensionHost {
                 None => std::env::vars().collect(),
             };
             let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone());
-            let program = if command.contains('/') {
-                command.clone()
-            } else {
-                path.and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(&command)).find(|p| p.is_file())).map(|p| p.to_string_lossy().into_owned()).unwrap_or(command.clone())
-            };
+            let program = ide_api::program_path(&command, path.as_deref().map(std::ffi::OsStr::new));
             let mut process = util::command::new_command(&program);
             process
                 .args(&arguments)

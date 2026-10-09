@@ -18,7 +18,8 @@ fn main() {
     // esbuild, not just the folder: an empty `node_modules` (a fresh volume, an aborted
     // install) needs installing too.
     if !pkg.join("node_modules/esbuild").exists() {
-        run(&["npm", "install", "--no-audit", "--no-fund"]);
+        // On Windows npm is a script, `npm.cmd`, which Command doesn't find by `npm`.
+        run(&[if cfg!(windows) { "npm.cmd" } else { "npm" }, "install", "--no-audit", "--no-fund"]);
     }
     run(&["node", "build.mjs"]);
     // Test fixture used by the QuickJS integration tests.

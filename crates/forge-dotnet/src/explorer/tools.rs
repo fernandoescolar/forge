@@ -23,9 +23,18 @@ fn user_secrets_id_in(project_file: &Path) -> Option<String> {
     Some(text[start..end].trim().to_string()).filter(|id| !id.is_empty())
 }
 
-/// Where `dotnet user-secrets` keeps a project's secrets (macOS and Linux).
-pub(crate) fn secrets_file(home: &Path, id: &str) -> PathBuf {
-    home.join(".microsoft/usersecrets").join(id).join("secrets.json")
+/// Where `dotnet user-secrets` keeps projects' secrets: `%APPDATA%\Microsoft\UserSecrets` on Windows,
+/// `~/.microsoft/usersecrets` elsewhere.
+pub(crate) fn user_secrets_root() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("Microsoft").join("UserSecrets"));
+    }
+    std::env::home_dir().map(|home| home.join(".microsoft/usersecrets"))
+}
+
+/// A project's secrets file, in that folder.
+pub(crate) fn secrets_file(root: &Path, id: &str) -> PathBuf {
+    root.join(id).join("secrets.json")
 }
 
 /// Whether the project uses Entity Framework Core.
@@ -86,7 +95,7 @@ impl SolutionExplorer {
     /// Opens the project's `secrets.json`, setting up user secrets first if needed.
     pub(super) fn manage_user_secrets(&mut self, _: &ManageUserSecrets, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project(cx) else { return };
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        let Some(root) = user_secrets_root() else { return };
         let existing = user_secrets_id(&project);
         let workspace = self.workspace.clone();
         let env = self.shell_env(project.dir(), cx);
@@ -104,9 +113,9 @@ impl SolutionExplorer {
                     .await?
                 }
             };
-            let file = secrets_file(&home, &id);
+            let file = secrets_file(&root, &id);
             if !file.exists() {
-                std::fs::create_dir_all(file.parent().unwrap_or(&home))?;
+                std::fs::create_dir_all(file.parent().unwrap_or(&root))?;
                 std::fs::write(&file, "{\n}\n")?;
             }
             workspace.update_in(cx, |ws, window, cx| ws.open_abs_path(file, workspace::OpenOptions::default(), window, cx).detach_and_log_err(cx))?;
@@ -276,6 +285,6 @@ mod tests {
         let file = dir.path().join("Api.csproj");
         std::fs::write(&file, "<Project><PropertyGroup><UserSecretsId>abc-123</UserSecretsId></PropertyGroup></Project>").unwrap();
         assert_eq!(user_secrets_id_in(&file).as_deref(), Some("abc-123"));
-        assert_eq!(secrets_file(Path::new("/Users/me"), "abc-123"), PathBuf::from("/Users/me/.microsoft/usersecrets/abc-123/secrets.json"));
+        assert_eq!(secrets_file(Path::new("/Users/me/.microsoft/usersecrets"), "abc-123"), PathBuf::from("/Users/me/.microsoft/usersecrets/abc-123/secrets.json"));
     }
 }

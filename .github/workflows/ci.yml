@@ -1,5 +1,5 @@
 # Builds Forge and runs its tests (Rust crates and the extension API) on every push and
-# pull request, on macOS; on Linux, checks that everything compiles.
+# pull request, on macOS; on Linux and Windows, checks that everything compiles.
 name: CI
 
 on:
@@ -58,6 +58,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-dev \
             libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev libsqlite3-dev cmake clang lld
       - name: Apply Forge's patches to Zed
+        run: scripts/apply-zed-patches.sh
+      - name: Check
+        run: cargo check --workspace --tests
+
+  # Windows is on its way: everything must keep compiling there too.
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply Forge's patches to Zed
+        shell: bash
         run: scripts/apply-zed-patches.sh
       - name: Check
         run: cargo check --workspace --tests

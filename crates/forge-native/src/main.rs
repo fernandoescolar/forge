@@ -300,11 +300,16 @@ fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
 }
 
 /// Where Forge keeps its settings, database and caches: `~/Library/Application Support/Forge`
-/// on macOS, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`) elsewhere.
+/// on macOS, `%LOCALAPPDATA%\Forge` on Windows, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`)
+/// on Linux.
 fn forge_data_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::home_dir().unwrap_or_default();
     if cfg!(target_os = "macos") {
         return home.join("Library/Application Support/Forge");
+    }
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local"));
+        return local.join("Forge");
     }
     let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
     data_home.join("forge")

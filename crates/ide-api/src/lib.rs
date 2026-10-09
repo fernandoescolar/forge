@@ -3,6 +3,9 @@
 //! The runtime runs on tokio and knows nothing about GPUI or Zed; the host (forge-agents)
 //! implements [`WorkspaceEngine`] and [`TerminalHost`] on top of Zed's project.
 
+mod program;
+pub use program::{find_program, program_path};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

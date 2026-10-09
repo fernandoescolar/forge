@@ -18,6 +18,7 @@ editor = { path = "../../vendor/zed/crates/editor" }
 fs = { path = "../../vendor/zed/crates/fs" }
 futures = "0.3"
 fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
+ide-api = { path = "../ide-api" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 language = { path = "../../vendor/zed/crates/language" }
 log = "0.4"
