@@ -3,7 +3,9 @@
 //! the traffic lights and handles dragging / double-click-to-zoom. Forge puts in it:
 //! project, branch and pending git changes on the left; the solution, the run controls
 //! (target, run, debug, stop) and the result of the last test run on the right. Where
-//! there is no global menu bar (Linux, Windows), the app menus come first, as buttons.
+//! there is no global menu bar (Linux, Windows), the app menus take the left as buttons,
+//! and the project and its git state move to the right, ahead of the solution and run
+//! controls: next to the menus they read as one more menu.
 
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
@@ -334,12 +336,10 @@ use gpui::prelude::FluentBuilder as _;
 impl Render for ForgeTitleBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
-        let left = h_flex()
+        let separator = || div().w(px(1.)).h(px(16.)).mx_1().bg(colors.border_variant);
+        // The project, its branch and pending changes (or `git init`).
+        let project = h_flex()
             .gap_2()
-            // Breathing room after the traffic lights.
-            .pl_4()
-            .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
-            .when(!cfg!(target_os = "macos"), |row| row.children(app_menu_bar(cx)))
             .child(Label::new(self.project_name(cx).unwrap_or_else(|| "Forge".into())).size(LabelSize::Small).weight(FontWeight::SEMIBOLD))
             .children(self.branch(cx).map(|b| {
                 ButtonLike::new("tb-branch")
@@ -371,12 +371,23 @@ impl Render for ForgeTitleBar {
                 )
             });
 
-        let separator = || div().w(px(1.)).h(px(16.)).mx_1().bg(colors.border_variant);
+        let global_menu_bar = cfg!(target_os = "macos");
+        let (project_left, project_right) = if global_menu_bar { (Some(project), None) } else { (None, Some(project)) };
+        let left = h_flex()
+            .gap_2()
+            // Breathing room after the traffic lights.
+            .pl_4()
+            .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
+            .when(!global_menu_bar, |row| row.children(app_menu_bar(cx)))
+            .children(project_left);
+
         let (solution, run) = (self.solution_picker(cx), self.run_controls(cx));
         let has_solution = solution.is_some();
         let right = h_flex()
             .gap_1()
             .pr_2()
+            .children(project_right)
+            .when(!global_menu_bar && (has_solution || run.is_some()), |row| row.child(separator()))
             .children(solution)
             .when(has_solution && run.is_some(), |row| row.child(separator()))
             .children(run)
