@@ -191,7 +191,7 @@ pub async fn find_update(client: &Arc<dyn HttpClient>, repository: &str, current
 }
 
 fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<()> {
-    let output = std::process::Command::new(program).args(args).output().with_context(|| format!("cannot run {program}"))?;
+    let output = ide_api::std_command(program).args(args).output().with_context(|| format!("cannot run {program}"))?;
     if !output.status.success() {
         bail!("{program} failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }

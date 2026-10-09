@@ -7,7 +7,7 @@
 //! up from the repository.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context as _, Result};
 
@@ -62,7 +62,7 @@ pub(crate) fn short(sha: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
+    let out = ide_api::std_command("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
     anyhow::ensure!(out.status.success(), "{}", stderr(&out));
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -119,7 +119,7 @@ pub(crate) fn stage_only(root: &Path, files: &[PathBuf]) -> Result<()> {
 /// Commits `files` with `message`; returns the new commit's SHA and its final message.
 pub(crate) fn commit(root: &Path, files: &[PathBuf], message: &str) -> Result<(String, String)> {
     stage_only(root, files)?;
-    let mut child = Command::new("git").arg("-C").arg(root).args(["commit", "-q", "-F", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("cannot run git; is it installed?")?;
+    let mut child = ide_api::std_command("git").arg("-C").arg(root).args(["commit", "-q", "-F", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("cannot run git; is it installed?")?;
     {
         use std::io::Write as _;
         child.stdin.take().context("no stdin")?.write_all(message.as_bytes())?;

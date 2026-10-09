@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::{Mutex, oneshot},
 };
 use tracing::{info, warn};
@@ -207,7 +207,7 @@ impl AgentService for AcpRuntime {
         }
         // The agent's own PATH if it sets one, else Forge's: `npx` is `npx.cmd` on Windows.
         let path = spec.env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| std::ffi::OsString::from(v));
-        let mut cmd = Command::new(ide_api::program_path(&spec.command, path.as_deref()));
+        let mut cmd = ide_api::tokio_command(ide_api::program_path(&spec.command, path.as_deref()));
         cmd.args(&spec.args)
             .current_dir(spec.cwd.as_deref().unwrap_or(self.workspace.root()))
             .stdin(Stdio::piped())
@@ -337,6 +337,7 @@ impl AgentService for AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::process::Command;
     use std::collections::HashMap;
     use tokio::sync::broadcast::Receiver;
 

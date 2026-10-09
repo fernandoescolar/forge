@@ -5,7 +5,6 @@
 //! Only the thread's current branch, never forced.
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context as _, Result};
 
@@ -72,7 +71,7 @@ pub(crate) fn plural(n: usize, word: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
+    let out = ide_api::std_command("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("fatal: "));
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }

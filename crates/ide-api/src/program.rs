@@ -1,10 +1,37 @@
-//! Finding a program on a `PATH` the way the system's shell would. On Windows, Rust's
-//! `Command` only adds `.exe`, so `npx`, `npm` or `code` (which are `npx.cmd`, `npm.cmd`
-//! and `code.cmd`) aren't found without trying `PATHEXT`'s extensions. Shared by the agent
-//! runtime and the extension host.
+//! Starting programs the same way on every system: finding them on a `PATH` as the shell
+//! would (on Windows, Rust's `Command` only adds `.exe`, so `npx`, `npm` or `code`, which are
+//! `npx.cmd`, `npm.cmd` and `code.cmd`, aren't found without `PATHEXT`'s extensions), and
+//! without a console window on Windows. Shared by the agent runtime and the rest of Forge.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+
+/// Windows' `CREATE_NO_WINDOW`: a console program started by Forge (a GUI program) gets no
+/// console window of its own.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `std::process::Command::new(program)`, without a console window on Windows (`git`,
+/// `npx`… would otherwise open one each time).
+pub fn std_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// [`std_command`] for tokio.
+pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
+    #[allow(unused_mut)]
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
 
 /// Where `command` is: itself when it is a path (it has a separator), else the first match
 /// on `path` (the `PATH` variable's value; the process's when `None`). On Windows each

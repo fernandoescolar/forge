@@ -91,7 +91,7 @@ async fn write_with(thread: Entity<Thread>, root: &Path, workspace: WeakEntity<W
 }
 
 fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let out = std::process::Command::new("git").args(args).current_dir(root).output()?;
+    let out = ide_api::std_command("git").args(args).current_dir(root).output()?;
     anyhow::ensure!(out.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

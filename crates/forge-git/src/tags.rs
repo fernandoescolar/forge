@@ -3,7 +3,6 @@
 //! and optionally push it to the branch's remote.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
@@ -191,7 +190,7 @@ fn short(sha: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")
+    ide_api::std_command("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")
 }
 
 fn stderr(output: &std::process::Output) -> String {
@@ -298,6 +297,7 @@ impl Render for CreateTagModal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

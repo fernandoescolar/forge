@@ -8,7 +8,6 @@
 //! (and go through the editor like any other thread's); git is told to ignore the folder.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
@@ -39,7 +38,7 @@ pub enum Applied {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
+    let output = ide_api::std_command("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git {} failed: {}", args.join(" "), stderr.trim());
@@ -186,7 +185,7 @@ fn merge_file(worktree: &AgentWorktree, base_commit: &str, status: char, path: &
             std::fs::write(&base_file, &base)?;
             std::fs::write(&theirs_file, &theirs)?;
             let agent = format!("agent ({})", worktree.branch());
-            let output = Command::new("git")
+            let output = ide_api::std_command("git")
                 .args(["merge-file", "-p", "-L", "yours", "-L", "base", "-L", &agent])
                 .args([&ours_file, &base_file, &theirs_file])
                 .output()
@@ -204,7 +203,7 @@ fn merge_file(worktree: &AgentWorktree, base_commit: &str, status: char, path: &
 
 /// `path` as it was in `commit`, if it existed.
 fn show(repo: &Path, commit: &str, path: &str) -> Option<Vec<u8>> {
-    let output = Command::new("git").arg("-C").arg(repo).args(["show", &format!("{commit}:{path}")]).output().ok()?;
+    let output = ide_api::std_command("git").arg("-C").arg(repo).args(["show", &format!("{commit}:{path}")]).output().ok()?;
     output.status.success().then_some(output.stdout)
 }
 

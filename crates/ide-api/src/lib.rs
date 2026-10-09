@@ -4,7 +4,7 @@
 //! implements [`WorkspaceEngine`] and [`TerminalHost`] on top of Zed's project.
 
 mod program;
-pub use program::{find_program, program_path};
+pub use program::{find_program, program_path, std_command, tokio_command};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

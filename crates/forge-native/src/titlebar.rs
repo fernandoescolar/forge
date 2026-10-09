@@ -10,7 +10,7 @@
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
 use gpui::{
-    Action, AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
+    Action, AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use platform_title_bar::PlatformTitleBar;
@@ -342,7 +342,7 @@ impl Render for ForgeTitleBar {
             .gap_2()
             .child(Label::new(self.project_name(cx).unwrap_or_else(|| "Forge".into())).size(LabelSize::Small).weight(FontWeight::SEMIBOLD))
             .children(self.branch(cx).map(|b| {
-                ButtonLike::new("tb-branch")
+                clickable(ButtonLike::new("tb-branch")
                     .style(ButtonStyle::Subtle)
                     .tooltip(Tooltip::for_action_title("Switch branch", &zed_actions::git::Branch))
                     .child(
@@ -351,13 +351,13 @@ impl Render for ForgeTitleBar {
                             .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall).color(Color::Muted))
                             .child(Label::new(b).size(LabelSize::Small).color(Color::Muted)),
                     )
-                    .on_click(Self::dispatch(Box::new(zed_actions::git::Branch)))
-                    .into_any_element()
+                    .on_click(Self::dispatch(Box::new(zed_actions::git::Branch))))
+                .into_any_element()
             }))
-            .children(self.git_changes(cx))
+            .children(self.git_changes(cx).map(clickable))
             // Not a repository yet: offer `git init` where the branch would be.
             .when(forge_git::init::uninitialized_root(&self.project, cx).is_some(), |row| {
-                row.child(
+                row.child(clickable(
                     ButtonLike::new("tb-git-init")
                         .style(ButtonStyle::Subtle)
                         .tooltip(Tooltip::text("Initialize a git repository (branch main)"))
@@ -368,7 +368,7 @@ impl Render for ForgeTitleBar {
                                 .child(Label::new("Init git").size(LabelSize::Small).color(Color::Accent)),
                         )
                         .on_click(Self::dispatch(Box::new(forge_git::init::InitRepository))),
-                )
+                ))
             });
 
         let global_menu_bar = cfg!(target_os = "macos");
@@ -388,10 +388,10 @@ impl Render for ForgeTitleBar {
             .pr_2()
             .children(project_right)
             .when(!global_menu_bar && (has_solution || run.is_some()), |row| row.child(separator()))
-            .children(solution)
+            .children(solution.map(clickable))
             .when(has_solution && run.is_some(), |row| row.child(separator()))
-            .children(run)
-            .children(self.test_summary(cx));
+            .children(run.map(clickable))
+            .children(self.test_summary(cx).map(clickable));
 
         let children = [h_flex()
             .w_full()
@@ -404,12 +404,20 @@ impl Render for ForgeTitleBar {
     }
 }
 
+/// Something to click in the title bar. On Windows the whole bar is the window's caption
+/// (dragging it moves the window) unless an element occludes it: without this, a click on a
+/// button starts moving the window instead, and the button never gets it.
+fn clickable(element: impl IntoElement) -> gpui::Div {
+    div().occlude().child(element)
+}
+
 /// The app's menus (`cx.set_menus`) as a row of buttons, each opening its menu: on
 /// platforms without a global menu bar, the window has to show them itself.
 fn app_menu_bar(cx: &gpui::App) -> Option<AnyElement> {
     let menus = cx.get_menus()?;
     Some(
         h_flex()
+            .occlude()
             .children(menus.into_iter().map(|menu| {
                 let name: SharedString = menu.name.to_string().into();
                 let items = std::rc::Rc::new(menu.items);
