@@ -1,5 +1,5 @@
 //! Forge updates itself from the GitHub releases of its repository: a release tagged
-//! `v<version>` with a `Forge-<version>-<arch>.zip` asset on macOS (what
+//! `v<version>` with a `Forge-<version>-macos-<arch>.zip` asset on macOS (what
 //! `scripts/bundle-macos.sh` makes) or `Forge-<version>-linux-<arch>.tar.gz` on Linux
 //! (`scripts/bundle-linux.sh`). The repository is Forge's own (`fernandoescolar/forge`), or the one set with
 //! `FORGE_UPDATE_REPOSITORY` when Forge is built (for forks). Release builds check on their
@@ -92,7 +92,7 @@ pub struct Release {
 /// The release asset for this kind of machine.
 pub fn asset_name(version: &str, os: &str, arch: &str) -> String {
     match os {
-        "macos" => format!("Forge-{version}-{arch}.zip"),
+        "macos" => format!("Forge-{version}-macos-{arch}.zip"),
         "windows" => format!("Forge-{version}-windows-{arch}.zip"),
         os => format!("Forge-{version}-{os}-{arch}.tar.gz"),
     }
@@ -154,13 +154,11 @@ pub fn newer_release(json: &str, current: &str, os: &str, arch: &str) -> Result<
         return Ok(None);
     }
     let wanted = asset_name(&version, os, arch);
-    let asset = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(wanted.as_str()))
-        .with_context(|| format!("release {tag} has no {wanted}"))?;
+    // Releases up to 0.0.1-rc.4 named the macOS zip without the system: `Forge-<v>-<arch>.zip`.
+    let legacy = (os == "macos").then(|| format!("Forge-{version}-{arch}.zip"));
+    let assets: Vec<&Value> = release.get("assets").and_then(Value::as_array).into_iter().flatten().collect();
+    let named = |name: &str| assets.iter().copied().find(|asset| asset.get("name").and_then(Value::as_str) == Some(name));
+    let asset = named(&wanted).or_else(|| legacy.as_deref().and_then(named)).with_context(|| format!("release {tag} has no {wanted}"))?;
     let download = asset.get("browser_download_url").and_then(Value::as_str).with_context(|| format!("release {tag} has no {wanted}"))?;
     let sha256 = asset.get("digest").and_then(Value::as_str).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase);
     Ok(Some(Release { version, download: download.to_string(), notes_url: release.get("html_url").and_then(Value::as_str).unwrap_or_default().to_string(), sha256 }))
@@ -473,12 +471,15 @@ mod tests {
     #[test]
     fn picks_the_asset_for_this_machine() {
         let json = r#"{"tag_name": "v0.3.0", "html_url": "https://github.com/o/forge/releases/tag/v0.3.0", "assets": [
-            {"name": "Forge-0.3.0-x86_64.zip", "browser_download_url": "https://x/intel.zip"},
-            {"name": "Forge-0.3.0-aarch64.zip", "browser_download_url": "https://x/arm.zip"}]}"#;
+            {"name": "Forge-0.3.0-macos-x86_64.zip", "browser_download_url": "https://x/intel.zip"},
+            {"name": "Forge-0.3.0-macos-aarch64.zip", "browser_download_url": "https://x/arm.zip"}]}"#;
         let release = newer_release(json, "0.2.0", "macos", "aarch64").unwrap().unwrap();
         assert_eq!((release.version.as_str(), release.download.as_str()), ("0.3.0", "https://x/arm.zip"));
         assert_eq!(newer_release(json, "0.3.0", "macos", "aarch64").unwrap(), None, "already up to date");
-        assert!(newer_release(json, "0.2.0", "macos", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-riscv64.zip"));
+        assert!(newer_release(json, "0.2.0", "macos", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-macos-riscv64.zip"));
+        // Releases from before the macOS zip said so in its name.
+        let legacy = r#"{"tag_name": "v0.3.0", "assets": [{"name": "Forge-0.3.0-aarch64.zip", "browser_download_url": "https://x/old-arm.zip"}]}"#;
+        assert_eq!(newer_release(legacy, "0.2.0", "macos", "aarch64").unwrap().unwrap().download, "https://x/old-arm.zip");
 
         let linux = r#"{"tag_name": "v0.3.0", "assets": [
             {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz", "digest": "sha256:ABC123"}]}"#;
@@ -561,7 +562,7 @@ mod tests {
     }
 
     /// A real release zip over a copy of an installed app:
-    /// `FORGE_UPDATE_ZIP=dist/Forge-<v>-<arch>.zip FORGE_UPDATE_APP=/tmp/x/Forge.app cargo test -p forge-update -- --ignored`
+    /// `FORGE_UPDATE_ZIP=dist/Forge-<v>-macos-<arch>.zip FORGE_UPDATE_APP=/tmp/x/Forge.app cargo test -p forge-update -- --ignored`
     #[test]
     #[ignore]
     #[cfg(target_os = "macos")]

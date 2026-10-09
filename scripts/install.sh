@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
 #
-# macOS: it downloads Forge-<version>-<arch>.zip for this Mac, checks it is a validly signed
+# macOS: it downloads Forge-<version>-macos-<arch>.zip for this Mac, checks it is a validly signed
 # Forge, quits a running Forge, puts Forge.app in /Applications (~/Applications when
 # /Applications isn't writable). Downloaded this way, macOS doesn't quarantine the app, so it
 # opens without Gatekeeper's prompts.
@@ -69,9 +69,13 @@ install_macos() {
   mkdir -p "$install_dir"
   local app="$install_dir/Forge.app"
 
-  local zip="Forge-$version-$arch.zip"
+  local zip="Forge-$version-macos-$arch.zip"
   say "Downloading Forge $version for $arch"
-  curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip" || fail "couldn't download $zip from $repo's $tag release"
+  if ! curl -fsL "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip"; then
+    # Releases up to 0.0.1-rc.4 named it without the system.
+    zip="Forge-$version-$arch.zip"
+    curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip" || fail "couldn't download Forge-$version-macos-$arch.zip from $repo's $tag release"
+  fi
   ditto -x -k "$tmp/$zip" "$tmp/unpacked"
   local new="$tmp/unpacked/Forge.app"
   [ -d "$new" ] || fail "$zip has no Forge.app"
