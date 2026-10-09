@@ -10,6 +10,7 @@ mod auth;
 pub mod context;
 pub mod commit_message;
 mod commit_proposal;
+pub mod configure;
 pub mod conflicts;
 pub mod config;
 pub mod diff;
@@ -36,6 +37,7 @@ pub mod settings;
 mod terminals;
 mod verify;
 
+pub use configure::ConfigureForge;
 pub use fix_with_agent::{FixProblemAtCursor, FixProblemsInFile, FixProblemsInProject};
 pub use thread::{Status, Thread, ThreadEvent};
 pub use anchored::AskHere;
@@ -62,5 +64,6 @@ pub fn init(cx: &mut gpui::App) {
     commit_message::init(cx);
     context::init(cx);
     fix_with_agent::init(cx);
+    configure::init(cx);
     conflicts::init(cx);
 }

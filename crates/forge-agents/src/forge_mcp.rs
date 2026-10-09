@@ -211,6 +211,9 @@ instead of search and replace. Use the language server's fixes and refactors wit
 the problems near their cursor, their terminal's last output and their failing tests.\n\
 - When you learn something about this project that every future session should know (how to build or test it, a convention, \
 a trap), propose it with `remember`: the user keeps it in the project's instructions.\n\
+- To help set Forge up, look settings up with `forge_settings` and key bindings with `forge_keybindings`, how features work in \
+`forge_guide`, and propose changes with `change_settings` and `change_keybinding` (the user applies them) instead of editing Forge's \
+files yourself.\n\
 - When you need the user to decide something to go on, ask with `ask_user` (it waits for the answer) instead of ending your turn; \
 when a long task finishes, tell them with `notify`.";
 
@@ -543,6 +546,54 @@ or that it ended without stopping. Give `test_path` or `test_name` for tests, el
         "title": "Show your changes",
         "description": "Open the review of the files you changed in this conversation as diffs (where the user keeps or undoes each change), at one file if given.",
         "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file to show first." } } }
+    }, {
+        "name": "forge_settings",
+        "title": "Forge's settings",
+        "description": "Looks up Forge's settings (the editor's, the terminal's, git, languages, .NET, agents, each extension's…), as the Settings tab \
+has them: each one's key, description, type or allowed values, default and current value, and the file it is in. Search by words \
+(`font size terminal`), or list a whole page with `page`. Use it before proposing changes with `change_settings`.",
+        "inputSchema": { "type": "object", "properties": {
+            "query": { "type": "string", "description": "Words that the setting's key, title or description contain." },
+            "page": { "type": "string", "description": "Only this page (its id, as results show it)." }
+        } }
+    }, {
+        "name": "change_settings",
+        "title": "Change settings",
+        "description": "Proposes changes to Forge's settings: the user sees each one (before → after) and applies or discards them. They take \
+effect at once. `key` as `forge_settings` shows it; `value: null` puts the default back. Agents' own setup (which agents run, their \
+permissions and MCP servers) is the user's to change: don't propose it.",
+        "inputSchema": { "type": "object", "properties": {
+            "changes": { "type": "array", "items": { "type": "object", "properties": {
+                "key": { "type": "string" },
+                "value": { "description": "The new value, of the setting's type; null for the default." },
+                "page": { "type": "string", "description": "The page, when the key is on several." }
+            }, "required": ["key", "value"] } }
+        }, "required": ["changes"] }
+    }, {
+        "name": "forge_keybindings",
+        "title": "Key bindings",
+        "description": "What keys do in Forge (and in which context), or which keys run an action: give `keys` (`cmd-shift-p`, `cmd-k cmd-t`; \
+`secondary` is cmd on macOS and ctrl elsewhere) or words of an action's name (`action`: `minimap`, `terminal::Toggle`). Actions without \
+keys are listed too.",
+        "inputSchema": { "type": "object", "properties": { "keys": { "type": "string" }, "action": { "type": "string" } } }
+    }, {
+        "name": "change_keybinding",
+        "title": "Change a key binding",
+        "description": "Proposes a key binding for the user's keymap.json: `keys` run `action` (with `args`, if it takes any) where `context` \
+holds (`Editor`, `Workspace`, `Terminal`; everywhere when left out), or do nothing there with `action: null`. The user applies or \
+discards it; it takes effect at once.",
+        "inputSchema": { "type": "object", "properties": {
+            "keys": { "type": "string" },
+            "action": { "type": ["string", "null"], "description": "The action's name, as `forge_keybindings` shows it; null to unbind." },
+            "args": { "description": "The action's arguments, for actions that take some." },
+            "context": { "type": "string" }
+        }, "required": ["keys", "action"] }
+    }, {
+        "name": "forge_guide",
+        "title": "Forge's guide",
+        "description": "Forge's own documentation: how its features work and where they are set up (agents, threads, tests, debugging, git, \
+.NET, HTTP files, extensions…). Without `topic`, its sections; with one, the sections about it.",
+        "inputSchema": { "type": "object", "properties": { "topic": { "type": "string" } } }
     }])
 }
 
@@ -574,7 +625,7 @@ pub fn tool_summary(args: &Value) -> Option<String> {
     } else if let Some(url) = text("url") {
         parts.push(url.to_string());
     }
-    for key in ["symbol", "name", "target", "remote", "query", "title", "test_path", "test_name", "action", "expression"] {
+    for key in ["symbol", "name", "target", "remote", "query", "title", "test_path", "test_name", "action", "expression", "keys", "topic", "page"] {
         parts.extend(text(key).map(str::to_string));
     }
     if let Some(new_name) = text("new_name") {
@@ -668,7 +719,8 @@ mod tests {
         assert_eq!(names, [
             "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "check_file", "go_to_definition", "find_references", "rename_symbol", "hover",
             "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
-            "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes",
+            "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes", "forge_settings", "change_settings",
+            "forge_keybindings", "change_keybinding", "forge_guide",
         ]);
         assert_eq!(tools[11]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
         let skill = tools.as_array().unwrap().iter().find(|t| t["name"] == "skill_migrations").expect("the project's skill");

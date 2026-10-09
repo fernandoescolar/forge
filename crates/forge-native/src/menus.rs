@@ -520,6 +520,8 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Fix the Problem at the Cursor", forge_agents::FixProblemAtCursor),
             MenuItem::action("Fix the Problems in This File", forge_agents::FixProblemsInFile),
             MenuItem::action("Fix the Problems in the Project", forge_agents::FixProblemsInProject),
+            MenuItem::separator(),
+            MenuItem::action("Set Up Forge with an Agent…", forge_agents::ConfigureForge),
             MenuItem::action("Ask About the Terminal Output", forge_agents::context::AskAboutTerminal),
             MenuItem::separator(),
             MenuItem::action("Stop the Agent", forge_agents::Cancel),

@@ -229,6 +229,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
         Entry::ExtensionTool { tool, args, state, .. } => render_extension_tool(handle, ix, tool, args, state, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
+        Entry::Config { changes, state, .. } => render_config(handle, ix, changes, state, cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
@@ -481,6 +482,70 @@ fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note
         )
         .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(note.clone()))
         .when(open, |el| el.child(Label::new("Edit it before keeping it, if you like. Agents read it at the start of every new session.").size(LabelSize::XSmall).color(Color::Muted)))
+        .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+/// Settings and key bindings the agent wants to change: each one with its value before and
+/// after, and *Apply* / *Discard*.
+fn render_config(handle: &WeakEntity<Thread>, ix: usize, changes: &[crate::configure::ConfigChange], state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+    use crate::configure::ConfigChange;
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    let value = |v: Option<&serde_json::Value>, unset: &str| v.map(|v| v.to_string()).unwrap_or_else(|| unset.to_string());
+    let rows = changes.iter().map(|change| {
+        let (what, place, before, after) = match change {
+            ConfigChange::Setting(s) => (s.title.clone(), format!("{} · {}", s.page, s.path.join(".")), value(s.before.as_ref(), "default"), value(s.after.as_ref(), "default")),
+            ConfigChange::Binding(b) => (
+                b.keys.clone(),
+                format!("keymap.json{}", b.context.as_ref().map(|c| format!(" · when {c}")).unwrap_or_default()),
+                b.before.clone().map(|line| line.split(" → ").nth(1).unwrap_or(&line).to_string()).unwrap_or_else(|| "nothing".into()),
+                match (&b.action, &b.args) {
+                    (None, _) => "nothing".into(),
+                    (Some(a), None) => a.clone(),
+                    (Some(a), Some(args)) => format!("{a} {args}"),
+                },
+            ),
+        };
+        v_flex()
+            .gap_0p5()
+            .child(h_flex().gap_1().child(Label::new(what).size(LabelSize::Small).weight(gpui::FontWeight::MEDIUM)).child(Label::new(place).size(LabelSize::XSmall).color(Color::Muted)))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Label::new(before).size(LabelSize::Small).buffer_font(cx).color(Color::Muted).strikethrough())
+                    .child(Icon::new(IconName::ArrowRight).size(IconSize::XSmall).color(Color::Muted))
+                    .child(Label::new(after).size(LabelSize::Small).buffer_font(cx).color(Color::Success)),
+            )
+    });
+    let footer = match state {
+        EditState::Applied => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(Label::new("Applied").size(LabelSize::Small).color(Color::Success)).into_any_element(),
+        EditState::Declined => Label::new("→ Discarded").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Applying => Label::new("Applying…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Waiting | EditState::Failed(_) => h_flex()
+            .gap_1()
+            .child(Button::new(("config-apply", ix), "Apply").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_config(ix, true, cx))))
+            .child(Button::new(("config-discard", ix), "Discard").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_config(ix, false, cx))))
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(IconName::Settings).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted }))
+                .child(Label::new("The agent wants to change Forge's setup").size(LabelSize::Small)),
+        )
+        .child(v_flex().gap_1p5().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).children(rows))
         .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
             el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
         })

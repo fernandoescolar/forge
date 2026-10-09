@@ -95,7 +95,7 @@ The settings are stored in files in `~/Library/Application Support/Forge/config`
 | File | What it holds |
 | --- | --- |
 | `settings.json` | Your settings, on top of Forge's defaults (*Open Default Settings* lists them all) |
-| `keymap.json` | Your key bindings (*Open Default Key Bindings* lists the defaults) |
+| `keymap.json` | Your key bindings, over the defaults (*Open Default Key Bindings* lists them); Forge applies them when the file changes |
 | `palettes/*.json` | Colour palettes, one theme each |
 | `agents.json` | The agents threads can talk to, and MCP servers |
 | `dotnet.json` | Solution Explorer and NuGet options |
@@ -218,6 +218,8 @@ These calls appear in the thread with their names ("Run tests", "Find references
 **Your instructions.** Forge sends standing instructions with the first message of every new session: your `AGENTS.md`, for every project, and the project's own, from `.forge/AGENTS.md` and `AGENTS.md` at its root (every one that exists, so agents that don't read `AGENTS.md` themselves get it too). `instructions_files` in `agents.json` changes which project files those are, relative to the project's root. Edit them from Agents › *Edit Project Instructions* (the first of those files that exists) and *Edit Your Instructions*. The thread notes when they were sent.
 
 **What agents learn.** When an agent finds out something every future session should know (how to build or test the project, a convention, a trap), it can propose a note. The note shows in the thread, editable, with *Remember* and *Don't*: kept, it goes under *Notes from agents* in the project's instructions file (the first one that exists, else `.forge/AGENTS.md`), so the next sessions start knowing it.
+
+**Setting Forge up with an agent.** Agents › *Set Up Forge with an Agent…* (or *Ask an Agent…* in the Settings tab) starts a thread that asks what you'd like: a bigger font in the terminal, no minimap, a key for something you do often. The agent looks up the settings (with their types, defaults and current values, the same ones the Settings tab shows), the key bindings and Forge's guide, then proposes changes on a card, each one *before → after*: *Apply* writes them (keeping your files' comments) and they take effect at once; *Discard* leaves everything as it was. Agents can't change their own setup: which agents run, their permissions and MCP servers stay yours to change, in Settings › Agents.
 
 **Skills and prompts.** Write them once, in Markdown, and every agent gets them, whether it has skills of its own or not:
 

@@ -92,6 +92,9 @@ pub(crate) enum Entry {
     /// A note the agent wants kept in the project's instructions (`remember`): editable
     /// until the user answers; `file` is where it goes.
     Remember { note: Entity<editor::Editor>, file: PathBuf, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// Settings or key bindings the agent wants to change (`change_settings`,
+    /// `change_keybinding`), for the user to apply or discard.
+    Config { changes: Vec<crate::configure::ConfigChange>, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
     /// Sign-in card: the agent's login methods, run without leaving Forge.
     Auth { methods: Vec<AuthMethod>, terminal: Option<Entity<TerminalView>>, state: AuthState },
 }
@@ -709,7 +712,7 @@ impl Thread {
 
     /// Writes waiting for the user's decision.
     pub fn pending_reviews(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Config { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
     }
 
     /// Where the agent last read or wrote.
@@ -1228,6 +1231,7 @@ impl Thread {
                     Entry::Remember { note, state, .. } => RecordEntry::System { text: format!("Note \"{}\": {}", note.read(cx).text(cx).trim(), state.outcome()) },
                     Entry::ExtensionTool { tool, state, .. } => RecordEntry::System { text: format!("{} ({}): {}", tool.title, tool.extension, state.outcome()) },
                     Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
+                    Entry::Config { changes, state, .. } => RecordEntry::System { text: format!("Asked to change {}: {}", crate::configure::summary(changes), state.outcome()) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
             })
@@ -1562,6 +1566,7 @@ impl Thread {
             Entry::LspEdit { plan, reply: Some(_), .. } => Some(plan.summary()),
             Entry::ExtensionTool { tool, reply: Some(_), .. } => Some(format!("let {} run", tool.title)),
             Entry::Remember { reply: Some(_), .. } => Some("keep a note".to_string()),
+            Entry::Config { changes, reply: Some(_), .. } => Some(format!("change {}", crate::configure::summary(changes))),
             Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
         });
@@ -2086,6 +2091,34 @@ impl Thread {
                 self.notify_user(message.clone(), cx);
                 let _ = reply.send(Ok("The user was notified.".into()));
             }
+            "forge_settings" => {
+                let pages = forge_ui::settings_registry::SettingsRegistry::global(cx).read(cx).pages().to_vec();
+                let answer = crate::configure::search_settings(&pages, &str_arg(&args, "query").unwrap_or_default(), str_arg(&args, "page").as_deref(), &|file| file.read());
+                let _ = reply.send(Ok(answer));
+            }
+            "forge_keybindings" => {
+                let _ = reply.send(crate::configure::describe_bindings(str_arg(&args, "keys").as_deref(), str_arg(&args, "action").as_deref(), cx));
+            }
+            "forge_guide" => {
+                let _ = reply.send(Ok(crate::configure::guide(str_arg(&args, "topic").as_deref())));
+            }
+            "change_settings" | "change_keybinding" => {
+                let planned = if name == "change_settings" {
+                    let pages = forge_ui::settings_registry::SettingsRegistry::global(cx).read(cx).pages().to_vec();
+                    crate::configure::plan_setting_changes(&pages, args.get("changes").unwrap_or(&Value::Null), &|file| file.read()).map(|l| l.into_iter().map(crate::configure::ConfigChange::Setting).collect())
+                } else {
+                    crate::configure::plan_binding_change(&args, cx).map(|b| vec![crate::configure::ConfigChange::Binding(b)])
+                };
+                match planned {
+                    Ok(changes) => {
+                        self.entries.push(Entry::Config { changes, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
+                        self.changed(cx);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
             "show_changes" => {
                 let answer = if self.changes.is_empty() {
                     Ok("You haven't changed any file in this conversation.".to_string())
@@ -2214,6 +2247,32 @@ impl Thread {
 
     /// Answers the note card at `ix`: adds the note (as the user left it) to the project's
     /// instructions file, or tells the agent no.
+    /// Applies (or discards) the settings and key bindings the agent proposed at `ix`.
+    pub(crate) fn answer_config(&mut self, ix: usize, apply: bool, cx: &mut Context<Self>) {
+        use crate::forge_tools::EditState;
+        let Some(Entry::Config { changes, state, reply }) = self.entries.get_mut(ix) else { return };
+        if !state.is_open() {
+            return;
+        }
+        let Some(reply) = reply.take() else { return };
+        if !apply {
+            *state = EditState::Declined;
+            let _ = reply.send(Err("The user didn't apply the changes.".into()));
+            self.changed(cx);
+            return;
+        }
+        let changes = changes.clone();
+        let result = crate::configure::apply(&changes, paths::keymap_file(), cx);
+        if let Some(Entry::Config { state, .. }) = self.entries.get_mut(ix) {
+            *state = match &result {
+                Ok(_) => EditState::Applied,
+                Err(e) => EditState::Failed(e.clone()),
+            };
+        }
+        let _ = reply.send(result);
+        self.changed(cx);
+    }
+
     pub(crate) fn answer_remember(&mut self, ix: usize, keep: bool, cx: &mut Context<Self>) {
         use crate::forge_tools::EditState;
         let Some(Entry::Remember { note, file, state, reply }) = self.entries.get_mut(ix) else { return };

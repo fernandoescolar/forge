@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use settings::SettingsStore;
 use theme::{ActiveTheme as _, ThemeRegistry};
 use ui::{
-    Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu, Headline, HeadlineSize, Icon, IconButton, IconName,
+    Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu, FixedWidth as _, Headline, HeadlineSize, Icon, IconButton, IconName,
     IconPosition, IconSize, Indicator, Label, LabelCommon as _, LabelSize, PopoverMenu, Switch, ToggleState, Tooltip, h_flex, v_flex,
 };
 use workspace::{Item, OpenOptions, Workspace, item::ItemEvent};
@@ -545,6 +545,17 @@ impl Render for SettingsView {
             .border_color(colors.border)
             .overflow_y_scroll()
             .child(div().mb_2().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(self.search.clone()))
+            .child(
+                div().mb_2().child(
+                    Button::new("settings-ask-agent", "Ask an Agent…")
+                        .full_width()
+                        .style(ButtonStyle::Outlined)
+                        .size(ButtonSize::Compact)
+                        .start_icon(Some(Icon::new(IconName::ZedAgent).size(IconSize::Small)))
+                        .tooltip(Tooltip::text("Tell an agent what you'd like, and apply the changes it proposes"))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(forge_agents::ConfigureForge), cx)),
+                ),
+            )
             .children(pages.iter().map(|page| {
                 let is_selected = query.is_empty() && selected.as_deref() == Some(page.id.as_str());
                 let id = page.id.clone();

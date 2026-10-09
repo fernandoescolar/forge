@@ -23,6 +23,7 @@ mod problems;
 mod statusbar;
 mod theme;
 mod titlebar;
+mod user_keymap;
 mod welcome;
 mod windows;
 
@@ -204,6 +205,7 @@ fn main() {
         }
 
         load_keymap(cx);
+        user_keymap::init(fs.clone(), cx);
         cx.set_quit_mode(QuitMode::LastWindowClosed);
         add_panels_to_new_workspaces(cx);
 

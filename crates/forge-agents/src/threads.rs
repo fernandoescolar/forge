@@ -2975,6 +2975,68 @@ mod tests {
         assert_eq!(answer.await.unwrap().unwrap(), "a.rs: no new problems (1 it already had before your changes remain).");
     }
 
+    /// Setting Forge up with an agent: it looks settings and keys up, and its proposals wait
+    /// for the user on a card; agents' own setup is refused.
+    #[gpui::test]
+    async fn agents_propose_settings_and_key_bindings(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let (thread, _view, mut cx) = thread_tab(crate::config::AgentsConfig { instructions_files: vec![], agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() }, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        cx.update(|_, cx| {
+            let registry = forge_ui::settings_registry::SettingsRegistry::global(cx);
+            let page = forge_ui::settings_registry::SettingsPage {
+                id: "terminal".into(),
+                title: "Terminal".into(),
+                file: forge_ui::settings_registry::SettingsFile::Config("forge-test-terminal.json".into()),
+                schema: json!({ "properties": { "font_size": { "type": "number", "minimum": 6, "maximum": 100, "description": "The terminal's font size." } } }),
+                keys: None,
+                defaults: json!({ "font_size": 13 }),
+                order: 50,
+                actions: vec![],
+            };
+            registry.update(cx, |r, cx| r.register(page, cx));
+            cx.bind_keys([gpui::KeyBinding::new("ctrl-alt-shift-t", NewThread, None)]);
+        });
+        let call = |cx: &mut VisualTestContext, name: &str, args: serde_json::Value| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            let request = crate::forge_mcp::ToolRequest { name: name.into(), args, reply };
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+            cx.run_until_parked();
+            answer
+        };
+
+        let found = call(cx, "forge_settings", json!({ "query": "terminal font" })).await.unwrap().unwrap();
+        assert!(found.contains("`font_size` on page Terminal") && found.contains("Default: 13"), "{found}");
+        let keys = call(cx, "forge_keybindings", json!({ "keys": "ctrl-alt-shift-t" })).await.unwrap().unwrap();
+        assert!(keys.contains("forge_agent::NewThread"), "{keys}");
+
+        // A proposal waits on a card; discarded, the agent hears so.
+        let answer = call(cx, "change_settings", json!({ "changes": [{ "key": "font_size", "value": 16 }] }));
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::Config { .. })).expect("a card"));
+        assert_eq!(thread.read_with(cx, |t, _| t.pending_reviews()), 1, "it waits for the user");
+        thread.update(cx, |t, cx| t.answer_config(card, false, cx));
+        assert_eq!(answer.await.unwrap(), Err("The user didn't apply the changes.".into()));
+
+        // Mistakes come back to the agent at once, with no card.
+        let bad = call(cx, "change_settings", json!({ "changes": [{ "key": "font_size", "value": 200 }] })).await.unwrap();
+        assert!(bad.unwrap_err().contains("from 6 to 100"));
+        let bad = call(cx, "change_keybinding", json!({ "keys": "ctrl-alt-shift-t", "action": "no_such::Action" })).await.unwrap();
+        assert!(bad.unwrap_err().contains("There is no action"));
+        assert_eq!(thread.read_with(cx, |t, _| t.entries.iter().filter(|e| matches!(e, Entry::Config { .. })).count()), 1);
+
+        // A key binding proposal says what the keys did before.
+        let _answer = call(cx, "change_keybinding", json!({ "keys": "ctrl-alt-shift-t", "action": "forge_agent::OpenThreads" }));
+        let before = thread.read_with(cx, |t, _| match t.entries.last() {
+            Some(Entry::Config { changes, .. }) => match &changes[0] {
+                crate::configure::ConfigChange::Binding(b) => b.before.clone(),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert!(before.is_some_and(|b| b.contains("forge_agent::NewThread")));
+    }
+
     /// Two threads changing the same file: both say so, once.
     #[gpui::test]
     async fn warns_when_two_threads_change_a_file(cx: &mut TestAppContext) {
