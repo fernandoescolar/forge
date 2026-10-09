@@ -172,7 +172,7 @@ Agents work in **threads**. A thread is one conversation with an agent that spea
 
 - **The thread tab** (⌘⇧A, or the spark in the title bar; ⌘⌥N starts a new one). The conversation fills the editor area. You see your messages, the agent's answers, its tool calls with their terminals, plans and permission requests. Under the input are the session's settings (mode, model and others the agent offers) and its usage. **Changes** lists every file the agent modified, with lines added and removed. Click a file, or *Review*, to see the changes as a diff in a tab, then keep or undo each file or all of them.
 - **In the code** (⌃↩ in any file). A question card opens right below the selection. It keeps the latest answer, the changes to review and a reply box.
-- **Fix with agent**, from an error's popover, Agents › Fix the Problem at the Cursor, or a failed test. Merge conflicts and pull request reviews go to agents too (see [Git and GitHub](#git-and-github)).
+- **Fix with agent**, from an error's popover, Agents › Fix the Problem at the Cursor, or a failed test. Agents › *Fix the Problems in This File* and *… in the Project* (also *Fix with Agent* on the Problems tab) send every error and warning there, errors first. Merge conflicts and pull request reviews go to agents too (see [Git and GitHub](#git-and-github)).
 
 ![A thread that fixed a failing test: the agent's thoughts, reads, edits and test run, the files it changed, and their diff ready to review](images/agents.jpg)
 
@@ -198,7 +198,8 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 
 **Forge's tools for agents.** Besides committing and pushing, agents that take HTTP MCP servers (Claude Code among them) get tools that act through Forge, so you see what they do. Forge asks them to prefer these tools to doing the same in a shell:
 - *Run tests* runs tests in the Tests panel: all of them, those of a file or folder, or those whose name matches. Results show in the gutter, and the agent gets each failure with its place and message.
-- *Errors and warnings* reads the language servers' problems, your unsaved edits included, instead of building the project.
+- *Errors and warnings* reads the language servers' problems, your unsaved edits included, instead of building the project: in a file or folder, in the files the thread changed, or everywhere, and only errors or only warnings if asked.
+- *Check your changes* is what agents call after editing: once the language servers have looked at the new code, it lists only the problems the changes brought. The ones a file already had before the thread first changed it are only counted, even when edits moved them to other lines.
 - *Go to definition* and *Find references* ask the language server. *Rename a symbol* uses its rename, like the editor's. When writes are reviewed, the rename shows as a card with the places and files it touches, and waits for *Rename* or *Decline*. The renamed files join the thread's changes.
 - *Run the app* starts a run target as the title bar's Run does, in a terminal you see. The agent reads its output and can stop it.
 - *Code actions* lists the language server's quick fixes and refactors on some lines, and *Apply a code action* applies one. *Format a file* uses the project's formatter. Like a rename, these show as a card when writes are reviewed, and their files join the thread's changes. *Type and docs* (hover) and *Find symbols* (workspace symbols) read the language server too.

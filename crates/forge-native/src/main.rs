@@ -19,6 +19,7 @@ mod settings_view;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod single_instance;
 mod open_editors;
+mod problems;
 mod statusbar;
 mod theme;
 mod titlebar;
@@ -163,6 +164,7 @@ fn main() {
         file_finder::init(cx);
         search::init(cx);
         search_bars::init(cx);
+        problems::init(cx);
         project_panel::init(cx);
         terminal_view::init(cx);
         dap_adapters::init(cx);

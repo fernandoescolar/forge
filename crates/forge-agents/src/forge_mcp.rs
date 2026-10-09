@@ -197,7 +197,9 @@ pub const INSTRUCTIONS: &str = "You are working inside Forge, an IDE the user is
 so the user sees what you do; prefer them to doing the same in a shell:\n\
 - Commit with `propose_commit` and push with `propose_push`, never with `git commit` or `git push`: the user makes them from Forge.\n\
 - Run tests with `run_tests` (they show in the Tests panel) instead of `cargo test`, `dotnet test`, `npm test`, `pytest` and the like.\n\
-- Check for errors with `diagnostics` (the language servers' errors and warnings, unsaved edits included) before building the whole project.\n\
+- After editing files, call `check_file`: it lists only the problems your changes brought, once the language servers have caught up. \
+Fix them before moving on. `diagnostics` lists every error and warning (in a file, a folder or the files you changed); both are faster \
+than building the whole project.\n\
 - Navigate with `go_to_definition`, `find_references`, `workspace_symbols` and `hover` (types and docs), and rename with `rename_symbol` \
 instead of search and replace. Use the language server's fixes and refactors with `code_actions` + `apply_code_action`, and `format_file` to format.\n\
 - Run the app with `run_app` (the user's Run button), read it with `app_output`, stop it with `stop_app`.\n\
@@ -373,8 +375,20 @@ With no arguments it runs every test. Waits for the run to end.",
         "name": "diagnostics",
         "title": "Errors and warnings",
         "description": "The errors and warnings the language servers report, as the user sees them in the editor (unsaved edits included): \
-in one file, or in every file that has some. Waits for the servers to catch up after recent edits. Faster than building the project.",
-        "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "Only this file (relative to the project root). Leave it out for every file." } } }
+in a file or a folder, in the files you changed in this conversation, or in every file that has some. Waits for the servers to catch up \
+after recent edits. Faster than building the project.",
+        "inputSchema": { "type": "object", "properties": {
+            "path": { "type": "string", "description": "Only this file, or the files in this folder (relative to the project root)." },
+            "severity": { "enum": ["error", "warning"], "description": "Only errors, or only warnings. Leave it out for both." },
+            "changed": { "type": "boolean", "description": "Only the files you changed in this conversation." }
+        } }
+    }, {
+        "name": "check_file",
+        "title": "Check your changes",
+        "description": "After editing: the problems your changes brought to a file (or to every file you changed in this conversation), \
+once the language servers have looked at the new code. Problems the file already had before you changed it are left out (only counted), \
+so what it lists is yours to fix. Call it after each round of edits, before moving on.",
+        "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file (relative to the project root). Leave it out for every file you changed." } } }
     }, {
         "name": "go_to_definition",
         "title": "Go to definition",
@@ -652,11 +666,11 @@ mod tests {
         // Forge's own (tests elsewhere may register extensions' tools, named `<extension>__<tool>`).
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__") && !n.starts_with("skill_")).collect();
         assert_eq!(names, [
-            "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
+            "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "check_file", "go_to_definition", "find_references", "rename_symbol", "hover",
             "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
             "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes",
         ]);
-        assert_eq!(tools[10]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
+        assert_eq!(tools[11]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
         let skill = tools.as_array().unwrap().iter().find(|t| t["name"] == "skill_migrations").expect("the project's skill");
         assert_eq!(skill["title"], "Skill: migrations");
 

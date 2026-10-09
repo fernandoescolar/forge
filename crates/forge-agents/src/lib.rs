@@ -36,7 +36,7 @@ pub mod settings;
 mod terminals;
 mod verify;
 
-pub use fix_with_agent::FixProblemAtCursor;
+pub use fix_with_agent::{FixProblemAtCursor, FixProblemsInFile, FixProblemsInProject};
 pub use thread::{Status, Thread, ThreadEvent};
 pub use anchored::AskHere;
 pub use threads::{Cancel, ManageWorktrees, NewThread, NewThreadInWorktree, OpenThreads, Send, ThreadView};

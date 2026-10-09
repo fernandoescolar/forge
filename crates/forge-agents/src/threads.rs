@@ -2648,7 +2648,7 @@ mod tests {
             })
         };
         let write = |path: &str, old: Option<&str>, new: &str, cx: &mut VisualTestContext| {
-            let record = crate::project_fs::WriteRecord { path: path.into(), old_text: old.map(str::to_string), new_text: new.into() };
+            let record = crate::project_fs::WriteRecord { path: path.into(), old_text: old.map(str::to_string), new_text: new.into(), problems_before: None };
             thread.update(cx, |t, cx| t.record_write(record, cx));
         };
 
@@ -2710,7 +2710,7 @@ mod tests {
             })
         };
         let write = |path: &str, old: Option<&str>, new: &str, cx: &mut VisualTestContext| {
-            let record = crate::project_fs::WriteRecord { path: path.into(), old_text: old.map(str::to_string), new_text: new.into() };
+            let record = crate::project_fs::WriteRecord { path: path.into(), old_text: old.map(str::to_string), new_text: new.into(), problems_before: None };
             thread.update(cx, |t, cx| t.record_write(record, cx));
         };
         let a = std::path::PathBuf::from("/root/a.txt");
@@ -2892,6 +2892,89 @@ mod tests {
         assert_eq!(problems, vec![crate::verify::Problem { line: 1, error: false, message: "unused variable".into() }], "the latest report");
     }
 
+    /// `check_file` lists only the problems the agent's changes brought: the ones the file
+    /// had before its first write (even on another line now) are only counted.
+    #[gpui::test]
+    async fn check_file_reports_only_new_problems(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let fs = params.fs.as_fake();
+        fs.insert_tree("/root", json!({ "a.rs": "fn main() {\n    let x = 1;\n}\n", "b.rs": "fn b() {}\n" })).await;
+        let project = Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        let report = |cx: &mut VisualTestContext, problems: Vec<(u32, language::DiagnosticSeverity, &str)>| {
+            project.read_with(cx, |p, _| p.lsp_store()).update(cx, |store, cx| {
+                let entries = problems
+                    .into_iter()
+                    .map(|(row, severity, message)| {
+                        let diagnostic = language::Diagnostic { severity, message: language::DiagnosticMessage::from(message), source_kind: language::DiagnosticSourceKind::Pushed, is_primary: true, ..Default::default() };
+                        let at = text::Unclipped(text::PointUtf16::new(row, 4));
+                        language::DiagnosticEntry::new(at..at, diagnostic)
+                    })
+                    .collect();
+                store.update_diagnostic_entries(lsp::LanguageServerId(0), "/root/a.rs".into(), None, None, entries, cx).unwrap();
+            });
+            cx.run_until_parked();
+        };
+        // The file is open with a warning it already had.
+        let buffer = project.update(cx, |p, cx| p.open_local_buffer("/root/a.rs", cx)).await.unwrap();
+        report(cx, vec![(1, language::DiagnosticSeverity::WARNING, "unused variable `x`")]);
+
+        // The agent writes it; the server then reports the old warning two lines down, and a new error.
+        thread.update(cx, |t, cx| {
+            t.record_write(crate::project_fs::WriteRecord { path: "/root/a.rs".into(), old_text: Some("fn main() {\n    let x = 1;\n}\n".into()), new_text: "fn main() {\n\n\n    let x = 1;\n    y\n}\n".into(), problems_before: None }, cx)
+        });
+        buffer.update(cx, |b, cx| b.set_text("fn main() {\n\n\n    let x = 1;\n    y\n}\n", cx));
+        report(cx, vec![(3, language::DiagnosticSeverity::WARNING, "unused variable `x`"), (4, language::DiagnosticSeverity::ERROR, "cannot find value `y`")]);
+
+        let call = |cx: &mut VisualTestContext, name: &str, args: serde_json::Value| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            let request = crate::forge_mcp::ToolRequest { name: name.into(), args, reply };
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+            answer
+        };
+        let answer = call(cx, "check_file", json!({ "path": "a.rs" }));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        let text = answer.await.unwrap().unwrap();
+        assert_eq!(text, "a.rs: 1 new problem (1 it already had before your changes remain):\n- line 5 error: cannot find value `y`");
+
+        // Without a path: every file the conversation changed (b.rs wasn't).
+        let answer = call(cx, "check_file", json!({}));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        assert!(answer.await.unwrap().unwrap().starts_with("a.rs: 1 new problem"));
+
+        // `diagnostics` narrowed to the changed files' errors.
+        let answer = call(cx, "diagnostics", json!({ "changed": true, "severity": "error" }));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        assert_eq!(answer.await.unwrap().unwrap(), "a.rs:5 error: cannot find value `y`\n(1 error, 0 warnings in 1 file)");
+
+        // Fixed: nothing new left.
+        report(cx, vec![(3, language::DiagnosticSeverity::WARNING, "unused variable `x`")]);
+        let answer = call(cx, "check_file", json!({ "path": "a.rs" }));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        assert_eq!(answer.await.unwrap().unwrap(), "a.rs: no new problems (1 it already had before your changes remain).");
+    }
+
     /// Two threads changing the same file: both say so, once.
     #[gpui::test]
     async fn warns_when_two_threads_change_a_file(cx: &mut TestAppContext) {
@@ -2918,7 +3001,7 @@ mod tests {
         };
         let (first, second) = (new(cx), new(cx));
         let write = |thread: &Entity<Thread>, old: &str, new: &str, cx: &mut VisualTestContext| {
-            let record = crate::project_fs::WriteRecord { path: "/root/a.txt".into(), old_text: Some(old.into()), new_text: new.into() };
+            let record = crate::project_fs::WriteRecord { path: "/root/a.txt".into(), old_text: Some(old.into()), new_text: new.into(), problems_before: None };
             thread.update(cx, |t, cx| t.record_write(record, cx));
             cx.run_until_parked();
         };

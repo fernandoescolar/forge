@@ -321,6 +321,9 @@ pub struct Thread {
     pub(crate) checkpoints: Vec<Checkpoint>,
     /// Errors and warnings per file when the current turn started (to tell new ones).
     diagnostics_before: HashMap<PathBuf, (usize, usize)>,
+    /// Each file's problems before the agent first changed it in this thread: what
+    /// `check_file` tells new problems from.
+    problem_baseline: HashMap<PathBuf, Vec<crate::verify::Problem>>,
     /// Keeps the latest check current as the language servers report on its files.
     check_watch: Option<gpui::Subscription>,
     /// Files another thread also changed, already warned about.
@@ -461,7 +464,7 @@ impl Thread {
             cx.observe(&settings, move |_, settings, cx| permissions.set(settings.read(cx).config().permissions.clone()))
         });
         let (written_tx, mut written_rx) = mpsc::unbounded::<WriteRecord>();
-        let policy = ReviewPolicy { reviews: review_writes.then_some(review_tx), approved: approved_edits.clone(), permissions: permissions.clone(), written: Some(written_tx) };
+        let policy = ReviewPolicy { reviews: review_writes.then_some(review_tx), approved: approved_edits.clone(), permissions: permissions.clone(), written: Some(written_tx), problems_read: Default::default() };
         let fs = Arc::new(ProjectFs::new(&project, root.clone(), policy, cx));
         let terminals = TerminalRegistry::default();
         let terminal_host = Arc::new(ZedTerminals::new(&project, terminals.clone(), cx));
@@ -533,6 +536,7 @@ impl Thread {
             changes: Vec::new(),
             checkpoints: Vec::new(),
             diagnostics_before: HashMap::new(),
+            problem_baseline: HashMap::new(),
             check_watch: None,
             conflicts_warned: Default::default(),
             modes: Vec::new(),
@@ -1674,6 +1678,18 @@ impl Thread {
 
     pub(crate) fn record_write(&mut self, record: WriteRecord, cx: &mut Context<Self>) {
         self.warn_about_conflict(&record.path, cx);
+        // Right after the write the language servers haven't looked at it yet: the problems
+        // the file shows are still the ones it had before.
+        if !self.problem_baseline.contains_key(&record.path) {
+            let before = match (&record.problems_before, &record.old_text) {
+                (Some(problems), _) => problems.clone(),
+                (None, None) => Vec::new(),
+                // Written without Forge's file system (language-server edits, agents that
+                // write files themselves): the open buffer's, if any.
+                (None, Some(_)) => self.project.upgrade().and_then(|p| crate::verify::open_file_problems(p.read(cx), &record.path, cx)).unwrap_or_default(),
+            };
+            self.problem_baseline.insert(record.path.clone(), before);
+        }
         for checkpoint in &mut self.checkpoints {
             checkpoint.files.entry(record.path.clone()).or_insert_with(|| record.old_text.clone());
         }
@@ -2082,10 +2098,15 @@ impl Thread {
             _ if forge_ui::agent_tools::agent_tools().get(&name).is_some() => self.extension_tool(name, args, reply, window, cx),
             _ => {
                 let ide = self.ide();
+                // The files this thread changed (and still has changed), and their problems
+                // before it did.
+                let changed: Vec<PathBuf> = self.changes.iter().map(|c| c.path.clone()).collect();
+                let baseline = self.problem_baseline.clone();
                 cx.spawn_in(window, async move |_, cx| {
                     let answer = match name.as_str() {
                         "run_tests" => tools::run_tests(ide, args, cx).await,
-                        "diagnostics" => tools::diagnostics(ide, args, cx).await,
+                        "diagnostics" => tools::diagnostics(ide, args, &changed, cx).await,
+                        "check_file" => tools::check_file(ide, args, &changed, &baseline, cx).await,
                         "go_to_definition" => tools::definition(ide, args, cx).await,
                         "find_references" => tools::references(ide, args, cx).await,
                         "hover" => tools::hover(ide, args, cx).await,
@@ -2563,7 +2584,7 @@ impl Thread {
                     if this.changes.iter().any(|c| c.path == path && c.current == on_disk) {
                         continue;
                     }
-                    this.record_write(WriteRecord { path, old_text, new_text: on_disk }, cx);
+                    this.record_write(WriteRecord { path, old_text, new_text: on_disk, problems_before: None }, cx);
                 }
             })
             .ok();

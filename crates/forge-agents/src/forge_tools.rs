@@ -114,36 +114,107 @@ pub(crate) async fn references(ide: Ide, args: Value, cx: &mut AsyncWindowContex
     Ok(format!("{total} references to `{symbol}`:\n{}{more}", lines.join("\n")))
 }
 
-/// The language servers' errors and warnings: in `path`, or in every file that has some.
-pub(crate) async fn diagnostics(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    let files: Vec<PathBuf> = match str_arg(&args, "path") {
-        Some(path) => vec![ide.resolve(&path)],
-        None => {
-            let project = ide.project.upgrade().ok_or("The project is closed.")?;
-            let counts = cx.update(|_, cx| crate::verify::diagnostic_counts(&project, cx)).map_err(|_| "The project is closed.".to_string())?;
-            let mut files: Vec<PathBuf> = counts.into_iter().filter(|(_, (e, w))| e + w > 0).map(|(p, _)| p).collect();
-            files.sort();
-            files
-        }
+/// The language servers' errors and warnings: in a file or a folder (`path`), in the files
+/// this conversation changed (`changed`), or in every file that has some; only errors, or
+/// only warnings, with `severity`.
+pub(crate) async fn diagnostics(ide: Ide, args: Value, changed: &[PathBuf], cx: &mut AsyncWindowContext) -> ToolReply {
+    let only_changed = args.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    let severity = str_arg(&args, "severity");
+    let want = |error: bool| match severity.as_deref() {
+        Some("error") => error,
+        Some("warning") => !error,
+        _ => true,
     };
+    let within = str_arg(&args, "path").map(|p| ide.resolve(&p));
+    let mut files: Vec<PathBuf> = if only_changed {
+        changed.to_vec()
+    } else if within.as_ref().is_some_and(|p| p.is_file()) {
+        within.iter().cloned().collect()
+    } else {
+        let project = ide.project.upgrade().ok_or("The project is closed.")?;
+        let counts = cx.update(|_, cx| crate::verify::diagnostic_counts(&project, cx)).map_err(|_| "The project is closed.".to_string())?;
+        counts.into_iter().filter(|(_, (e, w))| e + w > 0).map(|(p, _)| p).collect()
+    };
+    if let Some(within) = &within {
+        files.retain(|f| f.starts_with(within));
+    }
+    files.sort();
     if files.is_empty() {
-        return Ok("The language servers report no errors or warnings.".into());
+        return Ok(match (only_changed, &within) {
+            (true, _) if changed.is_empty() => "You haven't changed any file in this conversation.".into(),
+            (true, Some(_)) => "You haven't changed any file there in this conversation.".into(),
+            _ => "The language servers report no errors or warnings there.".into(),
+        });
     }
     let project = ide.project.clone();
     let checks = cx.update(|_, cx| crate::verify::check(project, files, Default::default(), cx)).map_err(|_| "The project is closed.".to_string())?.await;
     let mut lines = Vec::new();
+    let (mut errors, mut warnings, mut with_problems) = (0, 0, 0);
     for check in &checks {
-        for p in &check.problems {
+        let shown: Vec<_> = check.problems.iter().filter(|p| want(p.error)).collect();
+        if !shown.is_empty() {
+            with_problems += 1;
+        }
+        for p in shown {
+            if p.error { errors += 1 } else { warnings += 1 }
             lines.push(format!("{}:{} {}: {}", ide.show(&check.path), p.line + 1, if p.error { "error" } else { "warning" }, p.message));
         }
     }
     if lines.is_empty() {
-        return Ok("The language servers report no errors or warnings there.".into());
+        return Ok("The language servers report no such problems there.".into());
     }
     let total = lines.len();
     lines.truncate(MAX_RESULTS);
-    let more = if total > MAX_RESULTS { format!("\n… and {} more", total - MAX_RESULTS) } else { String::new() };
-    Ok(format!("{}{more}", lines.join("\n")))
+    let more = if total > MAX_RESULTS { format!("\n… and {} more (narrow it with `path` or `severity`)", total - MAX_RESULTS) } else { String::new() };
+    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    Ok(format!("{}{more}\n({}, {} in {})", lines.join("\n"), plural(errors, "error"), plural(warnings, "warning"), plural(with_problems, "file")))
+}
+
+/// The problems your changes brought: in `path`, or in every file this conversation changed,
+/// once the language servers have looked at them, compared with what each file had before
+/// the agent first changed it (by message, as lines move).
+pub(crate) async fn check_file(ide: Ide, args: Value, changed: &[PathBuf], baseline: &std::collections::HashMap<PathBuf, Vec<crate::verify::Problem>>, cx: &mut AsyncWindowContext) -> ToolReply {
+    let files: Vec<PathBuf> = match str_arg(&args, "path") {
+        Some(path) => vec![ide.resolve(&path)],
+        None => changed.to_vec(),
+    };
+    if files.is_empty() {
+        return Ok("You haven't changed any file in this conversation: there is nothing to check.".into());
+    }
+    let project = ide.project.clone();
+    crate::verify::settle(&project, cx).await;
+    let mut parts = Vec::new();
+    let mut clean = 0;
+    for path in files {
+        let shown = ide.show(&path);
+        let Some(now) = crate::verify::problems_in(&project, &path, crate::verify::BASELINE_LIMIT, cx).await else {
+            parts.push(format!("{shown}: it doesn't exist."));
+            continue;
+        };
+        let Some(before) = baseline.get(&path) else {
+            // Not changed by this conversation: all of its problems are as they were.
+            let list: Vec<String> = now.iter().take(MAX_RESULTS).map(|p| format!("- line {} {}: {}", p.line + 1, if p.error { "error" } else { "warning" }, p.message)).collect();
+            parts.push(if now.is_empty() {
+                format!("{shown}: no problems (you haven't changed it in this conversation).")
+            } else {
+                format!("{shown}: you haven't changed it in this conversation; its problems:\n{}", list.join("\n"))
+            });
+            continue;
+        };
+        let (new, kept) = crate::verify::new_problems(&now, before);
+        let had = if kept > 0 { format!(" ({kept} it already had before your changes remain)") } else { String::new() };
+        if new.is_empty() {
+            clean += 1;
+            parts.push(format!("{shown}: no new problems{had}."));
+        } else {
+            let list: Vec<String> = new.iter().take(MAX_RESULTS).map(|p| format!("- line {} {}: {}", p.line + 1, if p.error { "error" } else { "warning" }, p.message)).collect();
+            parts.push(format!("{shown}: {} new problem{}{had}:\n{}", new.len(), if new.len() == 1 { "" } else { "s" }, list.join("\n")));
+        }
+    }
+    if clean == parts.len() && parts.len() > 1 {
+        return Ok(format!("No new problems in the {} files you changed.\n{}", parts.len(), parts.join("\n")));
+    }
+    Ok(parts.join("\n"))
 }
 
 /// Opens `path` in the editor at `line` (to `end_line`), selected, for the user to look at.
@@ -343,7 +414,7 @@ pub(crate) async fn apply_edit(ide: &Ide, plan: &EditPlan, cx: &mut AsyncWindowC
         let old_text = std::fs::read_to_string(&path).ok();
         let save = ide.project.update(cx, |p, cx| p.save_buffer(buffer.clone(), cx)).map_err(|_| closed())?;
         save.await.map_err(|e| format!("Couldn't save {}: {e:#}", ide.show(&path)))?;
-        records.push(crate::project_fs::WriteRecord { path, old_text, new_text });
+        records.push(crate::project_fs::WriteRecord { path, old_text, new_text, problems_before: None });
     }
     records.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(records)

@@ -69,6 +69,9 @@ pub struct ReviewPolicy {
     pub permissions: crate::permissions::SharedPermissions,
     /// Every write that reached the file, so the thread can list, diff and undo them.
     pub written: Option<mpsc::UnboundedSender<WriteRecord>>,
+    /// Files whose problems were already read before a first write (see
+    /// [`WriteRecord::problems_before`]).
+    pub problems_read: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
 }
 
 /// A file the agent changed: what it held before (`None`: it didn't exist) and now.
@@ -77,6 +80,9 @@ pub struct WriteRecord {
     pub path: PathBuf,
     pub old_text: Option<String>,
     pub new_text: String,
+    /// The language servers' problems in the file just before this write, read on the first
+    /// write to it (`None` otherwise, or when nobody read them).
+    pub problems_before: Option<Vec<crate::verify::Problem>>,
 }
 
 enum Request {
@@ -150,9 +156,19 @@ async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, p
         Some(buffer) => Some(cx.update(|cx| buffer.read(cx).text())),
         None => fs.load(path).await.ok(),
     };
+    // The file's problems before the agent's first write to it: what tells the problems it
+    // brings from the ones the file had (`check_file`).
+    let first_write = policy.written.is_some() && policy.problems_read.lock().unwrap().insert(path.to_path_buf());
+    let problems_before = match (&target, first_write) {
+        (_, false) => None,
+        (Some(buffer), true) => Some(cx.update(|cx| crate::verify::problems_of(&buffer.read(cx).snapshot(), crate::verify::BASELINE_LIMIT))),
+        // Not open: the servers' last report on it, through a buffer opened just to read it.
+        (None, true) if old_text.is_some() => Some(crate::verify::problems_in(project, path, crate::verify::BASELINE_LIMIT, cx).await.unwrap_or_default()),
+        (None, true) => Some(Vec::new()),
+    };
     let record = |new_text: &str| {
         if let Some(written) = &policy.written {
-            written.unbounded_send(WriteRecord { path: path.to_path_buf(), old_text: old_text.clone(), new_text: new_text.to_string() }).ok();
+            written.unbounded_send(WriteRecord { path: path.to_path_buf(), old_text: old_text.clone(), new_text: new_text.to_string(), problems_before: problems_before.clone() }).ok();
         }
     };
     if let Some(reviews) = policy.reviews.as_ref().filter(|_| !permissions.skips_review()) {
@@ -280,6 +296,44 @@ mod tests {
         assert!(adapter.write_file(Path::new("/tmp/outside.txt"), "x".into()).await.is_err());
     }
 
+    /// The first write to a file reports the problems it had just before, also when it isn't
+    /// open (read through a buffer opened for that); later writes don't read them again.
+    #[gpui::test]
+    async fn first_writes_carry_the_problems_before(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "closed.rs": "fn main() {\n    let x = 1;\n}\n" })).await;
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        // The server reported on the file while it wasn't open in Forge.
+        project.read_with(cx, |p, _| p.lsp_store()).update(cx, |store, cx| {
+            let diagnostic = language::Diagnostic {
+                severity: language::DiagnosticSeverity::WARNING,
+                message: language::DiagnosticMessage::from("unused variable `x`"),
+                source_kind: language::DiagnosticSourceKind::Pushed,
+                is_primary: true,
+                ..Default::default()
+            };
+            let at = text::Unclipped(text::PointUtf16::new(1, 8));
+            store.update_diagnostic_entries(lsp::LanguageServerId(0), "/root/closed.rs".into(), None, None, vec![language::DiagnosticEntry::new(at..at, diagnostic)], cx).unwrap();
+        });
+        let (written_tx, mut written) = mpsc::unbounded();
+        let policy = ReviewPolicy { written: Some(written_tx), ..Default::default() };
+        let adapter = cx.update(|cx| ProjectFs::new(&project, "/root".into(), policy, cx));
+
+        adapter.write_file(Path::new("closed.rs"), "fn main() {}\n".into()).await.unwrap();
+        let first = written.next().await.unwrap();
+        assert_eq!(first.problems_before, Some(vec![crate::verify::Problem { line: 1, error: false, message: "unused variable `x`".into() }]));
+        adapter.write_file(Path::new("closed.rs"), "fn main() { }\n".into()).await.unwrap();
+        assert_eq!(written.next().await.unwrap().problems_before, None, "read once");
+        adapter.write_file(Path::new("new.rs"), "fn new() {}\n".into()).await.unwrap();
+        assert_eq!(written.next().await.unwrap().problems_before, Some(vec![]), "a new file had none");
+    }
+
     #[gpui::test]
     async fn writes_wait_for_review_unless_already_approved(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -292,7 +346,7 @@ mod tests {
         let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
         cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
         let (tx, mut reviews) = mpsc::unbounded();
-        let policy = ReviewPolicy { reviews: Some(tx), approved: ApprovedEdits::default(), permissions: Default::default(), written: None };
+        let policy = ReviewPolicy { reviews: Some(tx), approved: ApprovedEdits::default(), permissions: Default::default(), written: None, problems_read: Default::default() };
         let adapter = Arc::new(cx.update(|cx| ProjectFs::new(&project, "/root".into(), policy.clone(), cx)));
 
         // Rejected: nothing is written and the agent gets an error.
