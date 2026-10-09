@@ -1,20 +1,43 @@
 {
   "name": "@forge-ide/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "The API for Forge extensions (React rendered natively with GPUI), and forge-ext to build and pack them",
   "license": "GPL-3.0-or-later",
   "homepage": "https://github.com/fernandoescolar/forge/blob/main/docs/EXTENSIONS.md",
-  "repository": { "type": "git", "url": "git+https://github.com/fernandoescolar/forge.git", "directory": "packages/forge-api" },
-  "keywords": ["forge", "forge-ide", "extension", "react", "gpui"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fernandoescolar/forge.git",
+    "directory": "packages/forge-api"
+  },
+  "keywords": [
+    "forge",
+    "forge-ide",
+    "extension",
+    "react",
+    "gpui"
+  ],
   "types": "./dist/types/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/types/index.d.ts" },
-    "./globals": { "types": "./src/globals.d.ts" }
+    ".": {
+      "types": "./dist/types/index.d.ts"
+    },
+    "./globals": {
+      "types": "./src/globals.d.ts"
+    }
   },
-  "bin": { "forge-ext": "bin/forge-ext.mjs" },
-  "files": ["bin", "dist/types", "src/globals.d.ts", "README.md"],
-  "publishConfig": { "access": "public" },
+  "bin": {
+    "forge-ext": "bin/forge-ext.mjs"
+  },
+  "files": [
+    "bin",
+    "dist/types",
+    "src/globals.d.ts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node build.mjs && tsc -p tsconfig.types.json",
     "typecheck": "tsc --noEmit",

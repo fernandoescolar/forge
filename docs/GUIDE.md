@@ -279,7 +279,7 @@ Agents get four tools: `containers` and `logs` (with a `grep`) read at once; `co
 
 ## Extensions
 
-Extensions add panels, tabs, commands and web views, and can work with the editor, run programs and keep their own data. They are written in TypeScript with React, and Forge renders them natively. Open the **Extensions** panel to see the installed ones.
+Extensions add panels, tabs and commands, and can work with the editor, run programs and keep their own data. They are written in TypeScript with React, and Forge renders them natively. Open the **Extensions** panel to see the installed ones.
 
 Extensions are shared as packages: a `.forgeext` file holds an extension with the programs it needs. To install one, use **Extensions › Install from Package…** (or *Install* in the Extensions panel) and pick the file; Forge checks it, unpacks it into `~/Library/Application Support/Forge/extensions` and starts it, replacing an older copy. *Install from Folder…* does the same with an extension's folder.
 

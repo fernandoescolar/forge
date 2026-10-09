@@ -59,22 +59,34 @@ test('host calls resolve promises', async () => {
   await assert.rejects(q, /not found/);
 });
 
-test('webview panels route messages both ways', () => {
-  const { ctx, calls } = host();
+test('markdown, images and charts reach the host as their own elements', async () => {
+  const { ctx, commits, flushTimers } = host();
   const api = ctx.__forge.modules['@forge-ide/api'];
-  api.setActivating('/ext/demo');
-  const panel = api.forge.webviews.register({ id: 'demo', title: 'Demo', html: 'index.html' });
-  api.setActivating(null);
-  assert.deepEqual(calls.at(-1), { method: 'webviews.register', args: { id: 'demo', title: 'Demo', icon: 'globe', html: 'index.html', root: '/ext/demo', extension: null }, id: 0 });
-
-  const got = [];
-  panel.onMessage((m) => got.push(m));
-  ctx.__forge.webviewMessage('demo', JSON.stringify({ hello: 1 }));
-  assert.deepEqual(got, [{ hello: 1 }]);
-
-  panel.postMessage({ reply: true });
-  assert.deepEqual(calls.at(-1), { method: 'webviews.postMessage', args: { id: 'demo', message: { reply: true } }, id: 0 });
-  assert.throws(() => api.forge.webviews.register({ id: 'x', title: 'X', html: 'a.html' }), /activate/);
+  const React = ctx.__forge.modules.react;
+  const clicked = [];
+  api.forge.panels.register({
+    id: 'media',
+    title: 'Media',
+    render: () =>
+      React.createElement(
+        api.View,
+        null,
+        React.createElement(api.Markdown, { text: '# Hi\n\n- one' }),
+        React.createElement(api.Image, { src: '/ext/logo.png', alt: 'Logo', fit: 'cover' }),
+        React.createElement(api.Chart, { kind: 'line', labels: ['Mon', 'Tue'], series: [{ name: 'Builds', values: [3, null] }], onClick: (p) => clicked.push(p) }),
+      ),
+  });
+  await new Promise((r) => setImmediate(r));
+  flushTimers();
+  const created = commits.flatMap((c) => c.ops).filter((o) => o.op === 'create');
+  const of = (type) => created.find((o) => o.type === type);
+  assert.equal(of('markdown').props.text, '# Hi\n\n- one');
+  assert.deepEqual(of('image').props, { src: '/ext/logo.png', alt: 'Logo', fit: 'cover' });
+  const chart = of('chart');
+  assert.deepEqual(chart.props, { kind: 'line', labels: ['Mon', 'Tue'], series: [{ name: 'Builds', values: [3, null] }] });
+  assert.deepEqual(chart.events, ['onClick']);
+  ctx.__forge.dispatch(chart.id, 'onClick', JSON.stringify({ index: 1, label: 'Tue' }));
+  assert.deepEqual(clicked, [{ index: 1, label: 'Tue' }]);
 });
 
 test('events reach listeners, and the host hears of each event once', async () => {

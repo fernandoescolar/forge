@@ -186,6 +186,64 @@ export function DataGrid(p: DataGridProps) {
   });
 }
 
+export type MarkdownProps = Omit<Base, 'children'> & {
+  /** CommonMark with GitHub's tables, task lists and strikethrough. */
+  text: string;
+};
+
+/**
+ * Markdown, rendered the way Forge renders agents' answers: headings, lists, tables, links
+ * (they open in the browser) and code blocks highlighted by language. `style.mono` uses
+ * the editor's font.
+ */
+export const Markdown = (p: MarkdownProps) => createElement('markdown', p);
+
+export type ImageProps = Omit<Base, 'children'> & {
+  /**
+   * An absolute path (`${ctx.path}/media/logo.png` for the extension's own files), an
+   * `http(s)://` URL, or a `data:image/png;base64,…` URI. PNG, JPEG, GIF, WebP, SVG, BMP,
+   * TIFF and ICO.
+   */
+  src: string;
+  /** Shown while hovering it, and in its place when it can't be loaded. */
+  alt?: string;
+  /** How it fills its box: `contain` (the default), `cover`, `fill` or `none`. */
+  fit?: 'contain' | 'cover' | 'fill' | 'none';
+  /** Its height when `style` gives it no size (160 by default; it is as wide as its parent). */
+  height?: number;
+};
+
+/** An image, scaled into its box (`style.width` / `style.height`). */
+export const Image = (p: ImageProps) => createElement('image', p);
+
+export type ChartSeries = {
+  name: string;
+  /** One per label; `null` leaves a gap. */
+  values: (number | null)[];
+  /** A theme colour; by default the theme's accents, one per series. */
+  color?: Color;
+};
+
+export type ChartProps = Omit<Base, 'children'> & {
+  /** `bar` (the default; series side by side), `line` or `area`. */
+  kind?: 'bar' | 'line' | 'area';
+  /** The points' names, along the bottom. */
+  labels: string[];
+  series: ChartSeries[];
+  /** The plot's height (180 by default). */
+  height?: number;
+  /** Shows the series' names above it (always, when there are several). */
+  legend?: boolean;
+  /** Clicking a point (a bar, or where a line passes). */
+  onClick?: (point: { index: number; label: string }) => void;
+};
+
+/**
+ * A chart of one or more series over labelled points, drawn natively with the theme's
+ * colours. The value axis always includes zero; hovering shows the point's values.
+ */
+export const Chart = (p: ChartProps) => createElement('chart', p);
+
 export type TabItem = { id: string; label: string; icon?: string; closable?: boolean };
 
 /** A row of tabs (the content below is yours to switch). */
@@ -505,37 +563,6 @@ export type Tab = Disposable & {
 
 const tabCloseListeners = new Map<string, () => void>();
 
-/** Path of the extension currently being activated (set by the runtime). */
-let activating: string | null = null;
-export function setActivating(path: string | null) {
-  activating = path;
-}
-
-export type WebviewOptions = {
-  id: string;
-  title: string;
-  icon?: string;
-  /** HTML entry, relative to the extension folder (e.g. "webview/index.html"). */
-  html: string;
-  /** Extension folder; defaults to the extension being activated. */
-  root?: string;
-};
-
-export type WebviewPanel = Disposable & {
-  /** Sends a JSON-serialisable message to the page (`window.forge.onMessage`). */
-  postMessage(message: unknown): void;
-  /** Messages the page sent with `window.forge.postMessage`. */
-  onMessage(listener: (message: unknown) => void): Disposable;
-};
-
-const webviewListeners = new Map<string, Set<(message: unknown) => void>>();
-
-/** Called by the host when a page posts a message. */
-export function deliverWebviewMessage(id: string, json: string) {
-  const message = json ? JSON.parse(json) : undefined;
-  webviewListeners.get(id)?.forEach((l) => l(message));
-}
-
 export type PanelOptions = {
   id: string;
   title: string;
@@ -614,7 +641,7 @@ export function disposeOwned(extension: string) {
  * extension (to reload or uninstall it) takes it all away. `extension` is null for code
  * outside any extension.
  */
-export function forgeFor(extension: string | null, root: string | null = null) {
+export function forgeFor(extension: string | null) {
   const own = <D extends Disposable>(d: D): D => {
     if (extension) {
       let list = owned.get(extension);
@@ -631,32 +658,6 @@ export function forgeFor(extension: string | null, root: string | null = null) {
       return own({
         dispose: () => {
           unmountPanel(opts.id);
-          notify('panels.unregister', { id: opts.id });
-        },
-      });
-    },
-  },
-  webviews: {
-    /**
-     * A panel rendered by the system web view (WebKit on macOS) instead of native GPUI
-     * elements: use it for UIs that need the DOM (charts, rich editors, existing web apps).
-     * Theme colours are available as CSS variables (--forge-bg, --forge-fg, --forge-muted,
-     * --forge-accent, --forge-border, --forge-surface).
-     */
-    register(opts: WebviewOptions): WebviewPanel {
-      const folder = opts.root ?? root ?? activating;
-      if (!folder) throw new Error('forge.webviews.register: call it during activate() or pass `root`');
-      notify('webviews.register', { id: opts.id, title: opts.title, icon: opts.icon ?? 'globe', html: opts.html, root: folder, extension });
-      const listeners = new Set<(message: unknown) => void>();
-      webviewListeners.set(opts.id, listeners);
-      return own({
-        postMessage: (message: unknown) => notify('webviews.postMessage', { id: opts.id, message }),
-        onMessage: (listener) => {
-          listeners.add(listener);
-          return { dispose: () => listeners.delete(listener) };
-        },
-        dispose: () => {
-          webviewListeners.delete(opts.id);
           notify('panels.unregister', { id: opts.id });
         },
       });

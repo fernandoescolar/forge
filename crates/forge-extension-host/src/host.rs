@@ -23,8 +23,6 @@ pub struct PanelInfo {
     pub id: String,
     pub title: String,
     pub icon: String,
-    /// Set for webview panels (rendered by the system web view instead of GPUI).
-    pub webview: Option<crate::webview::WebviewSource>,
     /// The panel's root fills it (the extension scrolls what needs it) instead of scrolling.
     pub fill: bool,
     /// The extension that registered it.
@@ -74,8 +72,6 @@ impl Origin {
 pub enum HostEvent {
     /// Panels, commands or a tree changed; panels re-render.
     Changed,
-    /// An extension posted `json` to its webview panel `panel`.
-    WebviewMessage { panel: String, json: String },
     /// Extension panel `panel` should be the visible tab of its slot.
     Reveal { panel: String },
 }
@@ -261,12 +257,6 @@ impl ExtensionHost {
         self.js.send(ToJs::Dispatch { node, event: event.to_string(), payload });
     }
 
-    /// A webview page posted a message to its extension.
-    pub fn page_message(&self, panel: String, json: String) {
-        log::debug!("webview {panel} → extension: {json}");
-        self.js.send(ToJs::WebviewMessage { panel, json });
-    }
-
     fn registered(&self) -> Vec<String> {
         self.panels.iter().map(|p| p.id.clone()).collect()
     }
@@ -443,32 +433,10 @@ impl ExtensionHost {
                     id: str_arg("id").unwrap_or_default(),
                     title: str_arg("title").unwrap_or_default(),
                     icon: str_arg("icon").unwrap_or_else(|| "sparkle".into()),
-                    webview: None,
                     fill: str_arg("layout").as_deref() == Some("fill"),
                     extension: str_arg("extension"),
                 };
                 self.add_panel(info, cx);
-                self.reply(id, Ok(Value::Null));
-            }
-            "webviews.register" => {
-                let (Some(root), Some(html)) = (str_arg("root"), str_arg("html")) else {
-                    return self.reply(id, Err(anyhow!("webviews.register needs `root` and `html`")));
-                };
-                let info = PanelInfo {
-                    id: str_arg("id").unwrap_or_default(),
-                    title: str_arg("title").unwrap_or_default(),
-                    icon: str_arg("icon").unwrap_or_else(|| "globe".into()),
-                    webview: Some(crate::webview::WebviewSource { root: root.into(), html }),
-                    fill: false,
-                    extension: str_arg("extension"),
-                };
-                self.add_panel(info, cx);
-                self.reply(id, Ok(Value::Null));
-            }
-            "webviews.postMessage" => {
-                let panel = str_arg("id").unwrap_or_default();
-                let json = args.get("message").cloned().unwrap_or(Value::Null).to_string();
-                cx.emit(HostEvent::WebviewMessage { panel, json });
                 self.reply(id, Ok(Value::Null));
             }
             "panels.unregister" => {

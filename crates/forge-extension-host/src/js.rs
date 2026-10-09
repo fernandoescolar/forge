@@ -33,8 +33,6 @@ pub enum ToJs {
     RunCommand { id: String },
     /// An agent called an extension's tool; it answers with `agents.toolResult` and `call`.
     RunTool { call: u64, extension: String, tool: String, args: String, context: String },
-    /// A webview page posted a message to its extension.
-    WebviewMessage { panel: String, json: String },
     /// An extension setting changed (`json` is its new value, `null` once reset).
     SettingChanged { key: String, json: String },
     /// Something an extension listens to happened (`api::ACTIVE_FILE_CHANGED`, …).
@@ -189,7 +187,6 @@ impl JsThread {
             ToJs::Resolve { call, ok, json } => self.call_forge("resolve", (call as f64, ok, json)),
             ToJs::RunCommand { id } => self.call_forge("runCommand", (id,)),
             ToJs::RunTool { call, extension, tool, args, context } => self.call_forge("runTool", (call as f64, extension, tool, args, context)),
-            ToJs::WebviewMessage { panel, json } => self.call_forge("webviewMessage", (panel, json)),
             ToJs::SettingChanged { key, json } => self.call_forge("settingChanged", (key, json)),
             ToJs::Event { name, json } => self.call_forge("event", (name, json)),
         }

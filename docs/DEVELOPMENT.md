@@ -63,7 +63,7 @@ crates/
   ide-api                contracts between the ACP runtime and its host
 packages/forge-api/      @forge-ide/api: reconciler, components, runtime, the forge-ext tool
 packages/agy-acp/        @forge-ide/agy-acp: an ACP adapter for Google Antigravity's agy CLI
-extensions/              workspace-notes and webview-demo (examples), db-explorer and containers (ship with Forge)
+extensions/              workspace-notes (example), db-explorer and containers (ship with Forge)
 patches/zed/             Forge's changes to Zed, applied by scripts/apply-zed-patches.sh
 patches/tree-sitter-c-sharp/  Forge's change to the C# grammar (file-based apps' `#:` lines)
 scripts/                 patches, packaging (bundle-macos.sh), the installer (install.sh), icon

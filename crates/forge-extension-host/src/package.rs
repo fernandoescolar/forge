@@ -1,5 +1,5 @@
 //! Extension packages: a `.forgeext` file is a zip of a built extension, with what it needs
-//! at run time and nothing else: `package.json`, `dist/`, its web view pages and assets, and
+//! at run time and nothing else: `package.json`, `dist/`, its assets, and
 //! its sidecars (programs it starts with `forge.process.spawn({ sidecar })`), one build per
 //! platform under `bin/<platform>/` (`darwin-arm64`, `darwin-x64`, `linux-x64`, `win32-x64`…).
 //!
@@ -21,7 +21,7 @@ use crate::process::{platform, sidecar_path};
 pub const EXTENSION: &str = "forgeext";
 
 /// What a package holds when `package.json` doesn't say (`forge.files`).
-pub const DEFAULT_FILES: &[&str] = &["package.json", "dist", "webview", "assets", "media", "bin", "README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"];
+pub const DEFAULT_FILES: &[&str] = &["package.json", "dist", "assets", "media", "bin", "README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"];
 
 /// Never packed, wherever they are.
 const SKIPPED: &[&str] = &["node_modules", ".git", ".DS_Store"];

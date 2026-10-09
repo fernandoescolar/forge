@@ -9,12 +9,12 @@
 mod agent_tools;
 pub mod js;
 pub mod tree;
-pub mod webview;
 
 /// React, the reconciler and the API, bundled by build.rs.
 pub const RUNTIME_JS: &str = include_str!("../../../packages/forge-api/dist/runtime.js");
 
 pub mod api;
+mod chart;
 pub mod commands;
 pub mod install;
 pub mod host;

@@ -31,8 +31,8 @@ g.__forge = {
   modules: { react: React, 'react/jsx-runtime': JsxRuntime, ...Object.fromEntries(API_MODULES.map((name) => [name, Api])) } as Record<string, unknown>,
 
   /** Before an extension's bundle runs: its imports of the API get its own `forge`. */
-  prepare(id: string, path: string) {
-    provideApi({ ...Api, forge: Api.forgeFor(id, path) });
+  prepare(id: string) {
+    provideApi({ ...Api, forge: Api.forgeFor(id) });
   },
 
   /** Activates the bundle just evaluated (it assigned `globalThis.__forgeExtension`). */
@@ -42,14 +42,12 @@ g.__forge = {
     const ctx = Api.createContext(id, path);
     contexts.set(id, ctx);
     (g.__forgeExtensions ??= {})[id] = ext;
-    Api.setActivating(path);
     try {
       const r = ext.activate?.(ctx);
       if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch((e) => console.error(`activate ${id}:`, e));
     } catch (e) {
       console.error(`activate ${id}:`, e);
     } finally {
-      Api.setActivating(null);
       provideApi(Api);
     }
   },
@@ -71,7 +69,6 @@ g.__forge = {
     dispatchEvent(id, event, payloadJson ? JSON.parse(payloadJson) : undefined);
   },
   resolve: Api.resolveCall,
-  webviewMessage: Api.deliverWebviewMessage,
   settingChanged: Api.deliverSettingChanged,
   event: Api.deliverEvent,
   runCommand: Api.runCommand,

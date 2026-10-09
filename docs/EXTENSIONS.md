@@ -1,13 +1,12 @@
 # Writing Forge extensions
 
-Forge extensions are written in TypeScript with React, and Forge draws them with its own native UI: no web view, no DOM, no CSS. An extension can add panels, tabs in the editor area, commands and settings. It can also read and change the code in the active editor, run programs (including ones it ships, called *sidecars*) and keep data and secrets. When an extension needs the DOM (a chart library, an existing web app), it can open a web view panel instead.
+Forge extensions are written in TypeScript with React, and Forge draws them with its own native UI: no web view, no DOM, no CSS. An extension can add panels, tabs in the editor area, commands and settings. It can also read and change the code in the active editor, run programs (including ones it ships, called *sidecars*) and keep data and secrets.
 
-This guide goes from an empty folder to a packaged extension, then covers the components and the API. Four complete extensions live in this repository's `extensions/` folder:
+This guide goes from an empty folder to a packaged extension, then covers the components and the API. Three complete extensions live in this repository's `extensions/` folder:
 
 | Example | What it shows |
 | --- | --- |
 | `workspace-notes` | A native panel with state, settings and the workspace API: the place to start |
-| `webview-demo` | A web view panel exchanging messages with its extension |
 | `db-explorer` | Database Explorer, which ships with Forge: a tree, tabs in the editor area, an editable data grid, a Rust sidecar, keychain secrets and dialogs |
 | `containers` | Containers, which ships with Forge: a tree kept current by a long-running process (`docker events`), commands in Forge terminals, and agent tools |
 
@@ -15,7 +14,7 @@ This guide goes from an empty folder to a packaged extension, then covers the co
 - [The manifest](#the-manifest)
 - [Activation and the context](#activation-and-the-context)
 - [Components](#components)
-- [Panels, tabs, commands and web views](#panels-tabs-commands-and-web-views)
+- [Panels, tabs and commands](#panels-tabs-and-commands)
 - [Working with the editor and the workspace](#working-with-the-editor-and-the-workspace)
 - [Programs and sidecars](#programs-and-sidecars)
 - [Settings, storage and secrets](#settings-storage-and-secrets)
@@ -169,6 +168,9 @@ Components are React elements that Forge draws natively, with the active theme's
 | `TreeItem` | One row of a tree: `label`, `description`, `icon`, `iconColor`, `depth`, `expanded` (shows the disclosure arrow), `selected`, `loading`, `onToggle`, `onClick`, `onDoubleClick`. You render the visible rows in order. |
 | `Tabs` | A tab bar: `tabs` (`{ id, label, icon?, closable? }`), `active`, `onSelect`, `onClose` |
 | `DataGrid` | A table (see below) |
+| `Markdown` | `text`, rendered like agents' answers: headings, lists, tables, links (open in the browser), highlighted code blocks. `style.mono` uses the editor's font |
+| `Image` | `src`: an absolute path (`${ctx.path}/media/logo.png` for your own files), an `http(s)://` URL or a `data:image/…;base64,…` URI; `alt`, `fit` (`contain`, `cover`, `fill`, `none`). Size it with `style.width` / `style.height`, else it is as wide as its parent and `height` tall (160) |
+| `Chart` | `kind` (`bar`, `line`, `area`), `labels`, `series` (`{ name, values, color? }`; `null` values leave gaps), `height` (180), `legend`, `onClick({ index, label })` (see below) |
 
 **Style.** Every component takes `style`:
 
@@ -211,7 +213,21 @@ Give it room with `style: { grow: true }`.
 />
 ```
 
-## Panels, tabs, commands and web views
+**Chart** draws one or more series over labelled points with the theme's colours, natively: a value axis that always includes zero, the labels along the bottom, a legend when there are several series, and the values of the point under the mouse. Bars of several series stand side by side.
+
+```tsx
+<Chart
+  kind="line"
+  labels={['Mon', 'Tue', 'Wed', 'Thu', 'Fri']}
+  series={[
+    { name: 'Passed', values: [120, 132, 128, null, 140], color: 'success' },
+    { name: 'Failed', values: [3, 1, 6, null, 0], color: 'error' },
+  ]}
+  onClick={({ label }) => showRunsOf(label)}
+/>
+```
+
+## Panels, tabs and commands
 
 **Panels** sit in the docks. Users drag them to any side, group them with other panels, and find them under View › Panels.
 
@@ -245,23 +261,7 @@ forge.commands.register('hello.greet', 'Say Hello', () => forge.window.showMessa
 { "bindings": { "cmd-alt-h": ["forge_extensions::RunCommand", { "id": "hello.greet" }] } }
 ```
 
-**Web view panels** run a page in the system web view (WebKit). It's served from your extension's folder over `forge-ext://`, gets the theme as CSS variables (`--forge-bg`, `--forge-fg`, `--forge-muted`, `--forge-accent`, `--forge-border`, `--forge-surface`), and talks to the extension in messages:
-
-```ts
-// extension
-const panel = forge.webviews.register({ id: 'demo', title: 'Demo', icon: 'globe', html: 'webview/index.html' });
-panel.onMessage((m) => panel.postMessage({ echo: m }));
-```
-
-```html
-<!-- webview/index.html -->
-<script>
-  window.forge.onMessage((m) => console.log(m));
-  window.forge.postMessage({ hello: true });
-</script>
-```
-
-The web view is a native view on top of the panel, so Forge popovers that overlap the panel draw underneath it. During development, `FORGE_EXTENSIONS_PANEL=<panel id>` opens the Extensions panel on that tab at startup. `extensions/webview-demo` is the complete example.
+During development, `FORGE_EXTENSIONS_PANEL=<panel id>` opens the Extensions panel on that tab at startup.
 
 ## Working with the editor and the workspace
 
@@ -409,7 +409,7 @@ The Database Explorer (`extensions/db-explorer/src/agentTools.ts`) offers agents
 
 ## Packaging and sharing
 
-A `.forgeext` file is a zip of what an extension needs at run time: `package.json`, `dist/`, its web view pages and assets, and its sidecars for every platform they were built for. Sources and `node_modules` stay out. By default a package takes `package.json`, `dist`, `webview`, `assets`, `media`, `bin`, `README.md`, `CHANGELOG.md`, `LICENSE` and `icon.png`; list `forge.files` in the manifest to choose yourself.
+A `.forgeext` file is a zip of what an extension needs at run time: `package.json`, `dist/`, its assets, and its sidecars for every platform they were built for. Sources and `node_modules` stay out. By default a package takes `package.json`, `dist`, `assets`, `media`, `bin`, `README.md`, `CHANGELOG.md`, `LICENSE` and `icon.png`; list `forge.files` in the manifest to choose yourself.
 
 ```bash
 npx forge-ext pack .          # → hello-0.1.0.forgeext
@@ -433,7 +433,6 @@ Extensions run with the user's rights: they can read files and run programs. Say
 | --- | --- |
 | `forge.panels` | `register({ id, title, icon, position, layout, render })` |
 | `forge.tabs` | `open({ id, title, icon, render, onClose })` → `{ setTitle, update, close }` |
-| `forge.webviews` | `register({ id, title, icon, html })` → `{ postMessage, onMessage }` |
 | `forge.commands` | `register(id, title, handler)` |
 | `forge.workspace` | `roots`, `readFile`, `openFile`, `activeFile`, `onDidChangeActiveFile`, `onDidSaveFile` |
 | `forge.editor` | `active`, `getText`, `edit`, `replaceSelections`, `select`, `setDecorations`, `onDidChangeSelection` |

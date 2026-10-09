@@ -161,10 +161,6 @@ pub struct ExtensionSlotView {
     active: Option<String>,
     /// The rendered surface of each extension panel shown here.
     surfaces: HashMap<String, Entity<Surface>>,
-    /// System web views of webview panels, created on first show.
-    webviews: HashMap<String, Rc<wry::WebView>>,
-    /// Messages from pages, forwarded to their extensions.
-    page_tx: futures::channel::mpsc::UnboundedSender<(String, String)>,
     _subscription: Subscription,
 }
 
@@ -178,32 +174,13 @@ impl ExtensionSlotView {
                 }
                 return;
             }
-            if let HostEvent::WebviewMessage { panel, json } = event {
-                if let Some(view) = this.webviews.get(panel) {
-                    log::debug!("extension → webview {panel}: {json}");
-                    crate::webview::post(view, json);
-                }
-                return;
-            }
             let tabs = host.read(cx).slot_panels(this.slot);
-            this.webviews.retain(|id, _| tabs.iter().any(|p| &p.id == id));
             this.surfaces.retain(|id, _| tabs.iter().any(|p| &p.id == id));
             if this.active.as_ref().is_none_or(|a| !tabs.iter().any(|p| &p.id == a)) {
                 this.active = tabs.first().map(|p| p.id.clone());
             }
             cx.notify();
         });
-        let (page_tx, mut page_rx) = futures::channel::mpsc::unbounded::<(String, String)>();
-        let host_for_pages = host.downgrade();
-        cx.spawn(async move |_, cx| {
-            use futures::StreamExt as _;
-            while let Some((panel, json)) = page_rx.next().await {
-                if host_for_pages.update(cx, |h, _| h.page_message(panel, json)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
         // Development aid: FORGE_EXTENSIONS_PANEL=<panel id> starts on that tab.
         let tabs = host.read(cx).slot_panels(slot);
         let wanted = std::env::var("FORGE_EXTENSIONS_PANEL").ok().filter(|w| tabs.iter().any(|p| &p.id == w));
@@ -215,8 +192,6 @@ impl ExtensionSlotView {
             panel_handle: None,
             active,
             surfaces: HashMap::new(),
-            webviews: HashMap::new(),
-            page_tx,
             _subscription: subscription,
         }
     }
@@ -313,49 +288,16 @@ impl ExtensionSlotView {
         )
         .into_any_element()
     }
-
-    /// Returns the web view to show for the active tab (creating it on first use) and hides
-    /// every other one.
-    fn active_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Rc<wry::WebView>> {
-        let source = self.active.as_ref().and_then(|a| self.host.read(cx).panels.iter().find(|p| &p.id == a)?.webview.clone());
-        let active = self.active.clone().filter(|_| source.is_some());
-        for (id, view) in &self.webviews {
-            if Some(id) != active.as_ref() {
-                let _ = view.set_visible(false);
-            }
-        }
-        let (id, source) = (active?, source?);
-        if !self.webviews.contains_key(&id) {
-            match crate::webview::create(&id, &source, self.page_tx.clone(), window, cx) {
-                Ok(view) => {
-                    log::info!("created webview for {id} ({})", source.html);
-                    self.webviews.insert(id.clone(), Rc::new(view));
-                }
-                Err(e) => {
-                    log::error!("webview {id}: {e}");
-                    return None;
-                }
-            }
-        }
-        self.webviews.get(&id).cloned()
-    }
-
-    fn hide_webviews(&self) {
-        for view in self.webviews.values() {
-            let _ = view.set_visible(false);
-        }
-    }
 }
 
 use gpui::prelude::FluentBuilder as _;
 
 impl Render for ExtensionSlotView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.tabs(cx);
         if self.active.as_ref().is_none_or(|a| !tabs.iter().any(|p| &p.id == a)) {
             self.active = tabs.first().map(|p| p.id.clone());
         }
-        let webview = self.active_webview(window, cx);
         let colors = cx.theme().colors().clone();
         let tab_bar = self.render_tab_bar(&tabs, cx);
 
@@ -375,12 +317,6 @@ impl Render for ExtensionSlotView {
             })
             .child(tab_bar);
 
-        if let Some(view) = webview {
-            // The system web view is drawn by the OS over whatever bounds GPUI gives this
-            // canvas; it is repositioned on every frame.
-            let content = gpui::canvas(|_, _, _| {}, move |bounds, _, _, _| crate::webview::set_bounds(&view, bounds)).size_full();
-            return base.child(div().flex_1().child(content)).into_any_element();
-        }
         let active = self.active.as_ref().and_then(|a| tabs.iter().find(|p| &p.id == a)).cloned();
         let content = match active {
             Some(panel) => self.surface(&panel, cx).into_any_element(),
@@ -473,11 +409,7 @@ impl<const N: usize> Panel for SlotPanel<N> {
     fn starts_open(&self, _: &Window, cx: &App) -> bool {
         std::env::var("FORGE_EXTENSIONS_PANEL").is_ok_and(|p| self.view.read(cx).tabs(cx).iter().any(|t| t.id == p))
     }
-    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
-        // Native web views don't disappear with the dock; hide them explicitly.
-        if !active {
-            self.view.read(cx).hide_webviews();
-        }
+    fn set_active(&mut self, _: bool, _: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
     }
 }

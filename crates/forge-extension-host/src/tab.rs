@@ -218,6 +218,82 @@ mod tests {
         wait("the extension to have it", cx, &|cx| shown(cx) == "value=x");
     }
 
+    /// Markdown, images and charts render natively; hovering a chart's point and clicking it
+    /// tells the extension which point.
+    #[gpui::test]
+    async fn markdown_images_and_charts(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            crate::init_for_tests(cx);
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext-media");
+        std::fs::create_dir_all(ext.join("dist")).unwrap();
+        std::fs::write(ext.join("package.json"), r#"{"name":"ext-media","forge":{}}"#).unwrap();
+        let code = r#"var __forgeExtension = { activate(ctx) {
+            const api = __forge.modules['@forge-ide/api'];
+            const f = api.forge;
+            const R = __forge.modules.react;
+            const h = R.createElement;
+            const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+            function Report() {
+                const [clicked, setClicked] = R.useState('none');
+                return h(api.View, {},
+                    h(api.Markdown, { text: '# Report\n\n| a | b |\n|---|---|\n| 1 | 2 |' }),
+                    h(api.Image, { src: PNG, alt: 'Pixel', style: { width: 32, height: 32 } }),
+                    h(api.Chart, { labels: ['Mon', 'Tue'], series: [{ name: 'Builds', values: [3, 5] }, { name: 'Fails', values: [1, null] }], onClick: (p) => setClicked(p.label) }),
+                    h(api.Text, {}, 'clicked=' + clicked));
+            }
+            f.commands.register('open', 'Open', () => f.tabs.open({ id: 'ext-media.report', title: 'Report', render: () => h(Report) }));
+            f.commands.register('ready', 'Ready', () => {});
+        } };"#;
+        std::fs::write(ext.join("dist/extension.js"), code).unwrap();
+        let host = cx.update(|cx| ExtensionHost::init(vec![tmp.path().to_path_buf()], cx)).unwrap();
+        params.fs.as_fake().insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let weak = workspace.downgrade();
+        cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+        let wait = |what: &str, cx: &mut gpui::VisualTestContext, f: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !f(cx) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait("the extension", cx, &|cx| host.read_with(cx, |h, _| h.commands.iter().any(|c| c.id == "ready")));
+        host.read_with(cx, |h, _| h.run_command("open"));
+        let surface = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |ws, cx| ws.items_of_type::<ExtensionTab>(cx).next().map(|t| t.read(cx).surface().clone()));
+        wait("the report drawn", cx, &|cx| surface(cx).is_some_and(|s| s.read_with(cx, |s, cx| !s.media(cx).2.is_empty())));
+        let surface = surface(cx).unwrap();
+        let (markdowns, images, charts) = surface.read_with(cx, |s, cx| s.media(cx));
+        assert_eq!(markdowns, ["# Report\n\n| a | b |\n|---|---|\n| 1 | 2 |"]);
+        assert_eq!(images, [true], "the data: image decoded");
+        let plot = charts[0];
+        assert!(plot.size.width > gpui::px(0.) && plot.size.height == gpui::px(180.), "{plot:?}");
+
+        // Over the second point, a click says which.
+        let over_tuesday = plot.origin + gpui::point(plot.size.width * 0.75, plot.size.height / 2.);
+        cx.simulate_mouse_move(over_tuesday, None, gpui::Modifiers::none());
+        cx.simulate_click(over_tuesday, gpui::Modifiers::none());
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            host.read_with(cx, |h, _| {
+                h.trees
+                    .get("ext-media.report")
+                    .map(|t| crate::surface::collect(t, |n| matches!(&n.kind, crate::tree::NodeKind::Element { kind, .. } if kind == "text")).into_iter().map(|id| crate::surface::text_content(t, id)).collect::<String>())
+                    .unwrap_or_default()
+            })
+        };
+        wait("the click", cx, &|cx| shown(cx) == "clicked=Tue");
+    }
+
     /// An input with a `language` highlights its text as that language.
     #[gpui::test]
     async fn inputs_highlight_their_language(cx: &mut gpui::TestAppContext) {

@@ -57,7 +57,7 @@ const options = {
 // ------------------------------------------------------------------------------- packing
 
 function pack() {
-  const defaults = ['package.json', 'dist', 'webview', 'assets', 'media', 'bin', 'README.md', 'CHANGELOG.md', 'LICENSE', 'LICENSE.md', 'icon.png'];
+  const defaults = ['package.json', 'dist', 'assets', 'media', 'bin', 'README.md', 'CHANGELOG.md', 'LICENSE', 'LICENSE.md', 'icon.png'];
   const skipped = new Set(['node_modules', '.git', '.DS_Store']);
   const main = pkg.forge?.main ?? 'dist/extension.js';
   const roots = [...new Set([...(pkg.forge?.files ?? defaults).map((f) => f.replace(/^\.\//, '').replace(/\/$/, '')), 'package.json', main])].sort();

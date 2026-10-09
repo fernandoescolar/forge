@@ -11,6 +11,7 @@ forge-ui = { path = "../forge-ui" }
 settings = { path = "../../vendor/zed/crates/settings" }
 db = { path = "../../vendor/zed/crates/db" }
 anyhow.workspace = true
+base64 = "0.22"
 async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
 command_palette_hooks = { path = "../../vendor/zed/crates/command_palette_hooks" }
 editor = { path = "../../vendor/zed/crates/editor" }
@@ -20,6 +21,7 @@ fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 language = { path = "../../vendor/zed/crates/language" }
 log = "0.4"
+markdown = { path = "../../vendor/zed/crates/markdown" }
 menu = { path = "../../vendor/zed/crates/menu" }
 paths = { path = "../../vendor/zed/crates/paths" }
 project = { path = "../../vendor/zed/crates/project" }
@@ -33,7 +35,6 @@ task = { path = "../../vendor/zed/crates/task" }
 text = { path = "../../vendor/zed/crates/text" }
 theme = { path = "../../vendor/zed/crates/theme" }
 ui = { path = "../../vendor/zed/crates/ui" }
-wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 util = { path = "../../vendor/zed/crates/util" }
 workspace = { path = "../../vendor/zed/crates/workspace" }
 

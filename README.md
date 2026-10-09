@@ -21,7 +21,7 @@ Forge is a native, GPU-rendered code editor that makes the decisions for you. Op
 
 ## For developers who extend it
 
-- **Extensions in TypeScript and React, rendered natively.** No web view and no DOM: your components become GPUI elements, from simple panels to a virtualized, editable data grid. Web view panels are there when you do need the DOM.
+- **Extensions in TypeScript and React, rendered natively.** No web view and no DOM: your components become GPUI elements, from simple panels to a virtualized, editable data grid, Markdown, images and charts.
 - **A real API.** The workspace, the active editor (edits, selections, decorations), events, processes and bundled *sidecar* programs, terminals, settings, storage, keychain secrets, native dialogs, and tabs in the editor area.
 - **Shareable.** An extension packs into a `.forgeext` file and installs, reloads and uninstalls without restarting Forge.
 

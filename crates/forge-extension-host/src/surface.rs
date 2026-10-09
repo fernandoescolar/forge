@@ -3,8 +3,9 @@
 //!
 //! Host components (see packages/forge-api/src/index.ts): `view`, `scroll`, `text`,
 //! `button`, `input` (single line, multi-line, password), `checkbox`, `icon`, `divider`,
-//! `spinner`, `select`, `treeItem` and `grid` (a virtualized data table with resizable
-//! columns, selection and cell editing). Any element can carry a `contextMenu`.
+//! `spinner`, `select`, `treeItem`, `grid` (a virtualized data table with resizable
+//! columns, selection and cell editing), `markdown`, `image` and `chart` (chart.rs). Any
+//! element can carry a `contextMenu`.
 
 use crate::{
     host::ExtensionHost,
@@ -24,6 +25,9 @@ use std::{
     rc::Rc,
     str::FromStr as _,
 };
+use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
+use gpui::StyledImage as _;
+use std::sync::Arc;
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle, Checkbox, Clickable as _, Color, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, Disableable as _, Divider, Icon, IconName, IconSize,
@@ -86,7 +90,7 @@ struct OpenMenu {
 }
 
 pub struct Surface {
-    host: Entity<ExtensionHost>,
+    pub(crate) host: Entity<ExtensionHost>,
     /// The panel or tab id whose tree this renders.
     pub panel: String,
     /// The root fills the surface (the extension handles scrolling) instead of scrolling.
@@ -94,6 +98,13 @@ pub struct Surface {
     focus_handle: FocusHandle,
     inputs: HashMap<NodeId, InputState>,
     grids: HashMap<NodeId, GridState>,
+    /// The rendered Markdown of `markdown` nodes, and the text it was made from.
+    markdowns: HashMap<NodeId, (String, Entity<Markdown>)>,
+    /// `image` nodes whose source is a `data:` URI, decoded (with that URI).
+    images: HashMap<NodeId, (String, Option<Arc<gpui::Image>>)>,
+    /// The point under the mouse in each chart, and where each chart's plot was painted.
+    pub(crate) chart_hover: RefCell<HashMap<NodeId, usize>>,
+    pub(crate) chart_bounds: Rc<RefCell<HashMap<NodeId, gpui::Bounds<Pixels>>>>,
     menu: Option<OpenMenu>,
     _subscription: Subscription,
 }
@@ -101,7 +112,20 @@ pub struct Surface {
 impl Surface {
     pub fn new(host: Entity<ExtensionHost>, panel: String, fill: bool, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&host, |_, _, cx| cx.notify());
-        Self { host, panel, fill, focus_handle: cx.focus_handle(), inputs: HashMap::new(), grids: HashMap::new(), menu: None, _subscription: subscription }
+        Self {
+            host,
+            panel,
+            fill,
+            focus_handle: cx.focus_handle(),
+            inputs: HashMap::new(),
+            grids: HashMap::new(),
+            markdowns: HashMap::new(),
+            images: HashMap::new(),
+            chart_hover: RefCell::default(),
+            chart_bounds: Rc::default(),
+            menu: None,
+            _subscription: subscription,
+        }
     }
 
     /// The editors behind the inputs, in the order of their nodes.
@@ -110,6 +134,15 @@ impl Surface {
         let mut inputs: Vec<_> = self.inputs.iter().collect();
         inputs.sort_by_key(|(id, _)| **id);
         inputs.into_iter().map(|(_, i)| i.editor.clone()).collect()
+    }
+
+    /// The text of each `markdown` node's rendered Markdown, whether each `data:` image
+    /// decoded, and where each chart's plot was painted.
+    #[cfg(test)]
+    pub(crate) fn media(&self, cx: &App) -> (Vec<String>, Vec<bool>, Vec<gpui::Bounds<Pixels>>) {
+        let markdowns = self.markdowns.values().map(|(_, m)| m.read(cx).source().to_string()).collect();
+        let images = self.images.values().map(|(_, image)| image.is_some()).collect();
+        (markdowns, images, self.chart_bounds.borrow().values().copied().collect())
     }
 
     /// The language each input's text is highlighted as, by input.
@@ -122,8 +155,10 @@ impl Surface {
         self.host.read(cx).trees.get(&self.panel)
     }
 
-    /// Creates or updates the entities behind `input` and `grid` nodes before rendering.
+    /// Creates or updates the entities behind `input`, `grid` and `markdown` nodes (and
+    /// decodes `data:` images) before rendering.
     pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_media(cx);
         let (inputs, grids) = {
             let Some(tree) = self.tree(cx) else { return };
             let inputs: Vec<(NodeId, String, String, bool, bool, bool, Option<String>)> = collect(tree, |n| is(n, "input"))
@@ -245,6 +280,85 @@ impl Surface {
         }
     }
 
+    fn sync_media(&mut self, cx: &mut Context<Self>) {
+        let (markdowns, images) = {
+            let Some(tree) = self.tree(cx) else { return };
+            let markdowns: Vec<(NodeId, String)> = collect(tree, |n| is(n, "markdown")).into_iter().map(|id| (id, tree.get(id).unwrap().str_prop("text").unwrap_or_default().to_string())).collect();
+            let images: Vec<(NodeId, String)> = collect(tree, |n| is(n, "image"))
+                .into_iter()
+                .filter_map(|id| Some((id, tree.get(id).unwrap().str_prop("src")?.to_string())))
+                .filter(|(_, src)| src.starts_with("data:"))
+                .collect();
+            (markdowns, images)
+        };
+        self.markdowns.retain(|id, _| markdowns.iter().any(|(m, _)| m == id));
+        let languages = self.host.read(cx).workspace().map(|ws| ws.read(cx).app_state().languages.clone());
+        for (id, text) in markdowns {
+            match self.markdowns.get_mut(&id) {
+                Some((known, markdown)) if *known != text => {
+                    *known = text.clone();
+                    markdown.update(cx, |m, cx| m.reset(text.into(), cx));
+                }
+                Some(_) => {}
+                None => {
+                    let markdown = cx.new(|cx| Markdown::new(text.clone().into(), languages.clone(), None, cx));
+                    self.markdowns.insert(id, (text, markdown));
+                }
+            }
+        }
+        self.images.retain(|id, _| images.iter().any(|(i, _)| i == id));
+        for (id, src) in images {
+            if self.images.get(&id).is_none_or(|(known, _)| *known != src) {
+                let image = decode_data_uri(&src).map(Arc::new);
+                if image.is_none() {
+                    log::warn!("extension image {id}: not a base64 data: URI of a known image type");
+                }
+                self.images.insert(id, (src, image));
+            }
+        }
+    }
+
+    fn render_markdown(&self, id: NodeId, style: &Value, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let Some((_, markdown)) = self.markdowns.get(&id) else { return div().into_any_element() };
+        let font = if style.get("mono").and_then(Value::as_bool) == Some(true) { MarkdownFont::Editor } else { MarkdownFont::Agent };
+        styled(div().min_w_0(), style, cx).child(MarkdownElement::new(markdown.clone(), MarkdownStyle::themed(font, window, cx))).into_any_element()
+    }
+
+    fn render_image(&self, node: &Node, id: NodeId, style: &Value, cx: &Context<Self>) -> AnyElement {
+        let src = node.str_prop("src").unwrap_or_default();
+        let alt = node.str_prop("alt").map(str::to_string);
+        let source: Option<gpui::ImageSource> = if src.starts_with("data:") {
+            self.images.get(&id).and_then(|(_, image)| image.clone()).map(Into::into)
+        } else if src.starts_with("http://") || src.starts_with("https://") {
+            Some(SharedString::from(src.to_string()).into())
+        } else if std::path::Path::new(src).is_absolute() {
+            Some(std::path::PathBuf::from(src).into())
+        } else {
+            None
+        };
+        let fit = match node.str_prop("fit") {
+            Some("cover") => gpui::ObjectFit::Cover,
+            Some("fill") => gpui::ObjectFit::Fill,
+            Some("none") => gpui::ObjectFit::None,
+            _ => gpui::ObjectFit::Contain,
+        };
+        let fallback_text = alt.clone().unwrap_or_else(|| "Image not found".into());
+        let element = match source {
+            Some(source) => gpui::img(source)
+                .object_fit(fit)
+                .size_full()
+                .with_fallback(move || Label::new(fallback_text.clone()).size(LabelSize::Small).color(Color::Muted).into_any_element())
+                .into_any_element(),
+            None => Label::new(fallback_text).size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        };
+        let mut container = styled(div().id(self.element_id(id)), style, cx);
+        // Without a size the image takes its own; with one it fits in it.
+        if style.get("width").is_none() && style.get("height").is_none() {
+            container = container.w_full().h(px(node.prop("height").and_then(Value::as_f64).unwrap_or(160.) as f32));
+        }
+        container.when_some(alt, |el, alt| el.tooltip(Tooltip::text(alt))).child(element).into_any_element()
+    }
+
     fn render_node(&self, tree: &Tree, id: NodeId, window: &Window, cx: &Context<Self>) -> AnyElement {
         let Some(node) = tree.get(id) else { return div().into_any_element() };
         let kind = match &node.kind {
@@ -339,6 +453,9 @@ impl Surface {
             "select" => self.render_select(node, id, eid, cx),
             "treeItem" => self.render_tree_item(node, id, eid, cx),
             "grid" => self.render_grid(node, id, &style, cx),
+            "markdown" => self.render_markdown(id, &style, window, cx),
+            "image" => self.render_image(node, id, &style, cx),
+            "chart" => self.render_chart(node, id, eid, &style, cx),
             // "view", "scroll" and anything unknown render as a flex container.
             _ => {
                 let mut el = styled(div().id(eid), &style, cx).children(children());
@@ -897,7 +1014,7 @@ fn label_color(token: &str) -> Color {
     }
 }
 
-fn token_color(token: &str, cx: &App) -> Option<Hsla> {
+pub(crate) fn token_color(token: &str, cx: &App) -> Option<Hsla> {
     let c = cx.theme().colors();
     let s = cx.theme().status();
     Some(match token {
@@ -1009,4 +1126,14 @@ pub(crate) fn styled<E: gpui::Styled>(el: E, style: &Value, cx: &App) -> E {
         el = el.rounded_md();
     }
     el
+}
+
+/// A `data:image/<type>;base64,…` URI's image.
+fn decode_data_uri(uri: &str) -> Option<gpui::Image> {
+    use base64::Engine as _;
+    let (header, data) = uri.strip_prefix("data:")?.split_once(',')?;
+    let mime = header.strip_suffix(";base64")?;
+    let format = gpui::ImageFormat::from_mime_type(mime)?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).ok()?;
+    Some(gpui::Image::from_bytes(format, bytes))
 }
