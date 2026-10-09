@@ -17,6 +17,12 @@ pub fn default_instructions_files() -> Vec<String> {
     vec![".forge/AGENTS.md".into(), "AGENTS.md".into()]
 }
 
+/// The files listing what agents don't get (see `agent_ignore`): a name with a folder in it is
+/// the project's, relative to its root; a bare name counts in every folder, like `.gitignore`.
+pub fn default_agent_ignore_files() -> Vec<String> {
+    vec![".forge/agentignore".into(), ".agentignore".into()]
+}
+
 /// An MCP server offered to every agent session (ACP `McpServer`, stdio transport).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -59,6 +65,9 @@ pub struct AgentsConfig {
     /// The project's instructions files, relative to its root, in order (see `rules`).
     #[serde(default = "default_instructions_files")]
     pub instructions_files: Vec<String>,
+    /// The files listing what agents don't get (see `default_agent_ignore_files`).
+    #[serde(default = "default_agent_ignore_files")]
+    pub agent_ignore_files: Vec<String>,
 }
 
 impl AgentsConfig {
@@ -88,6 +97,7 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
         "verify_changes": saved.verify_changes,
         "permissions": saved.permissions,
         "instructions_files": saved.instructions_files,
+        "agent_ignore_files": saved.agent_ignore_files,
         "mcp_servers": saved.mcp_servers,
         "agents": saved.agents,
     }))
@@ -103,6 +113,8 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
          // prefixes that never ask; \"files_outside_workspace\"). \"mcp_servers\": MCP servers\n\
          // every agent session gets. \"instructions_files\": the project's instructions for agents,\n\
          // relative to its root (every one found is sent; agents' notes go to the first found).\n\
+         // \"agent_ignore_files\": files listing what agents don't get, in .gitignore's syntax (a\n\
+         // name with a folder is relative to the root; a bare name counts in every folder).\n\
          // Forge > Settings > Agents edits this file too.\n{body}\n"
     )
 }
@@ -147,6 +159,7 @@ pub fn load() -> Result<AgentsConfig> {
 pub fn parse(text: &str) -> Result<AgentsConfig> {
     let mut config: AgentsConfig = serde_json_lenient::from_str(text)?;
     migrate(&mut config.agents);
+    crate::agent_ignore::set_files(config.agent_ignore_files.clone());
     Ok(config)
 }
 

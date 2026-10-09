@@ -89,6 +89,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
                 }
             },
             "instructions_files": { "type": "array", "title": "Project instructions files", "description": "The project's instructions for agents, relative to its root, sent with every new session's first message (all that exist). Agents' notes go to the first that exists." },
+            "agent_ignore_files": { "type": "array", "title": "Files agents don't get", "description": "Files listing what agents may not read or change, in .gitignore's syntax. A name with a folder (`.forge/agentignore`) is relative to the project's root; a bare name (`.agentignore`) counts in every folder, for the files below it." },
             "mcp_servers": { "type": "array", "title": "MCP servers", "description": "Tool servers every agent session gets: name, command, args and env." },
             "agents": { "type": "array", "title": "Agents", "description": "The ACP agents threads can talk to. Manage agents adds them from a list." }
         }
@@ -98,6 +99,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
         "review_writes": true,
         "verify_changes": true,
         "instructions_files": crate::config::default_instructions_files(),
+        "agent_ignore_files": crate::config::default_agent_ignore_files(),
         "permissions": { "mode": serde_json::to_value(PermissionMode::default()).unwrap_or_default(), "files_outside_workspace": false },
     });
     forge_ui::settings_registry::SettingsPage {
@@ -114,6 +116,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
 
 /// Settings that never touch the user's files (tests, embedders).
 pub fn set_in_memory(config: AgentsConfig, history_dir: PathBuf, cx: &mut App) {
+    crate::agent_ignore::set_files(config.agent_ignore_files.clone());
     let settings = cx.new(|_| AgentSettings { config, error: None, history_dir, persist: false });
     cx.set_global(GlobalAgentSettings(settings));
 }
@@ -127,7 +130,7 @@ pub fn global(cx: &App) -> Entity<AgentSettings> {
 }
 
 fn empty() -> AgentsConfig {
-    AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], permissions: Default::default() }
+    AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], permissions: Default::default() }
 }
 
 impl AgentSettings {

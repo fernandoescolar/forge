@@ -19,7 +19,7 @@ use futures::{
 };
 use gpui::{AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, Focusable as _, WeakEntity, Window};
 use gpui_tokio::Tokio;
-use ide_api::{AgentEvent, AgentService as _, AgentSpec, IdeEvent, PermissionOutcome, TerminalRequest};
+use ide_api::{AgentEvent, AgentService as _, AgentSpec, IdeEvent, PermissionOutcome, TerminalRequest, TerminalHost as _};
 use language::LanguageRegistry;
 use markdown::Markdown;
 use project::Project;
@@ -95,6 +95,9 @@ pub(crate) enum Entry {
     /// Settings or key bindings the agent wants to change (`change_settings`,
     /// `change_keybinding`), for the user to apply or discard.
     Config { changes: Vec<crate::configure::ConfigChange>, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// A command the agent runs with `run_command`: in a terminal of Forge's, embedded here,
+    /// whose output the user watches as it comes. `terminal` once it started; `exit` once done.
+    Command { command: String, cwd: PathBuf, timeout: std::time::Duration, state: crate::forge_tools::EditState, terminal: Option<String>, exit: Option<String>, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
     /// Sign-in card: the agent's login methods, run without leaving Forge.
     Auth { methods: Vec<AuthMethod>, terminal: Option<Entity<TerminalView>>, state: AuthState },
 }
@@ -206,6 +209,9 @@ pub struct Queued {
     pub active: Option<ActiveContext>,
     pub images: Vec<Arc<gpui::Image>>,
 }
+
+/// Bytes of a `run_command` command's output kept for the agent (its end).
+const MAX_COMMAND_OUTPUT: usize = 30_000;
 
 /// A slash command the agent offers (ACP `available_commands_update`).
 #[derive(Clone, Debug, PartialEq)]
@@ -350,6 +356,9 @@ pub struct Thread {
     project: WeakEntity<Project>,
     /// Terminals the agent created (shared with the `TerminalHost`) and their embedded views.
     terminals: TerminalRegistry,
+    /// Runs `run_command`'s commands, in terminals the thread embeds (the agent's own
+    /// `terminal/*` requests go through it too).
+    terminal_host: Arc<ZedTerminals>,
     terminal_views: HashMap<String, Entity<TerminalView>>,
     /// Terminals that show the output of commands the agent ran itself (`_meta.terminal_info`),
     /// by their id; their views are in `terminal_views`.
@@ -380,6 +389,9 @@ pub struct Thread {
     pub(crate) queued_prompt: Option<String>,
     /// The session already has the user's standing instructions (`rules`).
     rules_sent: bool,
+    /// What the agent that had the thread before did, for the next message to the one that
+    /// takes over (see [`Thread::hand_off`]).
+    handoff_context: Option<String>,
     /// Messages written while the agent works, sent in order as each turn ends.
     pub(crate) queue: Vec<Queued>,
     /// Next connect keeps the transcript and restarts the agent process (after a login).
@@ -471,7 +483,7 @@ impl Thread {
         let fs = Arc::new(ProjectFs::new(&project, root.clone(), policy, cx));
         let terminals = TerminalRegistry::default();
         let terminal_host = Arc::new(ZedTerminals::new(&project, terminals.clone(), cx));
-        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host).with_terminal_auth().with_display_terminals());
+        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host.clone()).with_terminal_auth().with_display_terminals());
 
         // broadcast (tokio) → unbounded (GPUI): the thread consumes events on the UI thread.
         let (tx, mut rx) = mpsc::unbounded();
@@ -555,6 +567,7 @@ impl Thread {
             workspace: workspace.weak_handle(),
             project: project.downgrade(),
             terminals,
+            terminal_host,
             terminal_views: HashMap::new(),
             display_terminals: HashMap::new(),
             approved_edits,
@@ -571,6 +584,7 @@ impl Thread {
             retry_prompt: None,
             queued_prompt: None,
             rules_sent: false,
+            handoff_context: None,
             queue: Vec::new(),
             restart_keeping_transcript: false,
             auth_pending: None,
@@ -606,6 +620,35 @@ impl Thread {
 
     pub fn selected_agent(&self) -> usize {
         self.selected
+    }
+
+    /// Hands the thread to agent `ix`: the conversation stays on screen, and the new agent
+    /// starts a session of its own with a summary of what was asked and done so far (and the
+    /// standing instructions again), then carries on.
+    pub fn hand_off(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.agents.len() || ix == self.selected {
+            return;
+        }
+        if matches!(self.status, Status::Busy | Status::Connecting) {
+            self.system("Stop the agent before handing the thread to another one.", Color::Warning);
+            return self.changed(cx);
+        }
+        let from = self.agent_label();
+        let to = self.agents[ix].id.clone();
+        let requests: Vec<String> = self.entries.iter().filter_map(|e| if let Entry::User(text, _) = e { Some(text.clone()) } else { None }).collect();
+        let last_answer = self.entries.iter().rev().find_map(|e| if let Entry::Agent(md) = e { Some(md.read(cx).source().to_string()) } else { None });
+        let plan = self.entries.iter().rev().find_map(|e| if let Entry::Plan(items) = e { Some(items.clone()) } else { None }).unwrap_or_default();
+        let changed: Vec<String> = self.changes.iter().map(|c| c.path.strip_prefix(&self.root).unwrap_or(&c.path).display().to_string()).collect();
+        self.handoff_context = Some(handoff_summary(&from, &requests, last_answer.as_deref(), &plan, &changed));
+        self.disconnect(cx);
+        self.selected = ix;
+        self.agent_name = None;
+        // A new session: it gets the standing instructions too.
+        self.rules_sent = false;
+        self.restart_keeping_transcript = true;
+        self.queued_prompt = Some(format!("Carry on with this conversation: you take over from {from}."));
+        self.system(format!("Handing the thread from {from} to {to}."), Color::Muted);
+        self.connect(window, cx);
     }
 
     pub fn select_agent(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -712,7 +755,7 @@ impl Thread {
 
     /// Writes waiting for the user's decision.
     pub fn pending_reviews(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Config { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Config { reply: Some(_), .. } | Entry::Command { state: crate::forge_tools::EditState::Waiting, .. } | Entry::Question { answer: None, .. })).count()
     }
 
     /// Where the agent last read or wrote.
@@ -984,8 +1027,12 @@ impl Thread {
         let sent = prompt.as_ref().map(|(_, expanded)| expanded.clone()).unwrap_or_else(|| text.clone());
         let mut files: Vec<(PathBuf, Option<u32>)> = Vec::new();
         let mut specials: Vec<String> = Vec::new();
+        let kept = crate::agent_ignore::AgentIgnore::load(&self.root);
+        let mut withheld = Vec::new();
         for mention in resolve_mentions(&sent, &self.root) {
             match mention {
+                // Kept from agents: not sent, and the thread says so.
+                Mention::Path { path, .. } if kept.denies(&path) => withheld.push(path.strip_prefix(&self.root).unwrap_or(&path).display().to_string()),
                 Mention::Path { path, line } => files.push((path, line)),
                 Mention::Special(name) => specials.push(name),
             }
@@ -1001,6 +1048,9 @@ impl Thread {
             })
             .collect();
         labels.extend(specials.iter().map(|s| format!("@{s}")));
+        if !withheld.is_empty() {
+            self.system(format!("Not sent to the agent: {} (kept from agents: secrets, or listed in {}).", withheld.join(", "), crate::agent_ignore::files_text()), Color::Warning);
+        }
         if let Some((prompt, _)) = &prompt {
             labels.insert(0, format!("prompt {}", prompt.path.strip_prefix(&self.root).unwrap_or(&prompt.path).display()));
         }
@@ -1024,6 +1074,10 @@ impl Thread {
         let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file(), self.instructions_files()));
         if !self.rules_sent && self.forge_tools {
             blocks.push(json!({ "type": "text", "text": crate::forge_mcp::instructions(&self.root) }));
+        }
+        if let Some(summary) = self.handoff_context.take() {
+            blocks.push(json!({ "type": "text", "text": summary }));
+            labels.push("what the previous agent did".into());
         }
         self.rules_sent = true;
         let retry_text = text.clone();
@@ -1232,6 +1286,7 @@ impl Thread {
                     Entry::ExtensionTool { tool, state, .. } => RecordEntry::System { text: format!("{} ({}): {}", tool.title, tool.extension, state.outcome()) },
                     Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
                     Entry::Config { changes, state, .. } => RecordEntry::System { text: format!("Asked to change {}: {}", crate::configure::summary(changes), state.outcome()) },
+                    Entry::Command { command, exit, .. } => RecordEntry::System { text: format!("Ran `{command}`: {}", exit.as_deref().unwrap_or("not run")) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
             })
@@ -1567,6 +1622,7 @@ impl Thread {
             Entry::ExtensionTool { tool, reply: Some(_), .. } => Some(format!("let {} run", tool.title)),
             Entry::Remember { reply: Some(_), .. } => Some("keep a note".to_string()),
             Entry::Config { changes, reply: Some(_), .. } => Some(format!("change {}", crate::configure::summary(changes))),
+            Entry::Command { command, state: crate::forge_tools::EditState::Waiting, .. } => Some(format!("run `{command}`")),
             Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
         });
@@ -2102,6 +2158,27 @@ impl Thread {
             "forge_guide" => {
                 let _ = reply.send(Ok(crate::configure::guide(str_arg(&args, "topic").as_deref())));
             }
+            "run_command" => {
+                let Some(command) = str_arg(&args, "command") else {
+                    let _ = reply.send(Err("`command` is missing.".into()));
+                    return;
+                };
+                let cwd = str_arg(&args, "cwd").map(|c| self.root.join(c)).unwrap_or_else(|| self.root.clone());
+                let timeout = std::time::Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(600).clamp(1, 3600));
+                let kept = crate::agent_ignore::AgentIgnore::load(&self.root);
+                let call = json!({ "kind": "execute", "title": command, "rawInput": { "command": command, "cwd": cwd } });
+                let decision = crate::permissions::decide(&self.permissions.get(), &call, &self.roots(cx), &kept);
+                if let crate::permissions::Decision::Deny(reason) = decision {
+                    let _ = reply.send(Err(format!("{reason}: the user keeps those files from agents.")));
+                    return;
+                }
+                let ix = self.entries.len();
+                self.entries.push(Entry::Command { command, cwd, timeout, state: crate::forge_tools::EditState::Waiting, terminal: None, exit: None, reply: Some(reply) });
+                if let crate::permissions::Decision::Allow(_) = decision {
+                    self.start_command(ix, window, cx);
+                }
+                self.changed(cx);
+            }
             "change_settings" | "change_keybinding" => {
                 let planned = if name == "change_settings" {
                     let pages = forge_ui::settings_registry::SettingsRegistry::global(cx).read(cx).pages().to_vec();
@@ -2143,6 +2220,11 @@ impl Thread {
                         "go_to_definition" => tools::definition(ide, args, cx).await,
                         "find_references" => tools::references(ide, args, cx).await,
                         "hover" => tools::hover(ide, args, cx).await,
+                        "go_to_implementation" => tools::implementations(ide, args, cx).await,
+                        "go_to_type_definition" => tools::type_definition(ide, args, cx).await,
+                        "document_symbols" => tools::document_symbols(ide, args, cx).await,
+                        "call_hierarchy" => tools::call_hierarchy(ide, args, cx).await,
+                        "signature_help" => tools::signature_help(ide, args, cx).await,
                         "workspace_symbols" => tools::workspace_symbols(ide, args, cx).await,
                         "code_actions" => tools::code_actions(ide, args, cx).await,
                         "run_app" => tools::run_app(ide, args, cx).await,
@@ -2247,6 +2329,108 @@ impl Thread {
 
     /// Answers the note card at `ix`: adds the note (as the user left it) to the project's
     /// instructions file, or tells the agent no.
+    /// The user's answer to the command the agent wants to run at `ix`.
+    pub(crate) fn answer_command(&mut self, ix: usize, run: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Entry::Command { state, reply, .. }) = self.entries.get_mut(ix) else { return };
+        if *state != crate::forge_tools::EditState::Waiting {
+            return;
+        }
+        if run {
+            self.start_command(ix, window, cx);
+        } else {
+            *state = crate::forge_tools::EditState::Declined;
+            if let Some(reply) = reply.take() {
+                let _ = reply.send(Err("The user didn't let the command run.".into()));
+            }
+        }
+        self.changed(cx);
+    }
+
+    /// Runs the command at `ix` in a terminal embedded in its card, and answers the agent
+    /// with its exit code and output once it ends (or is stopped at its timeout).
+    fn start_command(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Entry::Command { command, cwd, timeout, state, .. }) = self.entries.get_mut(ix) else { return };
+        *state = crate::forge_tools::EditState::Applying;
+        let request = ide_api::TerminalRequest { command: command.clone(), args: vec![], env: vec![], cwd: Some(cwd.clone()), output_byte_limit: Some(MAX_COMMAND_OUTPUT) };
+        let (timeout, host) = (*timeout, self.terminal_host.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let created = Tokio::spawn_result(cx, {
+                let host = host.clone();
+                async move { Ok(host.create(request).await?) }
+            })
+            .await;
+            let id = match created {
+                Ok(id) => id,
+                Err(e) => {
+                    this.update(cx, |this, cx| this.finish_command(ix, Err(format!("Couldn't start the command: {e:#}")), cx)).ok();
+                    return;
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                if let Some(terminal) = this.terminals.get(&id) {
+                    let (workspace, project) = (this.workspace.clone(), this.project.clone());
+                    let view = cx.new(|cx| {
+                        let mut view = TerminalView::new(terminal, workspace, None, project, window, cx);
+                        view.set_embedded_mode(Some(15), cx);
+                        view
+                    });
+                    this.terminal_views.insert(id.clone(), view);
+                }
+                if let Some(Entry::Command { terminal, .. }) = this.entries.get_mut(ix) {
+                    *terminal = Some(id.clone());
+                }
+                this.changed(cx);
+            })
+            .ok();
+            let waited = {
+                let (host, id) = (host.clone(), id.clone());
+                let exit = Tokio::spawn_result(cx, async move { Ok(host.wait_for_exit(&id).await?) });
+                let timer = cx.background_executor().timer(timeout);
+                futures::pin_mut!(exit, timer);
+                match futures::future::select(exit, timer).await {
+                    futures::future::Either::Left((exit, _)) => Some(exit),
+                    futures::future::Either::Right(_) => None,
+                }
+            };
+            let timed_out = waited.is_none();
+            if timed_out {
+                let (host, id) = (host.clone(), id.clone());
+                Tokio::spawn_result(cx, async move { Ok(host.kill(&id).await?) }).await.ok();
+            }
+            let output = {
+                let (host, id) = (host.clone(), id.clone());
+                Tokio::spawn_result(cx, async move { Ok(host.output(&id).await?) }).await
+            };
+            let result = match output {
+                Ok(out) => {
+                    let code = out.exit.as_ref().and_then(|e| e.exit_code).or(waited.and_then(|w| w.ok()).and_then(|e| e.exit_code));
+                    let status = if timed_out { format!("Stopped after {}s (the timeout).", timeout.as_secs()) } else { code.map(|c| format!("Exit code {c}.")).unwrap_or_else(|| "It ended.".into()) };
+                    let cut = if out.truncated { "(only the end of the output)\n" } else { "" };
+                    Ok(format!("{status}\n{cut}{}", out.output.trim_end()))
+                }
+                Err(e) => Err(format!("Couldn't read the command's output: {e:#}")),
+            };
+            this.update(cx, |this, cx| this.finish_command(ix, result, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn finish_command(&mut self, ix: usize, result: Result<String, String>, cx: &mut Context<Self>) {
+        let Some(Entry::Command { state, exit, reply, .. }) = self.entries.get_mut(ix) else { return };
+        *exit = Some(match &result {
+            Ok(text) => text.lines().next().unwrap_or_default().to_string(),
+            Err(e) => e.clone(),
+        });
+        *state = match &result {
+            Ok(_) => crate::forge_tools::EditState::Applied,
+            Err(e) => crate::forge_tools::EditState::Failed(e.clone()),
+        };
+        if let Some(reply) = reply.take() {
+            let _ = reply.send(result);
+        }
+        self.changed(cx);
+    }
+
     /// Applies (or discards) the settings and key bindings the agent proposed at `ix`.
     pub(crate) fn answer_config(&mut self, ix: usize, apply: bool, cx: &mut Context<Self>) {
         use crate::forge_tools::EditState;
@@ -2759,9 +2943,11 @@ impl Thread {
                     .unwrap_or_default();
                 let diffs = params.get("toolCall").map(Edit::all_from_tool_call).unwrap_or_default();
                 let diffs = self.diff_views(diffs, window, cx);
-                let decision = crate::permissions::decide(&self.permissions.get(), params.get("toolCall").unwrap_or(&Value::Null), &self.roots(cx));
+                let kept = crate::agent_ignore::AgentIgnore::load(&self.root);
+                let decision = crate::permissions::decide(&self.permissions.get(), params.get("toolCall").unwrap_or(&Value::Null), &self.roots(cx), &kept);
                 let auto = match decision {
-                    crate::permissions::Decision::Allow(reason) => params.get("options").and_then(crate::permissions::allow_option).map(|id| (id, reason)),
+                    crate::permissions::Decision::Allow(reason) => params.get("options").and_then(crate::permissions::allow_option).map(|id| (id, format!("Allowed automatically: {reason}"))),
+                    crate::permissions::Decision::Deny(reason) => options.iter().find(|o| o.kind.starts_with("reject")).map(|o| (o.id.clone(), reason)),
                     crate::permissions::Decision::Ask => None,
                 };
                 let tool_call_id = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).map(str::to_string);
@@ -2780,7 +2966,7 @@ impl Thread {
                 self.entries.push(Entry::Permission { request_id: request_id.clone(), tool_call_id, title, options, resolved: None, diffs });
                 // The policy allows it: answer as the user would, and say so in the thread.
                 if let Some((option_id, reason)) = auto {
-                    self.answer_permission(request_id, Some((option_id, format!("Allowed automatically: {reason}"))), cx);
+                    self.answer_permission(request_id, Some((option_id, reason)), cx);
                 }
             }
             AgentEvent::Notification { agent_id, method, params } if ours(&agent_id) && method == "_auth/status_update" => {
@@ -2874,7 +3060,9 @@ impl Thread {
             }
             "tool_call_update" => {
                 let id = str_of("toolCallId").unwrap_or_default();
-                if let Some(output) = u.pointer("/_meta/terminal_output") {
+                // Whole output (`terminal_output`) or the next piece of it (`terminal_output_delta`):
+                // either way it is what comes next in the terminal.
+                if let Some(output) = u.pointer("/_meta/terminal_output").or_else(|| u.pointer("/_meta/terminal_output_delta")) {
                     let terminal = output.get("terminal_id").and_then(Value::as_str).and_then(|t| self.display_terminals.get(t));
                     if let (Some(terminal), Some(data)) = (terminal, output.get("data").and_then(Value::as_str)) {
                         terminal.update(cx, |t, cx| t.write_output(data.as_bytes(), cx));
@@ -3053,6 +3241,61 @@ fn unfence(text: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim_end_matches('\n')
 }
 
+
+/// What an agent taking a thread over gets: what the user asked, what the previous agent
+/// answered last, its plan, and the files changed so far (already on disk).
+pub(crate) fn handoff_summary(from: &str, requests: &[String], last_answer: Option<&str>, plan: &[(String, String)], changed: &[String]) -> String {
+    let cut = |text: &str, max: usize| if text.chars().count() > max { format!("{}…", text.chars().take(max).collect::<String>()) } else { text.to_string() };
+    let mut text = format!("You take over this conversation from another agent ({from}). What happened so far:\n");
+    if !requests.is_empty() {
+        text.push_str("\nWhat the user asked, in order:\n");
+        for request in requests {
+            text.push_str(&format!("- {}\n", cut(request.trim(), 600).replace('\n', "\n  ")));
+        }
+    }
+    if let Some(answer) = last_answer.map(str::trim).filter(|a| !a.is_empty()) {
+        text.push_str(&format!("\n{from}'s last answer:\n{}\n", cut(answer, 3000)));
+    }
+    if !plan.is_empty() {
+        text.push_str("\nIts plan:\n");
+        for (step, status) in plan {
+            text.push_str(&format!("- [{status}] {step}\n"));
+        }
+    }
+    if changed.is_empty() {
+        text.push_str("\nNo files were changed yet.\n");
+    } else {
+        text.push_str(&format!("\nFiles it changed (the changes are on disk: read them before going on): {}\n", changed.join(", ")));
+    }
+    text.push_str("\nCarry on from there. If something is unclear, ask the user with `ask_user`.");
+    text
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::handoff_summary;
+
+    #[test]
+    fn sums_up_the_thread_for_the_next_agent() {
+        let summary = handoff_summary(
+            "Claude",
+            &["Add a /health endpoint".into(), "Also test it".into()],
+            Some("Added `GET /health` in src/api.rs; the test is next."),
+            &[("Add the endpoint".into(), "completed".into()), ("Write its test".into(), "pending".into())],
+            &["src/api.rs".into()],
+        );
+        assert_eq!(
+            summary,
+            "You take over this conversation from another agent (Claude). What happened so far:\n\
+             \nWhat the user asked, in order:\n- Add a /health endpoint\n- Also test it\n\
+             \nClaude's last answer:\nAdded `GET /health` in src/api.rs; the test is next.\n\
+             \nIts plan:\n- [completed] Add the endpoint\n- [pending] Write its test\n\
+             \nFiles it changed (the changes are on disk: read them before going on): src/api.rs\n\
+             \nCarry on from there. If something is unclear, ask the user with `ask_user`."
+        );
+        assert!(handoff_summary("Codex", &[], None, &[], &[]).contains("No files were changed yet."));
+    }
+}
 
 #[cfg(test)]
 mod detail_tests {

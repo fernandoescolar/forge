@@ -197,9 +197,11 @@ impl FileMentions {
         for wt in worktrees {
             let wt = wt.read(cx);
             let root = wt.root_name().as_unix_str().to_string();
+            // Files kept from agents aren't offered.
+            let kept = crate::agent_ignore::AgentIgnore::load(&wt.abs_path());
             for entry in wt.snapshot().entries(false, 0) {
                 let rel = entry.path.as_unix_str();
-                if rel.is_empty() {
+                if rel.is_empty() || kept.denies(std::path::Path::new(rel)) {
                     continue;
                 }
                 let rel = if entry.is_dir() { format!("{rel}/") } else { rel.to_string() };

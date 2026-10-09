@@ -298,6 +298,8 @@ pub struct ThreadView {
     toggled: HashSet<String>,
     /// Turn file diffs unfolded in the conversation, by message and file.
     turn_diffs: HashMap<(usize, std::path::PathBuf), crate::diff::DiffView>,
+    /// The user's messages as Markdown (by entry, with the text they were made from).
+    user_markdown: HashMap<usize, (String, Entity<markdown::Markdown>)>,
     /// Repaints the working time while the agent works.
     _ticker: Option<Task<()>>,
     _thread_subscription: Subscription,
@@ -317,6 +319,21 @@ struct Follow {
 }
 
 impl ThreadView {
+    /// Message `ix`, if it is the user's, as Markdown (kept until its text changes).
+    pub(crate) fn user_markdown(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<Entity<markdown::Markdown>> {
+        let text = match self.thread.read(cx).entries.get(ix) {
+            Some(crate::thread::Entry::User(text, _)) => text.clone(),
+            _ => return None,
+        };
+        if let Some((_, md)) = self.user_markdown.get(&ix).filter(|(known, _)| *known == text) {
+            return Some(md.clone());
+        }
+        let languages = self.thread.read(cx).languages().clone();
+        let md = cx.new(|cx| markdown::Markdown::new(text.clone().into(), Some(languages), None, cx));
+        self.user_markdown.insert(ix, (text, md.clone()));
+        Some(md)
+    }
+
     fn new(workspace: &Workspace, thread: Entity<Thread>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project = workspace.project().clone();
         let input = cx.new(|cx| {
@@ -343,6 +360,7 @@ impl ThreadView {
         }
         let thread_subscription = Self::subscribe_thread(&thread, window, cx);
         Self {
+            user_markdown: HashMap::new(),
             thread,
             workspace: workspace.weak_handle(),
             input,
@@ -943,28 +961,41 @@ impl ThreadView {
         let status = thread.status();
         let agents: Vec<(usize, String)> = thread.agents().iter().enumerate().map(|(i, a)| (i, a.id.clone())).collect();
         let agent_label = thread.agent_label();
+        let current = thread.selected_agent();
         let handle = self.thread.downgrade();
+        // Before starting: which agent to start. Once started (and idle): hand the thread to
+        // another one, which carries on with a summary of it.
+        let started = status != Status::Disconnected;
+        let can_pick = !matches!(status, Status::Busy | Status::Connecting) && agents.len() > 1;
         let agent = PopoverMenu::new("thread-agent")
             .trigger(
                 ButtonLike::new("thread-agent-trigger")
                     .style(ButtonStyle::Subtle)
-                    .disabled(status != Status::Disconnected || agents.len() < 2)
+                    .disabled(!can_pick)
                     .child(
                         h_flex()
                             .gap_1()
                             .child(Icon::from_path("icons/forge_agents.svg").size(IconSize::XSmall).color(Color::Accent))
                             .child(Label::new(agent_label).size(LabelSize::Small))
-                            .when(status == Status::Disconnected && agents.len() > 1, |el| el.child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall).color(Color::Muted))),
+                            .when(can_pick, |el| el.child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall).color(Color::Muted))),
                     )
-                    .tooltip(Tooltip::text("The agent this thread talks to")),
+                    .tooltip(Tooltip::text(if started { "The agent this thread talks to: hand it to another one" } else { "The agent this thread talks to" })),
             )
             .menu(move |window, cx| {
                 let (agents, handle) = (agents.clone(), handle.clone());
                 Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    if started {
+                        menu = menu.header("Continue with another agent");
+                    }
                     for (i, id) in agents {
+                        if started && i == current {
+                            continue;
+                        }
                         let handle = handle.clone();
-                        menu = menu.entry(id, None, move |_, cx| {
-                            handle.update(cx, |t, cx| t.select_agent(i, cx)).ok();
+                        menu = menu.entry(id, None, move |window, cx| {
+                            handle
+                                .update(cx, |t, cx| if started { t.hand_off(i, window, cx) } else { t.select_agent(i, cx) })
+                                .ok();
                         });
                     }
                     menu
@@ -1675,7 +1706,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1747,7 +1778,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1797,7 +1828,7 @@ mod tests {
         let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -1865,7 +1896,7 @@ mod tests {
         assert_eq!(crate::forge_mcp::tool_title("mcp__forge__demo_ext__change").as_deref(), Some("Demo change"));
 
         let tmp = tempfile::tempdir().unwrap();
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let call = |name: &str, cx: &mut VisualTestContext| {
@@ -1925,7 +1956,7 @@ mod tests {
             .downcast::<Editor>()
             .unwrap();
         editor.update_in(cx, |e, window, cx| e.change_selections(Default::default(), window, cx, |s| s.select_ranges([Point::new(1, 0)..Point::new(2, 5)])));
-        let config = crate::config::AgentsConfig { instructions_files: vec!["AGENTS.md".into(), ".forge/AGENTS.md".into()], agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec!["AGENTS.md".into(), ".forge/AGENTS.md".into()], agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2005,7 +2036,7 @@ mod tests {
             // The project lives in a fake file system; the process needs a real directory.
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2174,7 +2205,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2234,7 +2265,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: false, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let history = tmp.path().join("history");
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config_in(ws, Some(config), history, Some(worktree.clone()), window, cx));
@@ -2278,7 +2309,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         cx.update(|_, cx| crate::conflicts::init(cx));
@@ -2319,7 +2350,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("signed-in");
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![mock_auth_agent(&marker)], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![mock_auth_agent(&marker)], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
 
@@ -2376,7 +2407,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut agent = mock_auth_agent(&tmp.path().join("signed-in"));
         agent.env.push(("MOCK_AUTH_ON_NEW_SESSION".into(), "1".into()));
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         thread.update_in(cx, |t, window, cx| t.connect(window, cx));
@@ -2391,7 +2422,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
 
@@ -2448,7 +2479,7 @@ mod tests {
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         let permissions = crate::permissions::Permissions { allow_commands: vec!["echo".into()], ..Default::default() };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
         let (thread, _view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let permission = |t: &Thread| {
@@ -2525,7 +2556,7 @@ mod tests {
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         agent.cwd = Some(tmp.path().to_path_buf());
         let permissions = crate::permissions::Permissions { mode: crate::permissions::PermissionMode::AllowEdits, ..Default::default() };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2577,7 +2608,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         // The agent changed lines 2 and 4.
         thread.update(cx, |t, cx| {
@@ -2638,7 +2669,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         let message = |text: &str, cx: &mut VisualTestContext| {
             thread.update(cx, |t, _| {
@@ -2700,7 +2731,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         let message = |text: &str, cx: &mut VisualTestContext| {
             thread.update(cx, |t, _| {
@@ -2759,7 +2790,7 @@ mod tests {
         let mut agent = mock_auth_agent(&tmp.path().join("unused"));
         agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
         agent.cwd = Some(tmp.path().to_path_buf());
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         // A write that waits for permission keeps the turn going.
@@ -2835,7 +2866,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2912,7 +2943,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| {
             let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
             add_thread(ws, thread.clone(), window, cx);
@@ -2981,7 +3012,7 @@ mod tests {
     async fn agents_propose_settings_and_key_bindings(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
-        let (thread, _view, mut cx) = thread_tab(crate::config::AgentsConfig { instructions_files: vec![], agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() }, tmp.path().join("history"), cx).await;
+        let (thread, _view, mut cx) = thread_tab(crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec![], agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() }, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         cx.update(|_, cx| {
             let registry = forge_ui::settings_registry::SettingsRegistry::global(cx);
@@ -3037,6 +3068,159 @@ mod tests {
         assert!(before.is_some_and(|b| b.contains("forge_agent::NewThread")));
     }
 
+    /// The language-server tools answer from the server: a file's outline, the
+    /// implementations of a trait, and who calls a function.
+    #[gpui::test]
+    async fn agents_navigate_with_the_language_server(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let source = "trait Shape {\n    fn area(&self);\n}\nstruct Square;\nimpl Shape for Square {\n    fn area(&self) {}\n}\nfn main() {\n    total();\n}\nfn total() {}\n";
+        params.fs.as_fake().insert_tree("/root", json!({ "a.rs": source })).await;
+        let project = Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let languages = project.read_with(cx, |p, _| p.languages().clone());
+        languages.add(language::rust_lang());
+        let capabilities = lsp::ServerCapabilities {
+            document_symbol_provider: Some(lsp::OneOf::Left(true)),
+            implementation_provider: Some(lsp::ImplementationProviderCapability::Simple(true)),
+            call_hierarchy_provider: Some(lsp::CallHierarchyServerCapability::Simple(true)),
+            ..Default::default()
+        };
+        let mut servers = languages.register_fake_lsp("Rust", language::FakeLspAdapter { capabilities, ..Default::default() });
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let _buffer = project.update(cx, |p, cx| p.open_local_buffer_with_lsp("/root/a.rs", cx)).await.unwrap();
+        let server = futures::StreamExt::next(&mut servers).await.unwrap();
+        let uri = lsp::Uri::from_file_path("/root/a.rs").unwrap();
+        let range = |line: u32| lsp::Range::new(lsp::Position::new(line, 0), lsp::Position::new(line, 1));
+        #[allow(deprecated)]
+        let symbol = |name: &str, kind: lsp::SymbolKind, start: u32, end: u32, children: Vec<lsp::DocumentSymbol>| lsp::DocumentSymbol {
+            name: name.into(),
+            detail: None,
+            kind,
+            tags: None,
+            deprecated: None,
+            range: lsp::Range::new(lsp::Position::new(start, 0), lsp::Position::new(end, 1)),
+            selection_range: range(start),
+            children: Some(children),
+        };
+        let outline = vec![
+            symbol("Shape", lsp::SymbolKind::INTERFACE, 0, 2, vec![symbol("area", lsp::SymbolKind::METHOD, 1, 1, vec![])]),
+            symbol("main", lsp::SymbolKind::FUNCTION, 7, 9, vec![]),
+        ];
+        server.set_request_handler::<lsp::request::DocumentSymbolRequest, _, _>(move |_, _| {
+            let outline = outline.clone();
+            async move { Ok(Some(lsp::DocumentSymbolResponse::Nested(outline))) }
+        });
+        let at = uri.clone();
+        server.set_request_handler::<lsp::request::GotoImplementation, _, _>(move |_, _| {
+            let at = at.clone();
+            async move { Ok(Some(lsp::request::GotoImplementationResponse::Scalar(lsp::Location::new(at, range(4))))) }
+        });
+        let item = |name: &str, kind: lsp::SymbolKind, line: u32| lsp::CallHierarchyItem { name: name.into(), kind, tags: None, detail: None, uri: uri.clone(), range: range(line), selection_range: range(line), data: None };
+        let total = item("total", lsp::SymbolKind::FUNCTION, 10);
+        server.set_request_handler::<lsp::request::CallHierarchyPrepare, _, _>(move |_, _| {
+            let total = total.clone();
+            async move { Ok(Some(vec![total])) }
+        });
+        let main = item("main", lsp::SymbolKind::FUNCTION, 7);
+        server.set_request_handler::<lsp::request::CallHierarchyIncomingCalls, _, _>(move |_, _| {
+            let main = main.clone();
+            async move { Ok(Some(vec![lsp::CallHierarchyIncomingCall { from: main, from_ranges: vec![range(8)] }])) }
+        });
+
+        // The server finishes starting up.
+        cx.run_until_parked();
+        let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec![], agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
+        let mut call = async |name: &str, args: serde_json::Value| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            let request = crate::forge_mcp::ToolRequest { name: name.into(), args, reply };
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+            cx.run_until_parked();
+            answer.await.unwrap()
+        };
+
+        assert_eq!(call("document_symbols", json!({ "path": "a.rs" })).await.unwrap(), "interface Shape (lines 1-3)\n  method area (line 2)\nfunction main (lines 8-10)");
+        assert_eq!(call("go_to_implementation", json!({ "path": "a.rs", "line": 1, "symbol": "Shape" })).await.unwrap(), "1 implementation of `Shape`:\na.rs:5:1  impl Shape for Square {");
+        assert_eq!(call("call_hierarchy", json!({ "path": "a.rs", "line": 11, "symbol": "total" })).await.unwrap(), "Callers of `total`:\n- function main: a.rs:8:1  fn main() {");
+    }
+
+    /// Handing a thread to another agent: the conversation stays, and the new agent's first
+    /// message carries what the previous one did.
+    #[gpui::test]
+    async fn threads_carry_on_with_another_agent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let mock = |id: &str| AgentSpec {
+            id: id.into(),
+            command: "python3".into(),
+            args: vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/mock-acp-agent.py").to_string_lossy().into_owned()],
+            env: vec![],
+            cwd: Some(tmp.path().to_path_buf()),
+        };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec![], agents: vec![mock("first"), mock("second")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+
+        thread.update_in(cx, |t, window, cx| t.ask("hello there".into(), window, cx));
+        wait_for(cx, &thread, "the first agent's answer", |t| t.status() == Status::Ready && t.entries.iter().any(|e| matches!(e, Entry::Agent(_)))).await;
+        let answers = |t: &Thread| t.entries.iter().filter(|e| matches!(e, Entry::Agent(_))).count();
+        let before = thread.read_with(cx, |t, _| answers(t));
+
+        thread.update_in(cx, |t, window, cx| t.hand_off(1, window, cx));
+        wait_for(cx, &thread, "the second agent's answer", |t| t.status() == Status::Ready && answers(t) > before).await;
+        thread.read_with(cx, |t, _| {
+            assert_eq!(t.selected_agent(), 1);
+            assert!(t.entries.iter().any(|e| matches!(e, Entry::User(text, _) if text == "hello there")), "the conversation stays");
+            assert!(t.entries.iter().any(|e| matches!(e, Entry::System(text, _) if text.starts_with("Handing the thread from"))));
+            let carried = t.entries.iter().find_map(|e| match e {
+                Entry::User(text, labels) if text.starts_with("Carry on with this conversation") => Some(labels.clone()),
+                _ => None,
+            });
+            assert_eq!(carried, Some(vec!["what the previous agent did".to_string()]), "the summary went with it");
+        });
+
+        // The user's messages are shown as Markdown, kept until their text changes.
+        let user_ix = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::User(..))).unwrap());
+        view.update(cx, |view, cx| {
+            let md = view.user_markdown(user_ix, cx).expect("a user message");
+            assert_eq!(md.read(cx).source().as_ref(), "hello there");
+            assert_eq!(view.user_markdown(user_ix, cx).unwrap().entity_id(), md.entity_id(), "kept");
+        });
+    }
+
+    /// `run_command`: the card waits for the user (by default), then the command runs in a
+    /// terminal embedded in it, and the agent gets its exit code and output.
+    #[gpui::test]
+    async fn commands_run_where_the_user_sees_them(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec![], agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
+        let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        let (reply, answer) = futures::channel::oneshot::channel();
+        let request = crate::forge_mcp::ToolRequest { name: "run_command".into(), args: json!({ "command": "echo first; sleep 0.3; echo second" }), reply };
+        thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::Command { .. })).expect("a card"));
+        assert!(thread.read_with(cx, |t, _| matches!(&t.entries[card], Entry::Command { state: crate::forge_tools::EditState::Waiting, terminal: None, .. })), "it asks first");
+
+        thread.update_in(cx, |t, window, cx| t.answer_command(card, true, window, cx));
+        wait_for(cx, &thread, "the terminal", |t| matches!(&t.entries[card], Entry::Command { terminal: Some(_), .. })).await;
+        draw(&view, cx);
+        wait_for(cx, &thread, "the command to end", |t| matches!(&t.entries[card], Entry::Command { exit: Some(_), .. })).await;
+        let text = answer.await.unwrap().unwrap();
+        assert!(text.starts_with("Exit code 0.") && text.contains("first") && text.contains("second"), "{text}");
+    }
+
     /// Two threads changing the same file: both say so, once.
     #[gpui::test]
     async fn warns_when_two_threads_change_a_file(cx: &mut TestAppContext) {
@@ -3055,7 +3239,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let agent = AgentSpec { id: "a".into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let new = |cx: &mut VisualTestContext| {
             let config = config.clone();
             let history = tmp.path().join("history");
@@ -3084,7 +3268,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let agent = |id: &str| AgentSpec { id: id.into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a"), agent("b")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: Some("b".into()), permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a"), agent("b")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: Some("b".into()), permissions: Default::default() };
         let (_, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let workspace = view.read_with(cx, |v, _| v.workspace.upgrade().unwrap());
@@ -3103,7 +3287,7 @@ mod tests {
         cx.executor().allow_parking();
         let tmp = tempfile::tempdir().unwrap();
         let agent = |id: &str| AgentSpec { id: id.into(), command: "true".into(), args: vec![], env: vec![], cwd: None };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent("a")], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let (first, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
         let workspace = view.read_with(cx, |v, _| v.workspace.upgrade().unwrap());

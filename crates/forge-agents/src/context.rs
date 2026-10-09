@@ -140,7 +140,8 @@ fn git_diff(root: PathBuf, cx: &mut App) -> Task<String> {
         let output = ide_api::std_command("git").args(["diff", "HEAD", "--no-color"]).current_dir(&root).output();
         match output {
             Ok(out) if out.status.success() => {
-                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                // Without the files kept from agents (secrets, `.forge/agentignore`).
+                let mut text = crate::agent_ignore::filter_diff(&String::from_utf8_lossy(&out.stdout), &crate::agent_ignore::AgentIgnore::load(&root));
                 if text.len() > MAX_DIFF_BYTES {
                     let mut cut = MAX_DIFF_BYTES;
                     while !text.is_char_boundary(cut) {

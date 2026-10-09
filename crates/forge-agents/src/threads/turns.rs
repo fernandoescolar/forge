@@ -70,8 +70,9 @@ impl ThreadView {
         let count = rows.len();
         let element = match rows.get(ix).cloned() {
             Some(Row::Entry(entry)) => {
+                let md = self.user_markdown(entry, cx);
                 let thread = self.thread.read(cx);
-                render_entry(thread, &self.thread.downgrade(), entry, &thread.entries[entry], window, cx)
+                render_entry(thread, &self.thread.downgrade(), entry, &thread.entries[entry], md.as_ref(), window, cx)
             }
             Some(Row::Turn(turn, is_last)) => self.render_turn(turn, is_last, window, cx),
             None => return div().into_any_element(),
@@ -96,6 +97,7 @@ impl ThreadView {
     }
 
     fn render_turn(&mut self, turn: std::ops::Range<usize>, is_last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let user_md = self.user_markdown(turn.start, cx);
         let thread = self.thread.read(cx);
         let handle = self.thread.downgrade();
         let user_ix = turn.start;
@@ -104,7 +106,7 @@ impl ThreadView {
         let timing = thread.turn_at(user_ix).map(|c| (c.started, c.duration));
         let has_summary = thread.turn_at(user_ix).is_some_and(|c| c.duration.is_some() && !c.turn_files.is_empty());
         let follow_terminal = self.follow_terminal(cx);
-        let user = render_entry(thread, &handle, user_ix, &thread.entries[user_ix], window, cx);
+        let user = render_entry(thread, &handle, user_ix, &thread.entries[user_ix], user_md.as_ref(), window, cx);
 
         // The agent's part: answers and thoughts as they come, tool calls grouped.
         enum Part {
@@ -141,7 +143,7 @@ impl ThreadView {
                 Part::Thought(ix, md, live) => self.render_thought(ix, md, live, window, cx),
                 Part::Entry(ix) => {
                     let thread = self.thread.read(cx);
-                    render_entry(thread, &handle, ix, &thread.entries[ix], window, cx)
+                    render_entry(thread, &handle, ix, &thread.entries[ix], None, window, cx)
                 }
             });
         }

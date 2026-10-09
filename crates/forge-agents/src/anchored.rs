@@ -634,7 +634,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         card.update_in(cx, |c, window, cx| c.start(thread.clone(), "what is this?", window, cx));
         wait_for(cx, &thread, "an answer", |t| t.status() == Status::Ready && t.entries.iter().any(|e| matches!(e, Entry::Agent(_)))).await;

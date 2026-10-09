@@ -200,9 +200,12 @@ so the user sees what you do; prefer them to doing the same in a shell:\n\
 - After editing files, call `check_file`: it lists only the problems your changes brought, once the language servers have caught up. \
 Fix them before moving on. `diagnostics` lists every error and warning (in a file, a folder or the files you changed); both are faster \
 than building the whole project.\n\
-- Navigate with `go_to_definition`, `find_references`, `workspace_symbols` and `hover` (types and docs), and rename with `rename_symbol` \
+- Navigate with `go_to_definition`, `find_references`, `workspace_symbols` and `hover` (types and docs); see a file's outline with \
+`document_symbols` before reading it whole; find implementations with `go_to_implementation`, a value's type with `go_to_type_definition`, \
+callers and callees with `call_hierarchy` (before changing a function), and what to pass a function with `signature_help`. Rename with `rename_symbol` \
 instead of search and replace. Use the language server's fixes and refactors with `code_actions` + `apply_code_action`, and `format_file` to format.\n\
 - Run the app with `run_app` (the user's Run button), read it with `app_output`, stop it with `stop_app`.\n\
+- Run builds, installs, scripts and other commands that take a while with `run_command`: the user watches their output live.\n\
 - Call the app's HTTP endpoints with `http_request` (the user sees request and response in Forge) instead of curl.\n\
 - To find out why something misbehaves, debug instead of adding prints: `set_breakpoint`, `start_debugging` (an app or tests), \
 `debug_step`, `debug_evaluate`, `stop_debugging`. The user follows the session in the Debug panel.\n\
@@ -262,6 +265,16 @@ pub fn instructions(root: &Path) -> String {
     if !extension_tools.is_empty() {
         let listed: Vec<String> = extension_tools.iter().map(|t| format!("`{}` ({}, from the {} extension)", t.name, t.title, t.extension)).collect();
         text.push_str(&format!("\n- The user's extensions add tools to the `forge` server too: {}. Prefer them for what they cover.", listed.join(", ")));
+    }
+    let kept = crate::agent_ignore::AgentIgnore::load(root);
+    text.push_str(&format!(
+        "\n- Don't read, search or change files matching these patterns (`.gitignore` syntax): the user keeps them from agents. \
+Forge refuses them; ask the user if you need something from one: {}.",
+        kept.patterns().join(", ")
+    ));
+    let nested: Vec<String> = crate::agent_ignore::files().into_iter().filter(|f| !f.contains('/')).map(|f| format!("`{f}`")).collect();
+    if !nested.is_empty() {
+        text.push_str(&format!(" A {} file in any folder adds patterns for the files below it, the same way.", nested.join(" or ")));
     }
     let skills = crate::library::skills(root);
     if !skills.is_empty() {
@@ -414,6 +427,42 @@ The change goes through the editor and into the conversation's changes, which th
         "description": "What the language server says about a symbol: its type or signature and its documentation.",
         "inputSchema": symbol_schema(false)
     }, {
+        "name": "document_symbols",
+        "title": "File outline",
+        "description": "A file's outline from its language server: its types, functions, methods and fields, nested, with their lines. \
+Read it before reading a large file whole, to go straight to the part you need.",
+        "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file, relative to the project root (or absolute)." } }, "required": ["path"] }
+    }, {
+        "name": "go_to_implementation",
+        "title": "Go to implementations",
+        "description": "Where an interface, a trait or an abstract/virtual method is implemented, according to the language server.",
+        "inputSchema": symbol_schema(false)
+    }, {
+        "name": "go_to_type_definition",
+        "title": "Go to type definition",
+        "description": "Where the type of a variable, parameter or expression is defined (not the variable itself).",
+        "inputSchema": symbol_schema(false)
+    }, {
+        "name": "call_hierarchy",
+        "title": "Call hierarchy",
+        "description": "Who calls a function or method (`incoming`, the default), or what it calls (`outgoing`), with where: to see what a change \
+to it affects before making it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The file, relative to the project root (or absolute)." },
+                "line": { "type": "integer", "minimum": 1, "description": "The line the function's name is on (1-based)." },
+                "symbol": { "type": "string", "description": "The function's name, as written on that line." },
+                "direction": { "enum": ["incoming", "outgoing"] }
+            },
+            "required": ["path", "line", "symbol"]
+        }
+    }, {
+        "name": "signature_help",
+        "title": "Signature help",
+        "description": "The signatures (overloads) and parameter docs of the function called on a line, as `symbol(…)`: what to pass it.",
+        "inputSchema": symbol_schema(false)
+    }, {
         "name": "workspace_symbols",
         "title": "Find symbols",
         "description": "Types, functions and other symbols whose name matches, across the project, with where they are (the language servers' workspace symbols).",
@@ -546,6 +595,17 @@ or that it ended without stopping. Give `test_path` or `test_name` for tests, el
         "title": "Show your changes",
         "description": "Open the review of the files you changed in this conversation as diffs (where the user keeps or undoes each change), at one file if given.",
         "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file to show first." } } }
+    }, {
+        "name": "run_command",
+        "title": "Run a command",
+        "description": "Runs a shell command in a terminal of Forge's that the user watches live in this conversation, and returns its exit \
+code and output (the end of it, if long) once it ends. Use it for builds, installs, scripts, migrations and anything that takes a while \
+(your own shell tool only shows the user the output at the end). The user's permission settings apply, as for your other commands.",
+        "inputSchema": { "type": "object", "properties": {
+            "command": { "type": "string", "description": "The command line, run by the user's shell." },
+            "cwd": { "type": "string", "description": "Where to run it, relative to the project root (default: the root)." },
+            "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Stop it after this long (default 600)." }
+        }, "required": ["command"] }
     }, {
         "name": "forge_settings",
         "title": "Forge's settings",
@@ -718,8 +778,8 @@ mod tests {
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__") && !n.starts_with("skill_")).collect();
         assert_eq!(names, [
             "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "check_file", "go_to_definition", "find_references", "rename_symbol", "hover",
-            "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
-            "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes", "forge_settings", "change_settings",
+            "document_symbols", "go_to_implementation", "go_to_type_definition", "call_hierarchy", "signature_help", "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
+            "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes", "run_command", "forge_settings", "change_settings",
             "forge_keybindings", "change_keybinding", "forge_guide",
         ]);
         assert_eq!(tools[11]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));

@@ -3,6 +3,10 @@
 //! in the editor area (thread tab), anchored in the code (ctrl-enter), following the
 //! agent live, with access to the project's files through Zed's buffers.
 
+// Forge's MCP tool list is one large `json!` literal.
+#![recursion_limit = "256"]
+
+pub mod agent_ignore;
 pub mod agent_review;
 pub mod agent_settings;
 mod anchored;

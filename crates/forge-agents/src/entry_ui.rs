@@ -28,7 +28,8 @@ fn wrapping(text: impl IntoElement) -> gpui::Div {
     div().flex_1().min_w_0().child(text)
 }
 
-pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, entry: &Entry, window: &Window, cx: &App) -> AnyElement {
+/// `user_markdown`: the user's message as Markdown, for a user entry (plain text without).
+pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, entry: &Entry, user_markdown: Option<&gpui::Entity<markdown::Markdown>>, window: &Window, cx: &App) -> AnyElement {
     let colors = cx.theme().colors().clone();
     match entry {
         // Your message stands apart from the agent's work, so turns are easy to find when
@@ -80,7 +81,11 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                             }))
                     })),
             )
-            .child(wrapping(Label::new(text.clone())))
+            // Written in Markdown, as messages to agents often are, and shown so.
+            .child(match user_markdown {
+                Some(md) => div().min_w_0().child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))).into_any_element(),
+                None => wrapping(Label::new(text.clone())).into_any_element(),
+            })
             .when(!context.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(context.iter().map(|c| {
                     h_flex().gap_0p5().child(Icon::new(IconName::File).size(IconSize::XSmall).color(Color::Muted)).child(Label::new(c.clone()).size(LabelSize::Small).color(Color::Muted))
@@ -230,6 +235,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::ExtensionTool { tool, args, state, .. } => render_extension_tool(handle, ix, tool, args, state, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
         Entry::Config { changes, state, .. } => render_config(handle, ix, changes, state, cx),
+        Entry::Command { command, cwd, state, terminal, exit, .. } => render_command(thread, handle, ix, command, cwd, state, terminal.as_deref(), exit.as_deref(), cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
@@ -486,6 +492,50 @@ fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note
             el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
         })
         .child(footer)
+        .into_any_element()
+}
+
+/// A command the agent runs with `run_command`: what and where, *Run* / *Don't* while it
+/// waits for the user, then its terminal (live) and how it ended.
+#[allow(clippy::too_many_arguments)]
+fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, command: &str, cwd: &std::path::Path, state: &crate::forge_tools::EditState, terminal: Option<&str>, exit: Option<&str>, cx: &App) -> AnyElement {
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let waiting = *state == EditState::Waiting;
+    let place = cwd.strip_prefix(thread.root()).ok().filter(|p| !p.as_os_str().is_empty()).map(|p| format!(" in {}", p.display())).unwrap_or_default();
+    let terminal_view = terminal.and_then(|t| thread.terminal_view(t));
+    let (icon, color) = match state {
+        EditState::Waiting => (IconName::Terminal, Color::Info),
+        EditState::Applying => (IconName::ArrowCircle, Color::Accent),
+        EditState::Applied => (IconName::Check, if exit.is_some_and(|e| e.starts_with("Exit code 0") || e == "It ended.") { Color::Success } else { Color::Warning }),
+        EditState::Declined => (IconName::Close, Color::Muted),
+        EditState::Failed(_) => (IconName::XCircle, Color::Error),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if waiting { cx.theme().status().info_border } else { colors.border })
+        .when(waiting, |el| el.bg(cx.theme().status().info_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                .child(Label::new(if waiting { "The agent wants to run" } else { "Ran" }).size(LabelSize::Small).color(Color::Muted))
+                .child(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx))
+                .when(!place.is_empty(), |el| el.child(Label::new(place).size(LabelSize::Small).color(Color::Muted))),
+        )
+        .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
+        .when_some(exit.map(str::to_string), |el, exit| el.child(Label::new(exit).size(LabelSize::XSmall).color(Color::Muted)))
+        .when(waiting, |el| {
+            el.child(
+                h_flex()
+                    .gap_1()
+                    .child(Button::new(("command-run", ix), "Run").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::PlayFilled).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_command(ix, true, window, cx))))
+                    .child(Button::new(("command-skip", ix), "Don't").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_command(ix, false, window, cx)))),
+            )
+        })
         .into_any_element()
 }
 

@@ -431,6 +431,142 @@ pub(crate) async fn hover(ide: Ide, args: Value, cx: &mut AsyncWindowContext) ->
     Ok(text.join("\n\n"))
 }
 
+/// Where the implementations of `symbol` are (of an interface, a trait, an abstract method).
+pub(crate) async fn implementations(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.implementations(&buffer, point, cx)).map_err(|_| closed())?;
+    let links = task.await.map_err(|e| format!("The language server couldn't find them: {e:#}"))?.unwrap_or_default();
+    if links.is_empty() {
+        return Ok(format!("The language server finds no implementations of `{symbol}`."));
+    }
+    let mut lines = cx
+        .update(|_, cx| links.iter().take(MAX_RESULTS).map(|l| describe(&ide, &l.target.buffer, l.target.range.start.to_point(&l.target.buffer.read(cx).snapshot()), cx)).collect::<Vec<_>>())
+        .map_err(|_| closed())?;
+    lines.sort();
+    lines.dedup();
+    Ok(format!("{} implementation{} of `{symbol}`:\n{}", links.len(), if links.len() == 1 { "" } else { "s" }, lines.join("\n")))
+}
+
+/// Where the type of `symbol` (a variable, a parameter, an expression) is defined.
+pub(crate) async fn type_definition(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.type_definitions(&buffer, point, cx)).map_err(|_| closed())?;
+    let links = task.await.map_err(|e| format!("The language server couldn't find it: {e:#}"))?.unwrap_or_default();
+    if links.is_empty() {
+        return Err(format!("The language server knows no type definition for `{symbol}` there."));
+    }
+    let lines = cx
+        .update(|_, cx| links.iter().map(|l| describe(&ide, &l.target.buffer, l.target.range.start.to_point(&l.target.buffer.read(cx).snapshot()), cx)).collect::<Vec<_>>())
+        .map_err(|_| closed())?;
+    Ok(format!("The type of `{symbol}` is defined at:\n{}", lines.join("\n")))
+}
+
+/// A file's outline: its classes, functions, methods… nested, with their lines.
+pub(crate) async fn document_symbols(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
+    let buffer = open(&ide, &ide.resolve(&path), cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.document_symbols(&buffer, cx)).map_err(|_| closed())?;
+    let symbols = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?;
+    if symbols.is_empty() {
+        return Ok(format!("The language server lists no symbols in {path} (is one running for this file?)."));
+    }
+    fn walk(symbols: &[project::DocumentSymbol], depth: usize, out: &mut Vec<String>) {
+        for s in symbols {
+            let (start, end) = (s.range.start.0.row + 1, s.range.end.0.row + 1);
+            let lines = if start == end { format!("line {start}") } else { format!("lines {start}-{end}") };
+            out.push(format!("{}{} {} ({lines})", "  ".repeat(depth), symbol_kind(s.kind), s.name));
+            walk(&s.children, depth + 1, out);
+        }
+    }
+    let mut lines = Vec::new();
+    walk(&symbols, 0, &mut lines);
+    let total = lines.len();
+    lines.truncate(MAX_RESULTS * 3);
+    let more = if total > lines.len() { format!("\n… and {} more", total - lines.len()) } else { String::new() };
+    Ok(format!("{}{more}", lines.join("\n")))
+}
+
+/// `function`, `class`, `method`…: a symbol kind as words.
+fn symbol_kind(kind: impl std::fmt::Debug) -> String {
+    let name = format!("{kind:?}");
+    // `SymbolKind(12)`-style output for kinds the protocol doesn't name.
+    if name.starts_with("SymbolKind") { "symbol".into() } else { name.to_lowercase().replace('_', " ") }
+}
+
+/// Who calls `symbol` (`incoming`, the default) or what it calls (`outgoing`), per the
+/// language server's call hierarchy: each caller or callee with where.
+pub(crate) async fn call_hierarchy(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let outgoing = str_arg(&args, "direction").as_deref() == Some("outgoing");
+    let task = ide.project.update(cx, |p, cx| p.prepare_call_hierarchy(&buffer, point, cx)).map_err(|_| closed())?;
+    let items = task.await.map_err(|e| format!("The language server has no call hierarchy there: {e:#}"))?.unwrap_or_default();
+    let Some(item) = items.into_iter().next() else {
+        return Err(format!("The language server has no call hierarchy for `{symbol}` (is it a function or method, and does the server support call hierarchies?)."));
+    };
+    let item_place = |item: &project::CallHierarchyItem, cx: &gpui::App| {
+        let snapshot = item.buffer.read(cx).snapshot();
+        describe(&ide, &item.buffer, item.selection_range.start.to_point(&snapshot), cx)
+    };
+    let lines: Vec<String> = if outgoing {
+        let task = ide.project.update(cx, |p, cx| p.outgoing_calls(item, cx)).map_err(|_| closed())?;
+        let calls = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?.unwrap_or_default();
+        cx.update(|_, cx| calls.iter().take(MAX_RESULTS).map(|c| format!("- {} {}: {}", symbol_kind(c.to.kind), c.to.name, item_place(&c.to, cx))).collect()).map_err(|_| closed())?
+    } else {
+        let task = ide.project.update(cx, |p, cx| p.incoming_calls(item, cx)).map_err(|_| closed())?;
+        let calls = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?.unwrap_or_default();
+        cx.update(|_, cx| {
+            calls
+                .iter()
+                .take(MAX_RESULTS)
+                .map(|c| {
+                    let sites: Vec<String> = c.from_ranges.iter().map(|l| (l.range.start.to_point(&l.buffer.read(cx).snapshot()).row + 1).to_string()).collect();
+                    let times = if sites.len() > 1 { format!(" ({} calls, lines {})", sites.len(), sites.join(", ")) } else { String::new() };
+                    format!("- {} {}{times}: {}", symbol_kind(c.from.kind), c.from.name, item_place(&c.from, cx))
+                })
+                .collect()
+        })
+        .map_err(|_| closed())?
+    };
+    if lines.is_empty() {
+        return Ok(if outgoing { format!("`{symbol}` calls nothing the language server knows of.") } else { format!("Nothing calls `{symbol}`, as far as the language server knows.") });
+    }
+    Ok(format!("{} `{symbol}`:\n{}", if outgoing { "Calls made by" } else { "Callers of" }, lines.join("\n")))
+}
+
+/// The signatures (overloads) of the function called as `symbol(` on `line`, with their
+/// parameters' documentation.
+pub(crate) async fn signature_help(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    // Inside the call's parentheses, where an editor asks for it.
+    let inside = cx
+        .update(|_, cx| {
+            let snapshot = buffer.read(cx).snapshot();
+            let after = Point::new(point.row, point.column + symbol.len() as u32);
+            let rest: String = snapshot.text_for_range(after..Point::new(point.row, snapshot.line_len(point.row))).collect();
+            let skip = rest.find('(').map(|i| i + 1).unwrap_or(0) as u32;
+            Point::new(point.row, after.column + skip)
+        })
+        .map_err(|_| closed())?;
+    let task = ide.project.update(cx, |p, cx| p.lsp_store().update(cx, |s, cx| s.signature_help(&buffer, inside, cx))).map_err(|_| closed())?;
+    let helps = task.await.unwrap_or_default();
+    let text = cx
+        .update(|_, cx| {
+            helps
+                .iter()
+                .flat_map(|h| h.signatures.iter())
+                .map(|sig| {
+                    let docs = sig.documentation.as_ref().map(|d| d.read(cx).source().trim().to_string()).filter(|d| !d.is_empty()).map(|d| format!("\n  {}", d.replace('\n', "\n  "))).unwrap_or_default();
+                    format!("- {}{docs}", sig.label)
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|_| closed())?;
+    if text.is_empty() {
+        return Ok(format!("The language server gives no signature for `{symbol}(` there."));
+    }
+    Ok(format!("`{symbol}`:\n{}", text.join("\n")))
+}
+
 /// Symbols (types, functions…) whose name matches `query`, across the project.
 pub(crate) async fn workspace_symbols(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let query = str_arg(&args, "query").ok_or("`query` is missing.")?;

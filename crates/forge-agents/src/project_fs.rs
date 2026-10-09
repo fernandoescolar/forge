@@ -100,9 +100,18 @@ impl ProjectFs {
         let (tx, mut rx) = mpsc::unbounded::<Request>();
         let project = project.downgrade();
         let fs = <dyn fs::Fs>::global(cx);
+        let project_root = root.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(req) = rx.next().await {
+                // Files kept from agents (secrets, `.forge/agentignore`), as it reads now.
+                let kept = crate::agent_ignore::AgentIgnore::load(&project_root);
                 match req {
+                    Request::Read(path, reply) if kept.denies(&path) => {
+                        let _ = reply.send(Err(IdeError::InvalidInput(kept.refusal(&path))));
+                    }
+                    Request::Write(path, _, reply) if kept.denies(&path) => {
+                        let _ = reply.send(Err(IdeError::InvalidInput(kept.refusal(&path))));
+                    }
                     Request::Read(path, reply) => {
                         let outside_ok = policy.permissions.get().may_touch_outside();
                         let _ = reply.send(read(&project, &fs, &path, outside_ok, cx).await);
@@ -332,6 +341,26 @@ mod tests {
         assert_eq!(written.next().await.unwrap().problems_before, None, "read once");
         adapter.write_file(Path::new("new.rs"), "fn new() {}\n".into()).await.unwrap();
         assert_eq!(written.next().await.unwrap().problems_before, Some(vec![]), "a new file had none");
+    }
+
+    /// Secrets are kept from agents: reading or writing them is refused.
+    #[gpui::test]
+    async fn keeps_secrets_from_agents(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ ".env": "KEY=secret", "a.txt": "a" })).await;
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let adapter = cx.update(|cx| ProjectFs::new(&project, "/root".into(), ReviewPolicy::default(), cx));
+        let refused = adapter.read_file(Path::new(".env")).await.unwrap_err().to_string();
+        assert!(refused.contains("kept from agents"), "{refused}");
+        assert!(adapter.write_file(Path::new(".env"), "KEY=leaked".into()).await.is_err());
+        assert_eq!(fs.load(Path::new("/root/.env")).await.unwrap(), "KEY=secret");
+        assert_eq!(adapter.read_file(Path::new("a.txt")).await.unwrap(), "a");
     }
 
     #[gpui::test]

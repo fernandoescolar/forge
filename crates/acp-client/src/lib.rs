@@ -287,7 +287,7 @@ impl AgentService for AcpRuntime {
                     "fs": {"readTextFile": true, "writeTextFile": true},
                     "terminal": self.terminals.is_some(),
                     "auth": {"terminal": self.terminal_auth},
-                    "_meta": {"terminal-auth": self.terminal_auth, "terminal_output": self.display_terminals},
+                    "_meta": {"terminal-auth": self.terminal_auth, "terminal_output": self.display_terminals, "terminal_output_delta": self.display_terminals},
                 },
                 "clientInfo": {"name": "Forge IDE", "version": env!("CARGO_PKG_VERSION")},
             }),

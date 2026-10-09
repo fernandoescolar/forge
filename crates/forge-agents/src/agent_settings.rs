@@ -449,7 +449,7 @@ mod tests {
         let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let tmp = tempfile::tempdir().unwrap();
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
         cx.update(|_, cx| settings::set_in_memory(config, tmp.path().to_path_buf(), cx));
 
         workspace.update_in(cx, |ws, window, cx| open(ws, window, cx));

@@ -3484,6 +3484,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "ide-api",
+ "ignore",
  "imara-diff 0.1.8",
  "language",
  "log",
