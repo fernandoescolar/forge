@@ -66,6 +66,10 @@ jobs:
   check-windows:
     runs-on: windows-latest
     steps:
+      # Files exactly as they are in the repositories (Zed's included), not with CRLF:
+      # Forge's patches to Zed apply to them as they are.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           submodules: true

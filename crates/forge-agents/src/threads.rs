@@ -1619,6 +1619,21 @@ mod tests {
         cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), move |_, _| div().size_full().child(view));
     }
 
+    /// [`diff_rows`] once both are non-zero (diffs are computed in the background, later on a
+    /// busy machine), or whatever they are after 20 seconds, for the test to report.
+    async fn changed_rows(editor: &Entity<Editor>, view: &Entity<ThreadView>, cx: &mut VisualTestContext) -> (usize, usize) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            draw(view, cx);
+            let (added, deleted) = diff_rows(editor, cx);
+            if (added > 0 && deleted > 0) || Instant::now() >= deadline {
+                return (added, deleted);
+            }
+            cx.background_executor.timer(Duration::from_millis(20)).await;
+        }
+    }
+
     /// (added, deleted) rows the editor shows as diff, expanded.
     fn diff_rows(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> (usize, usize) {
         editor.update(cx, |e, cx| {
@@ -1676,7 +1691,7 @@ mod tests {
         cx.run_until_parked();
         draw(&view, cx);
         let proposal = view.read_with(cx, |v, _| v.follow_review.as_ref().map(|(_, d)| d.editor.clone())).expect("the pane shows the proposal");
-        let (added, deleted) = diff_rows(&proposal, cx);
+        let (added, deleted) = changed_rows(&proposal, &view, cx).await;
         assert!(added > 0 && deleted > 0, "the proposal shows added and deleted rows: {added} added, {deleted} deleted");
 
         let review = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::Review { .. })).unwrap());
@@ -1686,7 +1701,7 @@ mod tests {
         draw(&view, cx);
         assert!(view.read_with(cx, |v, _| v.follow_review.is_none()), "answered: back to the file");
         let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
-        let (added, deleted) = diff_rows(&editor, cx);
+        let (added, deleted) = changed_rows(&editor, &view, cx).await;
         assert!(added > 0 && deleted > 0, "the file shows the agent's change: {added} added, {deleted} deleted");
         // Filled red and green, not git's hollow staged hunks.
         let staged = editor.update(cx, |e, cx| {
@@ -1755,7 +1770,7 @@ mod tests {
         let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
         let text = editor.update(cx, |e, cx| e.buffer().read(cx).snapshot(cx).text());
         assert!(text.contains("new"), "the pane shows the written file: {text:?}");
-        let (added, deleted) = diff_rows(&editor, cx);
+        let (added, deleted) = changed_rows(&editor, &view, cx).await;
         assert!(added > 0 && deleted > 0, "the pane shows the agent's change: {added} added, {deleted} deleted");
     }
 
@@ -1808,7 +1823,7 @@ mod tests {
         let changes = thread.read_with(cx, |t, _| t.changes.iter().map(|c| (c.path.clone(), c.original.clone(), c.current.clone())).collect::<Vec<_>>());
         assert_eq!(changes, [(std::path::PathBuf::from("/root/a.rs"), Some(before.to_string()), after.to_string())]);
         let editor = view.read_with(cx, |v, _| v.follow.as_ref().and_then(|f| f.editor.clone())).expect("the pane shows the file");
-        let (added, deleted) = diff_rows(&editor, cx);
+        let (added, deleted) = changed_rows(&editor, &view, cx).await;
         assert!(added > 0 && deleted > 0, "the pane shows the agent's change: {added} added, {deleted} deleted");
 
         // A snippet's diff doesn't say what the file was: not recorded.

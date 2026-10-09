@@ -9,7 +9,9 @@ VERSION="0.23.5"
 CLI="tree-sitter-cli@0.25.10"   # writes ABI 15, what Forge's tree-sitter reads
 DEST="$ROOT/vendor/tree-sitter-c-sharp"
 PATCHES=("$ROOT"/patches/tree-sitter-c-sharp/*.patch)
-STAMP="$(cat "${PATCHES[@]}" | shasum | cut -d' ' -f1)-$VERSION"
+# SHA-1 of the patches: `shasum` on macOS, `sha1sum` where it is missing (Git Bash on Windows).
+SHA1="$(command -v shasum || command -v sha1sum)"
+STAMP="$(cat "${PATCHES[@]}" | "$SHA1" | cut -d' ' -f1)-$VERSION"
 
 if [[ -f "$DEST/.forge-stamp" && "$(cat "$DEST/.forge-stamp")" == "$STAMP" ]]; then
     echo "up to date:      tree-sitter-c-sharp $VERSION"
