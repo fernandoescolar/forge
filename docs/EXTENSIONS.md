@@ -120,7 +120,7 @@ An extension is a folder whose `package.json` has a `forge` section:
 | `forge.sidecars` | Names of the programs it ships in `bin/<platform>/` (see [Sidecars](#programs-and-sidecars)) |
 | `forge.files` | The files a package includes, if the defaults don't suit (see [Packaging](#packaging-and-sharing)) |
 
-Forge looks for extensions in `~/Library/Application Support/Forge/extensions` (where installing puts them), in the app bundle (the ones that ship with Forge), in the folders listed in `$FORGE_EXTENSIONS_PATH` (colon-separated), and in debug builds in this repository's `extensions/`.
+Forge looks for extensions in `~/Library/Application Support/Forge/extensions` (on Linux, `~/.local/share/forge/extensions`; where installing puts them), in the app bundle or, on Linux, `share/forge/extensions` next to `bin/forge` (the ones that ship with Forge), in the folders listed in `$FORGE_EXTENSIONS_PATH` (colon-separated), and in debug builds in this repository's `extensions/`.
 
 ## Activation and the context
 
@@ -442,6 +442,7 @@ Extensions run with the user's rights: they can read files and run programs. Say
 | `forge.window` | `showMessage`, `confirm`, `pickFiles`, `saveFile` |
 | `forge.clipboard` | `writeText`, `readText` |
 | `forge.agents` | `registerTool({ name, title, description, inputSchema, readOnly, run })` |
+| `forge` | `platform` (`darwin`, `linux`, `win32`), `shortcut('secondary-enter')` (`⌘Enter` on macOS, `Ctrl+Enter` elsewhere: write key hints with it), `log` |
 | `ctx` | `id`, `path`, `subscriptions`, `storage`, `workspaceStorage`, `secrets` |
 
 Everything returning a `Disposable` (`{ dispose() }`) can go into `ctx.subscriptions`. The types are in `packages/forge-api/src/index.ts`, with a comment on each.

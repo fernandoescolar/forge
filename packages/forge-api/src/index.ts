@@ -80,7 +80,7 @@ export type ButtonProps = Base & {
 export type InputProps = Base & {
   value: string;
   placeholder?: string;
-  /** Several lines (Enter adds a line; ⌘Enter submits). */
+  /** Several lines (Enter adds a line; ⌘Enter, Ctrl+Enter on Linux and Windows, submits). */
   multiline?: boolean;
   /** Hides what is typed. */
   password?: boolean;
@@ -89,7 +89,7 @@ export type InputProps = Base & {
   /** Highlights the text as this language (Forge's name for it: "JSON", "SQL", "YAML"…). */
   language?: string;
   onChange?: (value: string) => void;
-  /** Enter in a single-line input, ⌘Enter in a multi-line one. */
+  /** Enter in a single-line input, ⌘Enter (Ctrl+Enter on Linux and Windows) in a multi-line one. */
   onSubmit?: (value: string) => void;
 };
 export type CheckboxProps = Base & { checked: boolean; label?: string; onChange?: (checked: boolean) => void };
@@ -792,7 +792,35 @@ export function forgeFor(extension: string | null) {
     readText: () => call<string | null>('clipboard.readText'),
   },
   log: (...args: unknown[]) => native().log('info', args.map(String).join(' ')),
+  /** The system Forge runs on: `darwin`, `linux` or `win32`. */
+  get platform(): Platform {
+    return platform();
+  },
+  shortcut,
   };
+}
+
+export type Platform = 'darwin' | 'linux' | 'win32';
+
+function platform(): Platform {
+  const p = globalThis.__forgeNative?.platform;
+  return p === 'linux' || p === 'win32' ? p : 'darwin';
+}
+
+const MAC_MODIFIERS: Record<string, string> = { secondary: '⌘', cmd: '⌘', ctrl: '⌃', alt: '⌥', shift: '⇧' };
+const OTHER_MODIFIERS: Record<string, string> = { secondary: 'Ctrl', cmd: 'Super', ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift' };
+
+/**
+ * A key binding as this system writes it, from Forge's notation (`secondary` is ⌘ on macOS
+ * and Ctrl elsewhere): `shortcut('secondary-enter')` is `⌘Enter` on macOS and `Ctrl+Enter`
+ * on Linux and Windows.
+ */
+export function shortcut(keys: string): string {
+  const parts = keys.split('-');
+  const key = parts.pop() ?? '';
+  const name = key.length === 1 ? key.toUpperCase() : key.charAt(0).toUpperCase() + key.slice(1);
+  if (platform() === 'darwin') return parts.map((m) => MAC_MODIFIERS[m] ?? m).join('') + name;
+  return [...parts.map((m) => OTHER_MODIFIERS[m] ?? m), name].join('+');
 }
 
 export type Forge = ReturnType<typeof forgeFor>;

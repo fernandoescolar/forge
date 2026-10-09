@@ -163,3 +163,15 @@ test('intervals repeat until cleared; an extension’s timers stop when it unloa
   flushTimers();
   assert.deepEqual(ticks.slice(4), ['shared'], 'only the extension’s timers stopped');
 });
+
+test('shortcuts are written the way each system writes them', () => {
+  const { ctx } = host();
+  const api = ctx.__forge.modules['@forge-ide/api'];
+  assert.equal(api.forge.platform, 'darwin');
+  assert.equal(api.shortcut('secondary-enter'), '⌘Enter');
+  assert.equal(api.shortcut('secondary-shift-p'), '⌘⇧P');
+  ctx.__forgeNative.platform = 'linux';
+  assert.equal(api.forge.platform, 'linux');
+  assert.equal(api.forge.shortcut('secondary-enter'), 'Ctrl+Enter');
+  assert.equal(api.shortcut('secondary-shift-p'), 'Ctrl+Shift+P');
+});

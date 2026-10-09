@@ -340,7 +340,7 @@ export function KeyView({ connectionId, db, keyName, keyEscaped, onRenamed, onDe
         <View style={{ grow: true, padding: 8, gap: 6 }}>
           {value.escaped && <Text style={{ size: 'sm', color: 'muted' }}>Not UTF-8: bytes show as \xNN (and \ as \\) and are saved from that form.</Text>}
           <View style={{ direction: 'row', gap: 6 }}>
-            <Button label="Save" icon="check" variant="filled" disabled={!stringDirty || busy} tooltip="⌘Enter" onClick={saveString} />
+            <Button label="Save" icon="check" variant="filled" disabled={!stringDirty || busy} tooltip={forge.shortcut('secondary-enter')} onClick={saveString} />
             {stringDirty && <Button label="Revert" icon="undo" variant="ghost" onClick={() => setText(value.text ?? '')} />}
           </View>
           <Input value={text} multiline language={looksLikeJson(text) ? 'JSON' : undefined} onChange={setText} onSubmit={() => stringDirty && saveString()} />

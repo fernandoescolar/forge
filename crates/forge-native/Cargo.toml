@@ -84,6 +84,12 @@ semver = "1"
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
 
+# Linux: GPUI draws through Wayland or X11, whichever the session offers.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit", "wayland", "x11"] }
+# The window icon (X11 shows it; Wayland takes the launcher's).
+image = { version = "0.25.1", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
 tempfile.workspace = true

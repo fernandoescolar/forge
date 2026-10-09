@@ -11,6 +11,10 @@ mod external_changes;
 mod menus;
 mod search_bars;
 mod settings_view;
+// Used on Linux; built on every Unix so its tests run on macOS too.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+mod single_instance;
 mod open_editors;
 mod statusbar;
 mod theme;
@@ -52,10 +56,25 @@ fn main() {
     forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")));
 
     // Keep Forge's settings, database and caches apart from an installed Zed.
-    let data_dir = dirs_data_dir().join("Forge");
+    let data_dir = forge_data_dir();
     paths::set_custom_data_dir(&data_dir.to_string_lossy());
 
     let paths = startup_paths(std::env::args().skip(1));
+    let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+
+    // Linux: a Forge that is already running opens the paths instead (`forge .` from a
+    // terminal); else this one listens for later ones.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    match single_instance::claim(&single_instance::socket_path(&data_dir), &paths) {
+        Ok(single_instance::Instance::Forwarded) => return,
+        Ok(single_instance::Instance::First(listener)) => {
+            let open_tx = open_tx.clone();
+            single_instance::serve(listener, move |paths| {
+                open_tx.unbounded_send(paths).ok();
+            });
+        }
+        Err(e) => log::warn!("couldn't make sure only one Forge runs: {e}"),
+    }
 
     let app = Application::with_platform(gpui_platform::current_platform(false)).with_assets(branding::ForgeAssets);
     let app_db = db::AppDatabase::new();
@@ -74,7 +93,6 @@ fn main() {
     }
     let fs: Arc<dyn Fs> = RealFs::new(None, app.background_executor());
     // Files/folders dropped on the Dock icon or opened with "Open With → Forge".
-    let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
     app.on_open_urls(move |urls| {
         let paths: Vec<PathBuf> = urls.iter().filter_map(|u| url::Url::parse(u).ok()?.to_file_path().ok()).collect();
         if !paths.is_empty() {
@@ -207,6 +225,11 @@ fn main() {
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(paths) = open_rx.next().await {
+                // Another `forge` without paths: just come to the front.
+                if paths.is_empty() {
+                    cx.update(|cx| cx.activate(true));
+                    continue;
+                }
                 let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), own_window(), cx));
                 open.await.with_context(|| format!("failed to open {paths:?}")).log_err();
             }
@@ -276,9 +299,15 @@ fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
     args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).map(|p| p.canonicalize().unwrap_or(p)).collect()
 }
 
-fn dirs_data_dir() -> PathBuf {
+/// Where Forge keeps its settings, database and caches: `~/Library/Application Support/Forge`
+/// on macOS, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`) elsewhere.
+fn forge_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    if cfg!(target_os = "macos") { home.join("Library/Application Support") } else { home.join(".local/share") }
+    if cfg!(target_os = "macos") {
+        return home.join("Library/Application Support/Forge");
+    }
+    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
+    data_home.join("forge")
 }
 
 fn semver(v: &str) -> semver::Version {
@@ -333,16 +362,16 @@ fn load_keymap(cx: &mut App) {
 
 /// Forge's bindings, over Zed's defaults (of two bindings for the same place, the later wins).
 fn bind_forge_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None), gpui::KeyBinding::new("cmd-,", settings_view::OpenSettings, None)]);
+    cx.bind_keys([gpui::KeyBinding::new("secondary-q", Quit, None), gpui::KeyBinding::new("secondary-,", settings_view::OpenSettings, None)]);
     // ⌘↩ shows the code actions (Zed: ⌘., kept too), instead of Zed's "new line below".
-    cx.bind_keys([gpui::KeyBinding::new("cmd-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"))]);
+    cx.bind_keys([gpui::KeyBinding::new("secondary-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"))]);
     forge_agents::bind_keys(cx);
     // ⌘. / ⌘↩ in a project file (no language server there): the package's other versions.
     for extension in ["csproj", "fsproj", "vbproj", "props", "targets", "proj"] {
         let context = format!("Editor && extension == {extension}");
         cx.bind_keys([
-            gpui::KeyBinding::new("cmd-.", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
-            gpui::KeyBinding::new("cmd-enter", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
+            gpui::KeyBinding::new("secondary-.", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
+            gpui::KeyBinding::new("secondary-enter", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
         ]);
     }
     // After the code actions: in a .http file ⌘↩ sends the request.
@@ -419,9 +448,34 @@ fn build_window_options(display_uuid: Option<uuid::Uuid>, cx: &mut App) -> gpui:
         display_id: display.map(|d| d.id()),
         window_background: cx.theme().window_background_appearance(),
         app_id: Some("dev.forge.ide".into()),
+        #[cfg(target_os = "linux")]
+        icon: app_icon(),
+        // Forge draws the title bar, and on Linux the window's frame and buttons too, unless
+        // `window_decorations` (or FORGE_WINDOW_DECORATIONS) says "server".
+        window_decorations: Some(window_decorations(cx)),
         window_min_size: Some(gpui::Size { width: px(360.0), height: px(240.0) }),
         ..Default::default()
     }
+}
+
+fn window_decorations(cx: &App) -> gpui::WindowDecorations {
+    use settings::Settings as _;
+    match std::env::var("FORGE_WINDOW_DECORATIONS").as_deref() {
+        Ok("server") => gpui::WindowDecorations::Server,
+        Ok("client") => gpui::WindowDecorations::Client,
+        _ => match workspace::WorkspaceSettings::get_global(cx).window_decorations {
+            settings::WindowDecorations::Server => gpui::WindowDecorations::Server,
+            settings::WindowDecorations::Client => gpui::WindowDecorations::Client,
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn app_icon() -> Option<Arc<image::RgbaImage>> {
+    static ICON: std::sync::LazyLock<Option<Arc<image::RgbaImage>>> = std::sync::LazyLock::new(|| {
+        image::load_from_memory_with_format(include_bytes!("../assets/images/app_icon.png"), image::ImageFormat::Png).map(|i| Arc::new(i.into_rgba8())).log_err()
+    });
+    ICON.clone()
 }
 
 #[cfg(test)]

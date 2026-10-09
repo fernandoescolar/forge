@@ -82,8 +82,8 @@ impl Global for Stores {}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-alt-n", NewThread, None),
-        gpui::KeyBinding::new("cmd-shift-a", OpenThreads, None),
+        gpui::KeyBinding::new("secondary-alt-n", NewThread, None),
+        gpui::KeyBinding::new("secondary-shift-a", OpenThreads, None),
         gpui::KeyBinding::new("enter", Send, Some("ForgeAgentInput > Editor")),
         gpui::KeyBinding::new("shift-enter", editor::actions::Newline, Some("ForgeAgentInput > Editor")),
         gpui::KeyBinding::new("escape", Cancel, Some("ForgeThread")),

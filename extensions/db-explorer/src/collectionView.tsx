@@ -196,7 +196,7 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
         {running ? (
           <Button label="Cancel" icon="stop" variant="filled" onClick={() => sql.cancel(running)} />
         ) : (
-          <Button label="Run" icon="play_filled" variant="filled" tooltip={mode === 'find' ? 'Find (Enter in a field)' : 'Run the pipeline (⌘Enter)'} onClick={() => run()} />
+          <Button label="Run" icon="play_filled" variant="filled" tooltip={mode === 'find' ? 'Find (Enter in a field)' : `Run the pipeline (${forge.shortcut('secondary-enter')})`} onClick={() => run()} />
         )}
         {running && <Spinner />}
         <View style={{ grow: true }} />
@@ -270,7 +270,7 @@ export function CollectionView({ connectionId, database, collection, kind }: Pro
               <View style={{ direction: 'row', gap: 4, paddingX: 8, paddingY: 4, borderSide: 'bottom' }}>
                 <Text style={{ size: 'sm', weight: 'medium', truncate: true }}>{editing?.kind === 'new' ? 'New document' : editing?.kind === 'existing' ? editing.id : 'Document'}</Text>
                 <View style={{ grow: true }} />
-                {!readOnly && editing && <Button label={editing.kind === 'new' ? 'Insert' : 'Save'} icon="check" variant="filled" disabled={!dirty || saving} tooltip="⌘Enter" onClick={save} />}
+                {!readOnly && editing && <Button label={editing.kind === 'new' ? 'Insert' : 'Save'} icon="check" variant="filled" disabled={!dirty || saving} tooltip={forge.shortcut('secondary-enter')} onClick={save} />}
                 {editing?.kind === 'existing' && dirty && <Button icon="undo" variant="ghost" tooltip="Revert" onClick={() => current && setText(current.text)} />}
                 {!readOnly && editing?.kind === 'existing' && <Button icon="trash" variant="ghost" tooltip="Delete Document" onClick={remove} />}
                 <Button

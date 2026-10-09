@@ -51,7 +51,7 @@ pub struct LoadedExtension {
 /// Where a loaded extension comes from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Origin {
-    /// Shipped inside Forge.app.
+    /// Shipped with Forge (inside Forge.app, or in `share/forge/extensions`).
     Bundled,
     /// Installed into Forge's extensions folder (it can be uninstalled).
     Installed,
@@ -338,7 +338,7 @@ impl ExtensionHost {
         let parent = extension.path.parent();
         if parent == Some(paths::data_dir().join("extensions").as_path()) {
             Origin::Installed
-        } else if parent.is_some_and(|p| p.ends_with("Contents/Resources/extensions")) {
+        } else if parent.is_some_and(|p| p.ends_with("Contents/Resources/extensions") || p.ends_with("share/forge/extensions")) {
             Origin::Bundled
         } else {
             Origin::Development

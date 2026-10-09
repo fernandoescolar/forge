@@ -35,8 +35,8 @@ gpui::actions!(forge_agent, [
 /// for staging and restoring git hunks). Bound after the default keymap so they win.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-alt-y", KeepAgentChange, Some("Editor")),
-        gpui::KeyBinding::new("cmd-alt-z", UndoAgentChange, Some("Editor")),
+        gpui::KeyBinding::new("secondary-alt-y", KeepAgentChange, Some("Editor")),
+        gpui::KeyBinding::new("secondary-alt-z", UndoAgentChange, Some("Editor")),
     ]);
 }
 

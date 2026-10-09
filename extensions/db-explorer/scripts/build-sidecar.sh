@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build the forge-sql sidecar for macOS and copy the binaries into extensions/db-explorer/bin/.
+# Build the forge-sql sidecar and copy the binaries into extensions/db-explorer/bin/.
 #
-#   scripts/build-sidecar.sh             # aarch64-apple-darwin + x86_64-apple-darwin
+#   scripts/build-sidecar.sh             # macOS: aarch64-apple-darwin + x86_64-apple-darwin; Linux: this machine's
 #   scripts/build-sidecar.sh --host-only # only the current architecture
 #   scripts/build-sidecar.sh --target x86_64-apple-darwin   # only that one
 set -euo pipefail
@@ -21,15 +21,20 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+case "$(uname -s)" in
+  Darwin) vendor_os=apple-darwin ;;
+  Linux) vendor_os=unknown-linux-gnu ;;
+  *) echo "unsupported host system: $(uname -s)" >&2; exit 1 ;;
+esac
 case "$(uname -m)" in
-  arm64|aarch64) host_target=aarch64-apple-darwin ;;
-  x86_64) host_target=x86_64-apple-darwin ;;
+  arm64|aarch64) host_target=aarch64-$vendor_os ;;
+  x86_64) host_target=x86_64-$vendor_os ;;
   *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
 if [[ -n $only_target ]]; then
   targets=("$only_target")
-elif [[ $host_only == 1 ]]; then
+elif [[ $host_only == 1 || $vendor_os != apple-darwin ]]; then
   targets=("$host_target")
 else
   targets=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -39,6 +44,8 @@ for target in "${targets[@]}"; do
   case "$target" in
     aarch64-apple-darwin) dir=darwin-arm64 ;;
     x86_64-apple-darwin) dir=darwin-x64 ;;
+    aarch64-unknown-linux-gnu) dir=linux-arm64 ;;
+    x86_64-unknown-linux-gnu) dir=linux-x64 ;;
     *) echo "unsupported target: $target" >&2; exit 2 ;;
   esac
   echo "==> building forge-sql for $target"

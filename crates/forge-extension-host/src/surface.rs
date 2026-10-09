@@ -45,10 +45,10 @@ actions!(forge_extensions, [
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", menu::Confirm, Some("ForgeInput > Editor")),
-        KeyBinding::new("cmd-enter", menu::SecondaryConfirm, Some("ForgeInput > Editor")),
+        KeyBinding::new("secondary-enter", menu::SecondaryConfirm, Some("ForgeInput > Editor")),
         KeyBinding::new("enter", menu::Confirm, Some("ForgeGridCell > Editor")),
         KeyBinding::new("escape", menu::Cancel, Some("ForgeGridCell > Editor")),
-        KeyBinding::new("cmd-c", GridCopy, Some("ForgeGrid")),
+        KeyBinding::new("secondary-c", GridCopy, Some("ForgeGrid")),
         KeyBinding::new("backspace", GridDelete, Some("ForgeGrid")),
         KeyBinding::new("delete", GridDelete, Some("ForgeGrid")),
     ]);

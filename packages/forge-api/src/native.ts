@@ -26,6 +26,8 @@ export interface Native {
   setTimer(id: number, ms: number): void;
   clearTimer(id: number): void;
   log(level: string, message: string): void;
+  /** `darwin`, `linux` or `win32` (missing outside Forge). */
+  platform?: string;
 }
 
 declare global {

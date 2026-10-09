@@ -15,7 +15,9 @@ fn main() {
             Err(e) => panic!("cannot run `{}` ({e}); Node.js is required to build Forge's extension runtime", args[0]),
         }
     };
-    if !pkg.join("node_modules").exists() {
+    // esbuild, not just the folder: an empty `node_modules` (a fresh volume, an aborted
+    // install) needs installing too.
+    if !pkg.join("node_modules/esbuild").exists() {
         run(&["npm", "install", "--no-audit", "--no-fund"]);
     }
     run(&["node", "build.mjs"]);

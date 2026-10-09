@@ -2,7 +2,8 @@
 //! (like Zed), so the workspace draws one: `PlatformTitleBar` (from Zed) reserves room for
 //! the traffic lights and handles dragging / double-click-to-zoom. Forge puts in it:
 //! project, branch and pending git changes on the left; the solution, the run controls
-//! (target, run, debug, stop) and the result of the last test run on the right.
+//! (target, run, debug, stop) and the result of the last test run on the right. Where
+//! there is no global menu bar (Linux, Windows), the app menus come first, as buttons.
 
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
@@ -338,6 +339,7 @@ impl Render for ForgeTitleBar {
             // Breathing room after the traffic lights.
             .pl_4()
             .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
+            .when(!cfg!(target_os = "macos"), |row| row.children(app_menu_bar(cx)))
             .child(Label::new(self.project_name(cx).unwrap_or_else(|| "Forge".into())).size(LabelSize::Small).weight(FontWeight::SEMIBOLD))
             .children(self.branch(cx).map(|b| {
                 ButtonLike::new("tb-branch")
@@ -389,4 +391,55 @@ impl Render for ForgeTitleBar {
         self.platform.update(cx, |bar, _| bar.set_children(children));
         self.platform.clone()
     }
+}
+
+/// The app's menus (`cx.set_menus`) as a row of buttons, each opening its menu: on
+/// platforms without a global menu bar, the window has to show them itself.
+fn app_menu_bar(cx: &gpui::App) -> Option<AnyElement> {
+    let menus = cx.get_menus()?;
+    Some(
+        h_flex()
+            .children(menus.into_iter().map(|menu| {
+                let name: SharedString = menu.name.to_string().into();
+                let items = std::rc::Rc::new(menu.items);
+                PopoverMenu::new(SharedString::from(format!("app-menu-{name}")))
+                    .trigger(ButtonLike::new(SharedString::from(format!("app-menu-button-{name}"))).style(ButtonStyle::Subtle).child(Label::new(name).size(LabelSize::Small)))
+                    .menu(move |window, cx| {
+                        let items = items.clone();
+                        Some(ContextMenu::build(window, cx, move |menu, window, cx| {
+                            // Actions apply to what had focus before the menu opened.
+                            let menu = menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
+                            fill_menu(menu, &items)
+                        }))
+                    })
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
+}
+
+fn fill_menu(menu: ContextMenu, items: &[gpui::OwnedMenuItem]) -> ContextMenu {
+    let mut menu = menu;
+    let mut last_was_separator = true;
+    for item in items {
+        match item {
+            gpui::OwnedMenuItem::Separator => {
+                if !last_was_separator {
+                    menu = menu.separator();
+                    last_was_separator = true;
+                }
+            }
+            gpui::OwnedMenuItem::Action { name, action, checked, disabled, .. } => {
+                menu = menu.action_checked_with_disabled(name.clone(), action.boxed_clone(), *checked, *disabled);
+                last_was_separator = false;
+            }
+            gpui::OwnedMenuItem::Submenu(submenu) if !submenu.items.is_empty() => {
+                let items = std::rc::Rc::new(submenu.items.clone());
+                menu = menu.submenu(submenu.name.to_string(), move |menu, _, _| fill_menu(menu, &items));
+                last_was_separator = false;
+            }
+            gpui::OwnedMenuItem::Submenu(_) | gpui::OwnedMenuItem::SystemMenu(_) => {}
+        }
+    }
+    menu
 }

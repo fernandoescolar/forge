@@ -1,5 +1,5 @@
 # Builds Forge and runs its tests (Rust crates and the extension API) on every push and
-# pull request.
+# pull request, on macOS; on Linux, checks that everything compiles.
 name: CI
 
 on:
@@ -39,3 +39,25 @@ jobs:
         run: npm ci && npm test
       - name: Rust tests
         run: cargo test --workspace
+
+  # Forge also ships for Linux: its crates and tests must keep compiling there.
+  check-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the libraries GPUI builds against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev libsqlite3-dev cmake clang lld
+      - name: Apply Forge's patches to Zed
+        run: scripts/apply-zed-patches.sh
+      - name: Check
+        run: cargo check --workspace --tests

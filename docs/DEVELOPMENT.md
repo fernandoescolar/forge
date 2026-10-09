@@ -6,6 +6,15 @@ How to build, run, test and ship Forge itself. To write extensions instead, see 
 
 You need Rust (stable), Node 20+ (to bundle the extension runtime), `cmake`, and Python 3 (only for the mock agent the tests use). Full Xcode is **not** needed for development: the `runtime-shaders` feature compiles Metal shaders at startup.
 
+On Linux, GPUI also needs the development packages Zed builds against. On Debian and Ubuntu:
+
+```bash
+sudo apt install libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-dev libvulkan1 \
+  libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev libsqlite3-dev cmake clang lld
+```
+
+(`vendor/zed/script/linux` lists them for other distributions.) Forge draws with Vulkan, under Wayland or X11; `FORGE_WINDOW_DECORATIONS=server` asks the desktop to draw the window's frame instead of Forge.
+
 Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.22.0`) and cloned shallowly:
 
 ```bash
@@ -24,7 +33,7 @@ A debug build and an installed Forge.app share the same data folder and bundle i
 
 ## Where Forge keeps things
 
-Forge keeps its state in `~/Library/Application Support/Forge`, apart from an installed Zed:
+Forge keeps its state in `~/Library/Application Support/Forge` (on Linux, `$XDG_DATA_HOME/forge`, usually `~/.local/share/forge`), apart from an installed Zed:
 
 | Path | What it holds |
 | --- | --- |
@@ -66,7 +75,7 @@ packages/agy-acp/        @forge-ide/agy-acp: an ACP adapter for Google Antigravi
 extensions/              workspace-notes (example), db-explorer and containers (ship with Forge)
 patches/zed/             Forge's changes to Zed, applied by scripts/apply-zed-patches.sh
 patches/tree-sitter-c-sharp/  Forge's change to the C# grammar (file-based apps' `#:` lines)
-scripts/                 patches, packaging (bundle-macos.sh), the installer (install.sh), icon
+scripts/                 patches, packaging (bundle-macos.sh, bundle-linux.sh), the installer (install.sh), icon
 tools/                   the mock ACP agent used by tests
 .github/workflows/       CI and releases
 vendor/zed/              Zed, as a git submodule pinned to a release tag
@@ -94,12 +103,17 @@ FORGE_TESTS_PYTHON_DIR=/path/to/project cargo test -p forge-tests -- --ignored r
 ```bash
 scripts/bundle-macos.sh        # → dist/Forge.app and dist/Forge-<version>-<arch>.zip
 open dist/Forge.app
+
+scripts/bundle-linux.sh        # on Linux → dist/forge/ and dist/Forge-<version>-linux-<arch>.tar.gz
+dist/forge/bin/forge
 ```
+
+The Linux tarball holds `forge/bin/forge`, the bundled extensions in `forge/share/forge/extensions`, and a `.desktop` file and icon that `install.sh` installs. On Linux only one Forge runs per user: a second `forge` hands its paths to the first over `$XDG_RUNTIME_DIR/forge.sock` (`single_instance.rs`).
 
 - **Shaders:** by default the release keeps `runtime-shaders`, so Metal shaders compile at launch. With full Xcode installed, `FORGE_PRECOMPILED_SHADERS=1 scripts/bundle-macos.sh` precompiles them.
 - **Signing:** builds and releases signed ad hoc (no certificate) are each a different app to the keychain: after every build or update it asks again for each saved password (extensions' secrets, such as the Database Explorer's), even after *Always Allow*. `scripts/create-signing-identity.sh` creates Forge's own self-signed certificate, "Forge Signing", trusts it on this Mac and keeps it (with its key) in `~/.config/forge/signing`; `bundle-macos.sh` signs with it when it is in the keychain. With `--github` it also sets the repository's `MACOS_CERTIFICATE` and `MACOS_CERTIFICATE_PASSWORD` secrets, so releases are signed with the same certificate: local builds, releases and updates are then one app to the keychain, and *Always Allow* lasts. Back that folder up (a new certificate is a new app again). It doesn't satisfy Gatekeeper: the install script and the updater don't need it to, but a zip downloaded by hand opens with right-click › Open. For that, use a Developer ID instead: `FORGE_SIGN_IDENTITY="Developer ID Application: …"` (hardened runtime, `scripts/Forge.entitlements`), or as the release secrets. With `FORGE_NOTARY_PROFILE=<profile>` as well (created once with `xcrun notarytool store-credentials`), the script notarizes the app and staples the ticket.
 - **CI:** `.github/workflows/ci.yml` runs every test on pushes and pull requests.
-- **Releases:** pushing a tag `v<version>` runs `.github/workflows/release.yml`, which takes the version from the tag. It builds the app for Apple silicon and Intel with precompiled shaders, signs and notarizes it when the `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` secrets are set, and publishes the zips as a GitHub release. Both architectures build on Apple silicon runners (Intel cross-compiled, `FORGE_TARGET=x86_64-apple-darwin scripts/bundle-macos.sh` does the same locally), without debug info. A tag can only reuse build caches saved on `main`, so pushes to `main` that change `Cargo.lock`, Zed or its patches run the same build without publishing, to keep that cache warm (Actions › Release › *Run workflow* does it by hand). With a warm cache a release compiles little more than Forge's own crates.
+- **Releases:** pushing a tag `v<version>` runs `.github/workflows/release.yml`, which takes the version from the tag. It builds the app for Apple silicon and Intel with precompiled shaders, and the Linux tarballs for x86_64 and aarch64 on Ubuntu 22.04 runners, signs and notarizes it when the `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` secrets are set, and publishes the zips and tarballs as a GitHub release. Both architectures build on Apple silicon runners (Intel cross-compiled, `FORGE_TARGET=x86_64-apple-darwin scripts/bundle-macos.sh` does the same locally), without debug info. A tag can only reuse build caches saved on `main`, so pushes to `main` that change `Cargo.lock`, Zed or its patches run the same build without publishing, to keep that cache warm (Actions › Release › *Run workflow* does it by hand). With a warm cache a release compiles little more than Forge's own crates.
 - **Updates:** Forge updates itself from the GitHub releases of `fernandoescolar/forge` (forks set `FORGE_UPDATE_REPOSITORY=owner/repo` when building). Release builds look for a newer release at startup and every six hours; any build looks on Forge › *Check for Updates…*. A newer `Forge-<version>-<arch>.zip` is downloaded, checked (a validly signed app with Forge's bundle id) and swapped in for the running app, and Forge offers to restart (`crates/forge-update`). GitHub's "latest release" is what counts, so mark a release as a pre-release only if you don't want installed copies to move to it.
 - **Cutting a release:** tag the commit and push the tag: `git tag v0.0.2 && git push origin v0.0.2`. The tag is the version (`v1.2.3`, or `v1.2.3-beta.1` for a beta): the release workflow writes it into `Cargo.toml` before building, so the app, its zip and the updater all carry it, and there is nothing to edit first. It builds both architectures and publishes the release; installed copies update within hours. A tag that isn't a version fails the workflow. The app's own version fields get the numeric part only (`0.0.1` for `0.0.1-beta`).
 - **Launching:** from Finder or the Dock, Forge opens an empty window. Folders and files dropped on its icon, or opened with *Open With → Forge*, open as projects; `forge [paths…]` from a terminal opens those paths (`forge .` the current directory); `forge` alone just opens Forge, with the windows of the last session.

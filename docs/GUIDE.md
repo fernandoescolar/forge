@@ -19,7 +19,7 @@ Forge is the opinionated IDE for real-world .NET, Go, Rust and JavaScript develo
 
 ## Install and update
 
-Forge runs on macOS 13 or later, on Apple silicon and Intel. To install it, or update it by hand, run this in a terminal:
+Forge runs on macOS 13 or later (Apple silicon and Intel) and on Linux (x86_64 and ARM64, with glibc 2.35 or later: Ubuntu 22.04, Debian 12, Fedora 36 and later), under Wayland or X11. To install it, or update it by hand, run this in a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
@@ -27,13 +27,15 @@ curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/
 
 It downloads the latest release for your Mac from the [releases page](https://github.com/fernandoescolar/forge/releases), checks its signature, quits Forge if it is running, puts Forge.app in Applications (`~/Applications` if you can't write to Applications) and adds a `forge` command to `~/.local/bin`: `forge .` opens the current folder, `forge file.cs` a file, whether Forge is running or not. `FORGE_VERSION=0.0.2` installs a given version.
 
+On Linux it downloads `Forge-<version>-linux-<arch>.tar.gz`, checks it against the SHA-256 the release lists, unpacks it into `~/.local/opt/forge`, adds Forge to your desktop's applications (with its icon) and adds the `forge` command. A Forge that is running keeps running: restart it to use the new one. `forge .` while Forge runs opens the folder in it rather than starting another Forge. The tarball can also be unpacked anywhere by hand: `forge/bin/forge` runs it.
+
 To install from the zip instead, download `Forge-<version>-<arch>.zip` (`aarch64` for Apple silicon, `x86_64` for Intel), unzip it and move **Forge.app** to Applications. Until Forge is signed with an Apple Developer ID, macOS quarantines what the browser downloads, and a quarantined Forge doesn't start (not even after *Open Anyway* in System Settings › Privacy & Security). Take it out of quarantine once:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Forge.app
 ```
 
-Release builds keep themselves up to date: they look for a new version at startup and every few hours and install it in the background. Then a dialog asks whether to restart now: *Restart Now* asks about unsaved changes, if there are any, and opens the new version with the projects you had open; *Later* keeps working with the current one, and the update applies the next time Forge starts. Forge › *Check for Updates…* looks right away (or asks again about an update that is waiting).
+Release builds keep themselves up to date (on Linux, when installed from the tarball): they look for a new version at startup and every few hours and install it in the background. Then a dialog asks whether to restart now: *Restart Now* asks about unsaved changes, if there are any, and opens the new version with the projects you had open; *Later* keeps working with the current one, and the update applies the next time Forge starts. Forge › *Check for Updates…* looks right away (or asks again about an update that is waiting).
 
 Forge uses the tools you already have, found through your shell's `PATH`:
 
@@ -80,7 +82,7 @@ Forge remembers the layout: where each panel is, which ones are hidden and open,
 
 **Forge › Settings…** (⌘,) opens the Settings tab: every setting, in sections (Appearance, Editor, Workspace, Files, Languages, Terminal, Git, Debugging, Agents, .NET, and one per extension that has settings), with a search box. Changes save as you make them; a dot marks what differs from the default, and the arrow next to it resets it. Lists and maps open the file at the right place.
 
-The settings are stored in files in `~/Library/Application Support/Forge/config`, and you can also edit them there:
+The settings are stored in files in `~/Library/Application Support/Forge/config` (on Linux, `~/.local/share/forge/config`), and you can also edit them there:
 
 | File | What it holds |
 | --- | --- |

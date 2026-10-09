@@ -1,11 +1,14 @@
 //! Forge updates itself from the GitHub releases of its repository: a release tagged
-//! `v<version>` with a `Forge-<version>-<arch>.zip` asset (what `scripts/bundle-macos.sh`
-//! makes). The repository is Forge's own (`fernandoescolar/forge`), or the one set with
+//! `v<version>` with a `Forge-<version>-<arch>.zip` asset on macOS (what
+//! `scripts/bundle-macos.sh` makes) or `Forge-<version>-linux-<arch>.tar.gz` on Linux
+//! (`scripts/bundle-linux.sh`). The repository is Forge's own (`fernandoescolar/forge`), or the one set with
 //! `FORGE_UPDATE_REPOSITORY` when Forge is built (for forks). Release builds check on their
 //! own; debug builds only when asked (Forge › Check for Updates…).
 //!
-//! An update is downloaded, unpacked and checked (it must be a signed Forge.app) next to
-//! the running app, then swapped in; it runs from the next start. Forge then asks, in a
+//! An update is downloaded, unpacked and checked next to the running Forge, then swapped
+//! in; it runs from the next start. On macOS it must be a signed Forge.app; on Linux its
+//! SHA-256 must be the one GitHub lists for the asset, and the folder it replaces must be
+//! one the tarball made (`bin/forge` and `share/forge`). Forge then asks, in a
 //! dialog, whether to restart now: restarting saves (or asks about) unsaved work and
 //! reopens the projects that were open.
 
@@ -76,6 +79,16 @@ pub struct Release {
     pub version: String,
     pub download: String,
     pub notes_url: String,
+    /// The asset's SHA-256 as GitHub lists it (hex), when it does.
+    pub sha256: Option<String>,
+}
+
+/// The release asset for this kind of machine.
+pub fn asset_name(version: &str, os: &str, arch: &str) -> String {
+    match os {
+        "macos" => format!("Forge-{version}-{arch}.zip"),
+        os => format!("Forge-{version}-{os}-{arch}.tar.gz"),
+    }
 }
 
 /// `1.10.0` > `1.9.3`; a missing part counts as 0; a pre-release suffix (`-rc.1`) sorts
@@ -125,24 +138,25 @@ fn compare_pre_release(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// The newer release in GitHub's "latest release" JSON, with its asset for `arch`.
-pub fn newer_release(json: &str, current: &str, arch: &str) -> Result<Option<Release>> {
+/// The newer release in GitHub's "latest release" JSON, with its asset for `os` and `arch`.
+pub fn newer_release(json: &str, current: &str, os: &str, arch: &str) -> Result<Option<Release>> {
     let release: Value = serde_json::from_str(json).context("unexpected answer from GitHub")?;
     let tag = release.get("tag_name").and_then(Value::as_str).context("the release has no tag")?;
     let version = tag.trim_start_matches('v').to_string();
     if compare_versions(&version, current) != Ordering::Greater {
         return Ok(None);
     }
-    let wanted = format!("Forge-{version}-{arch}.zip");
-    let download = release
+    let wanted = asset_name(&version, os, arch);
+    let asset = release
         .get("assets")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .find(|asset| asset.get("name").and_then(Value::as_str) == Some(wanted.as_str()))
-        .and_then(|asset| asset.get("browser_download_url").and_then(Value::as_str))
         .with_context(|| format!("release {tag} has no {wanted}"))?;
-    Ok(Some(Release { version, download: download.to_string(), notes_url: release.get("html_url").and_then(Value::as_str).unwrap_or_default().to_string() }))
+    let download = asset.get("browser_download_url").and_then(Value::as_str).with_context(|| format!("release {tag} has no {wanted}"))?;
+    let sha256 = asset.get("digest").and_then(Value::as_str).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase);
+    Ok(Some(Release { version, download: download.to_string(), notes_url: release.get("html_url").and_then(Value::as_str).unwrap_or_default().to_string(), sha256 }))
 }
 
 async fn get(client: &Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>> {
@@ -168,7 +182,7 @@ pub async fn find_update(client: &Arc<dyn HttpClient>, repository: &str, current
         Err(e) if e.to_string().contains("404") => return Ok(None),
         Err(e) => return Err(e),
     };
-    newer_release(&String::from_utf8_lossy(&json), current, std::env::consts::ARCH)
+    newer_release(&String::from_utf8_lossy(&json), current, std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<()> {
@@ -200,11 +214,51 @@ pub fn install(zip: &Path, app: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The running app bundle (`…/Forge.app`), if Forge runs from one.
-fn current_app() -> Option<PathBuf> {
+/// Unpacks the Linux tarball `tarball` (a `forge/` folder) and puts it in place of the
+/// installation at `prefix`, once its SHA-256 is `sha256`. The old one is kept until the
+/// new one is in place.
+pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
+    use sha2::{Digest as _, Sha256};
+    let expected = sha256.context("the release doesn't list the download's SHA-256")?;
+    let actual: String = Sha256::digest(std::fs::read(tarball)?).iter().map(|b| format!("{b:02x}")).collect();
+    if actual != expected {
+        bail!("the download's SHA-256 isn't the one the release lists");
+    }
+    if !is_installation(prefix) {
+        bail!("{} isn't a folder the Forge tarball made", prefix.display());
+    }
+    let parent = prefix.parent().context("the installation has no folder")?;
+    let staging = tempfile::Builder::new().prefix(".forge-update-").tempdir_in(parent).context("cannot write next to the installation")?;
+    run("tar", &["-xzf".as_ref(), tarball.as_os_str(), "-C".as_ref(), staging.path().as_os_str()])?;
+    let new_tree = staging.path().join("forge");
+    if !is_installation(&new_tree) {
+        bail!("the download isn't a Forge tarball");
+    }
+    let old = staging.path().join("previous");
+    std::fs::rename(prefix, &old).context("cannot move the current installation aside")?;
+    if let Err(e) = std::fs::rename(&new_tree, prefix) {
+        std::fs::rename(&old, prefix).ok();
+        return Err(e).context("cannot put the new installation in place");
+    }
+    Ok(())
+}
+
+/// A folder laid out like the Linux tarball: `bin/forge` and `share/forge`.
+fn is_installation(prefix: &Path) -> bool {
+    prefix.join("bin/forge").is_file() && prefix.join("share/forge").is_dir()
+}
+
+/// What an update replaces: the running app bundle (`…/Forge.app`) on macOS, the folder
+/// the tarball made (`…/forge`, with `bin/forge`) elsewhere; `None` when Forge doesn't run
+/// from one (a development build).
+fn current_install() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let app = exe.parent()?.parent()?.parent()?;
-    (app.extension().is_some_and(|e| e == "app")).then(|| app.to_path_buf())
+    if cfg!(target_os = "macos") {
+        let app = exe.parent()?.parent()?.parent()?;
+        return app.extension().is_some_and(|e| e == "app").then(|| app.to_path_buf());
+    }
+    let prefix = exe.parent()?.parent()?;
+    is_installation(prefix).then(|| prefix.to_path_buf())
 }
 
 /// The Forge windows, the active one first. Updates are found in the background, often
@@ -291,13 +345,13 @@ pub fn check(asked: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result: Result<Option<String>> = async {
             let Some(release) = find_update(&client, repository, current).await? else { return Ok(None) };
-            let app = current_app().context("Forge isn't running from an app bundle")?;
+            let target = current_install().context("Forge isn't running from an installed copy (an app bundle, or the folder of its tarball)")?;
             let bytes = get(&client, &release.download).await?;
             let version = release.version.clone();
             cx.background_spawn(async move {
-                let zip = tempfile::Builder::new().suffix(".zip").tempfile()?;
-                std::fs::write(zip.path(), &bytes)?;
-                install(zip.path(), &app)
+                let download = tempfile::Builder::new().suffix(if cfg!(target_os = "macos") { ".zip" } else { ".tar.gz" }).tempfile()?;
+                std::fs::write(download.path(), &bytes)?;
+                if cfg!(target_os = "macos") { install(download.path(), &target) } else { install_tree(download.path(), release.sha256.as_deref(), &target) }
             })
             .await?;
             Ok(Some(version))
@@ -345,13 +399,49 @@ mod tests {
         let json = r#"{"tag_name": "v0.3.0", "html_url": "https://github.com/o/forge/releases/tag/v0.3.0", "assets": [
             {"name": "Forge-0.3.0-x86_64.zip", "browser_download_url": "https://x/intel.zip"},
             {"name": "Forge-0.3.0-aarch64.zip", "browser_download_url": "https://x/arm.zip"}]}"#;
-        let release = newer_release(json, "0.2.0", "aarch64").unwrap().unwrap();
+        let release = newer_release(json, "0.2.0", "macos", "aarch64").unwrap().unwrap();
         assert_eq!((release.version.as_str(), release.download.as_str()), ("0.3.0", "https://x/arm.zip"));
-        assert_eq!(newer_release(json, "0.3.0", "aarch64").unwrap(), None, "already up to date");
-        assert!(newer_release(json, "0.2.0", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-riscv64.zip"));
+        assert_eq!(newer_release(json, "0.3.0", "macos", "aarch64").unwrap(), None, "already up to date");
+        assert!(newer_release(json, "0.2.0", "macos", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-riscv64.zip"));
+
+        let linux = r#"{"tag_name": "v0.3.0", "assets": [
+            {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz", "digest": "sha256:ABC123"}]}"#;
+        let release = newer_release(linux, "0.2.0", "linux", "x86_64").unwrap().unwrap();
+        assert_eq!((release.download.as_str(), release.sha256.as_deref()), ("https://x/linux.tar.gz", Some("abc123")));
+    }
+
+    /// The Linux tarball replaces the folder it made before, when its SHA-256 matches.
+    #[test]
+    fn installs_a_tarball_over_the_installed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = |root: &Path, marker: &str| {
+            std::fs::create_dir_all(root.join("forge/bin")).unwrap();
+            std::fs::create_dir_all(root.join("forge/share/forge/extensions")).unwrap();
+            std::fs::write(root.join("forge/bin/forge"), marker).unwrap();
+        };
+        tree(&dir.path().join("installed"), "0.2.0");
+        let prefix = dir.path().join("installed/forge");
+        tree(&dir.path().join("release"), "0.3.0");
+        let tarball = dir.path().join("Forge-0.3.0-linux-x86_64.tar.gz");
+        run("tar", &["-czf".as_ref(), tarball.as_os_str(), "-C".as_ref(), dir.path().join("release").as_os_str(), "forge".as_ref()]).unwrap();
+        let digest: String = {
+            use sha2::{Digest as _, Sha256};
+            Sha256::digest(std::fs::read(&tarball).unwrap()).iter().map(|b| format!("{b:02x}")).collect()
+        };
+
+        assert!(install_tree(&tarball, Some("00"), &prefix).unwrap_err().to_string().contains("SHA-256"));
+        assert!(install_tree(&tarball, None, &prefix).is_err(), "no digest, no update");
+        assert!(install_tree(&tarball, Some(&digest), dir.path()).unwrap_err().to_string().contains("isn't a folder the Forge tarball made"));
+        assert_eq!(std::fs::read_to_string(prefix.join("bin/forge")).unwrap(), "0.2.0", "a rejected update changes nothing");
+
+        install_tree(&tarball, Some(&digest), &prefix).unwrap();
+        assert_eq!(std::fs::read_to_string(prefix.join("bin/forge")).unwrap(), "0.3.0");
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path().join("installed")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(leftovers, ["forge"], "the old installation and the staging folder are gone");
     }
 
     /// A tiny signed app bundle, zipped like a release.
+    #[cfg(target_os = "macos")]
     fn release_zip(dir: &Path, bundle_id: &str, marker: &str) -> PathBuf {
         let app = dir.join(format!("build-{marker}/Forge.app"));
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
@@ -369,6 +459,7 @@ mod tests {
     /// `FORGE_UPDATE_ZIP=dist/Forge-<v>-<arch>.zip FORGE_UPDATE_APP=/tmp/x/Forge.app cargo test -p forge-update -- --ignored`
     #[test]
     #[ignore]
+    #[cfg(target_os = "macos")]
     fn installs_a_real_release() {
         let (Ok(zip), Ok(app)) = (std::env::var("FORGE_UPDATE_ZIP"), std::env::var("FORGE_UPDATE_APP")) else { return };
         assert!(Path::new(&zip).file_name().unwrap().to_string_lossy().ends_with(&format!("-{}.zip", std::env::consts::ARCH)), "named for this machine");
@@ -415,6 +506,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn installs_a_signed_forge_over_the_running_one() {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("Applications/Forge.app");

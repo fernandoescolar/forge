@@ -1,6 +1,7 @@
-# Builds the macOS app for a version tag (v1.2.3, v1.2.3-beta.1), with that version, and
-# publishes it as a GitHub release,
-# whose zips Forge updates itself from (forge-update). Signs (and notarizes) when the
+# Builds the macOS app and the Linux tarballs for a version tag (v1.2.3, v1.2.3-beta.1),
+# with that version, and publishes them as a GitHub release, whose zips and tarballs Forge
+# updates itself from (forge-update). Linux builds on Ubuntu 22.04 (its glibc, 2.35, is the
+# oldest the tarball runs on), for x86_64 and aarch64. Signs (and notarizes) when the
 # signing secrets are set:
 #   MACOS_CERTIFICATE           base64 of the .p12: a "Developer ID Application", or Forge's
 #                               own self-signed "Forge Signing" (scripts/create-signing-identity.sh
@@ -148,6 +149,62 @@ jobs:
           name: forge-${{ matrix.target }}
           path: dist/Forge-*.zip
 
+  build-linux:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      FORGE_UPDATE_REPOSITORY: ${{ github.repository }}
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the libraries GPUI builds against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev libsqlite3-dev cmake clang lld
+      - name: Take the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not a version tag: use v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          VERSION="$version" perl -0pi -e 's/^version = ".*?"/version = "$ENV{VERSION}"/m' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+      - name: Apply Forge's patches to Zed
+        run: scripts/apply-zed-patches.sh
+      - name: Build the tarball
+        run: scripts/bundle-linux.sh
+      - name: Check that it starts
+        # `--printenv` exits before opening a window: the binary and its libraries load.
+        run: |
+          tar -tzf dist/Forge-*-linux-${{ matrix.arch }}.tar.gz | grep -qx 'forge/bin/forge'
+          dist/forge/bin/forge --printenv > /dev/null
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: forge-linux-${{ matrix.arch }}
+          path: dist/Forge-*.tar.gz
+
   # The zips as a user's Mac gets them: on a fresh runner that has never seen (or trusted) the
   # signing certificate, unpacked and checked the way scripts/install.sh and forge-update do.
   verify:
@@ -170,7 +227,7 @@ jobs:
           codesign -d -r- unpacked/Forge.app
 
   publish:
-    needs: [build, verify]
+    needs: [build, build-linux, verify]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -181,4 +238,4 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/Forge-*.zip --repo "$GITHUB_REPOSITORY" --title "Forge ${GITHUB_REF_NAME#v}" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/Forge-*.zip dist/Forge-*.tar.gz --repo "$GITHUB_REPOSITORY" --title "Forge ${GITHUB_REF_NAME#v}" --generate-notes

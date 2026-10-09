@@ -32,16 +32,20 @@ pub use panel::ExtensionsPanel;
 use gpui::App;
 use std::path::PathBuf;
 
-/// Directories searched for extensions: `<data>/extensions`, the app bundle's
-/// `Resources/extensions`, `$FORGE_EXTENSIONS_PATH`
+/// Where the extensions that ship with Forge are: `Forge.app/Contents/Resources/extensions`
+/// on macOS, `<prefix>/share/forge/extensions` next to `<prefix>/bin/forge` elsewhere.
+pub fn bundled_extensions_dir() -> Option<PathBuf> {
+    let prefix = std::env::current_exe().ok()?.parent()?.parent()?.to_path_buf();
+    Some(if cfg!(target_os = "macos") { prefix.join("Resources/extensions") } else { prefix.join("share/forge/extensions") })
+}
+
+/// Directories searched for extensions: `<data>/extensions`, the bundled ones
+/// ([`bundled_extensions_dir`]), `$FORGE_EXTENSIONS_PATH`
 /// (colon-separated, for development), and the repo's `extensions/` in debug builds.
 pub fn extension_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![paths::data_dir().join("extensions")];
-    // Extensions shipped inside Forge.app (Contents/Resources/extensions).
-    if let Some(bundled) = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/extensions"))) {
-        if bundled.is_dir() {
-            dirs.push(bundled);
-        }
+    if let Some(bundled) = bundled_extensions_dir().filter(|d| d.is_dir()) {
+        dirs.push(bundled);
     }
     if let Some(extra) = std::env::var_os("FORGE_EXTENSIONS_PATH") {
         dirs.extend(std::env::split_paths(&extra));

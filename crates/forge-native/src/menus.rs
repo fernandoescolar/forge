@@ -88,10 +88,10 @@ pub fn init(cx: &mut App) {
         }
     });
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-=", IncreaseFontSize, None),
-        gpui::KeyBinding::new("cmd-+", IncreaseFontSize, None),
-        gpui::KeyBinding::new("cmd--", DecreaseFontSize, None),
-        gpui::KeyBinding::new("cmd-0", ResetFontSize, None),
+        gpui::KeyBinding::new("secondary-=", IncreaseFontSize, None),
+        gpui::KeyBinding::new("secondary-+", IncreaseFontSize, None),
+        gpui::KeyBinding::new("secondary--", DecreaseFontSize, None),
+        gpui::KeyBinding::new("secondary-0", ResetFontSize, None),
     ]);
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());

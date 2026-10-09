@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Installs or updates Forge on macOS from its latest GitHub release:
+# Installs or updates Forge on macOS or Linux from its latest GitHub release:
 #
 #   curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
 #
-# It downloads Forge-<version>-<arch>.zip for this Mac, checks it is a validly signed Forge,
-# quits a running Forge, puts Forge.app in /Applications (~/Applications when /Applications
-# isn't writable) and adds a `forge` command to ~/.local/bin. Downloaded this way, macOS
-# doesn't quarantine the app, so it opens without Gatekeeper's prompts.
+# macOS: it downloads Forge-<version>-<arch>.zip for this Mac, checks it is a validly signed
+# Forge, quits a running Forge, puts Forge.app in /Applications (~/Applications when
+# /Applications isn't writable). Downloaded this way, macOS doesn't quarantine the app, so it
+# opens without Gatekeeper's prompts.
+#
+# Linux: it downloads Forge-<version>-linux-<arch>.tar.gz, checks its SHA-256 against the
+# release's, puts it in ~/.local/opt/forge and adds Forge to the desktop's applications
+# (~/.local/share/applications) with its icon. A running Forge keeps running; restart it
+# to use the new one.
+#
+# Both add a `forge` command to ~/.local/bin.
 #
 #   FORGE_VERSION=0.0.2        install that version instead of the latest
-#   FORGE_INSTALL_DIR=<dir>    where Forge.app goes
+#   FORGE_INSTALL_DIR=<dir>    where Forge.app (macOS) or the forge folder (Linux) goes
 #   FORGE_BIN_DIR=<dir>        where the `forge` command goes (empty: don't add it)
 #   FORGE_REPOSITORY=owner/repo
 set -euo pipefail
@@ -20,7 +27,12 @@ main() {
   local repo="${FORGE_REPOSITORY:-fernandoescolar/forge}"
   local bundle_id="dev.forge.ide"
 
-  [ "$(uname -s)" = "Darwin" ] || fail "Forge runs on macOS only."
+  local os
+  case "$(uname -s)" in
+    Darwin) os=macos ;;
+    Linux) os=linux ;;
+    *) fail "Forge runs on macOS and Linux." ;;
+  esac
   local arch
   case "$(uname -m)" in
     arm64 | aarch64) arch=aarch64 ;;
@@ -38,15 +50,24 @@ main() {
   fi
   local version="${tag#v}"
 
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  if [ "$os" = linux ]; then
+    install_linux "$repo" "$tag" "$version" "$arch"
+  else
+    install_macos "$repo" "$tag" "$version" "$arch" "$bundle_id"
+  fi
+}
+
+install_macos() {
+  local repo="$1" tag="$2" version="$3" arch="$4" bundle_id="$5"
   local install_dir="${FORGE_INSTALL_DIR:-}"
   if [ -z "$install_dir" ]; then
     if [ -w /Applications ]; then install_dir=/Applications; else install_dir="$HOME/Applications"; fi
   fi
   mkdir -p "$install_dir"
   local app="$install_dir/Forge.app"
-
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
 
   local zip="Forge-$version-$arch.zip"
   say "Downloading Forge $version for $arch"
@@ -82,13 +103,94 @@ main() {
   if [ -n "$bin_dir" ]; then
     mkdir -p "$bin_dir"
     write_cli "$bin_dir/forge" "$app"
-    case ":$PATH:" in
-      *":$bin_dir:"*) ;;
-      *) say "Add $bin_dir to your PATH to use the forge command, e.g. in ~/.zshrc: export PATH=\"$bin_dir:\$PATH\"" ;;
-    esac
+    path_hint "$bin_dir"
   fi
 
   say "Forge $version is installed. Open it from $install_dir, or run: forge ."
+}
+
+install_linux() {
+  local repo="$1" tag="$2" version="$3" arch="$4"
+  local install_dir="${FORGE_INSTALL_DIR:-$HOME/.local/opt}"
+  local prefix="$install_dir/forge"
+  local tarball="Forge-$version-linux-$arch.tar.gz"
+  mkdir -p "$install_dir"
+
+  say "Downloading Forge $version for Linux ($arch)"
+  curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$tarball" -o "$tmp/$tarball" || fail "couldn't download $tarball from $repo's $tag release"
+  # GitHub lists each asset's SHA-256 ("digest"); the download must match it.
+  local expected actual
+  command -v python3 >/dev/null 2>&1 || fail "python3 is needed to check the download"
+  expected="$(curl -fsSL "https://api.github.com/repos/$repo/releases/tags/$tag" | python3 -c 'import json, sys
+for asset in json.load(sys.stdin).get("assets", []):
+    if asset.get("name") == sys.argv[1]:
+        print(asset.get("digest") or "")' "$tarball")"
+  actual="sha256:$(sha256sum "$tmp/$tarball" | cut -d' ' -f1)"
+  [ -n "$expected" ] || fail "the release doesn't list $tarball's SHA-256"
+  [ "$expected" = "$actual" ] || fail "$tarball's SHA-256 isn't the one the release lists"
+
+  mkdir -p "$tmp/unpacked"
+  tar -xzf "$tmp/$tarball" -C "$tmp/unpacked"
+  local new="$tmp/unpacked/forge"
+  [ -x "$new/bin/forge" ] && [ -d "$new/share/forge" ] || fail "$tarball isn't a Forge tarball"
+
+  say "Installing $prefix"
+  if [ -e "$prefix" ]; then
+    mv "$prefix" "$tmp/previous"
+  fi
+  if ! mv "$new" "$prefix"; then
+    [ -e "$tmp/previous" ] && mv "$tmp/previous" "$prefix"
+    fail "couldn't write $prefix"
+  fi
+
+  # The desktop's applications menu, with the icon, starting the installed Forge.
+  local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  mkdir -p "$data_home/applications" "$data_home/icons/hicolor/512x512/apps"
+  sed "s|^Exec=forge |Exec=\"$prefix/bin/forge\" |" "$prefix/share/applications/dev.forge.ide.desktop" >"$data_home/applications/dev.forge.ide.desktop"
+  cp "$prefix/share/icons/hicolor/512x512/apps/dev.forge.ide.png" "$data_home/icons/hicolor/512x512/apps/dev.forge.ide.png"
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
+
+  local bin_dir="${FORGE_BIN_DIR-$HOME/.local/bin}"
+  if [ -n "$bin_dir" ]; then
+    mkdir -p "$bin_dir"
+    write_linux_cli "$bin_dir/forge" "$prefix/bin/forge"
+    path_hint "$bin_dir"
+  fi
+
+  if pgrep -f "$prefix/bin/forge" >/dev/null 2>&1; then
+    say "Forge $version is installed. Restart Forge to use it."
+  else
+    say "Forge $version is installed. Open it from your applications, or run: forge ."
+  fi
+}
+
+path_hint() {
+  case ":$PATH:" in
+    *":$1:"*) ;;
+    *) say "Add $1 to your PATH to use the forge command, e.g. in your shell's profile: export PATH=\"$1:\$PATH\"" ;;
+  esac
+}
+
+# Linux: `forge [paths…]` starts Forge in the background (or hands the paths to the running
+# one) and gives the terminal back.
+write_linux_cli() {
+  cat >"$1" <<CLI
+#!/usr/bin/env bash
+# Opens files and folders in Forge: forge [paths…]. Without any, Forge just opens (with the
+# windows of its last session); \`forge .\` opens the current folder.
+set -euo pipefail
+paths=()
+for path in "\$@"; do
+  if [ -e "\$path" ]; then
+    paths+=("\$(realpath "\$path")")
+  else
+    echo "forge: no such file or folder: \$path" >&2
+    exit 1
+  fi
+done
+setsid "$2" \${paths[@]+"\${paths[@]}"} </dev/null >/dev/null 2>&1 &
+CLI
+  chmod +x "$1"
 }
 
 # `forge [paths…]` opens those paths in Forge (the current folder without any), whether or

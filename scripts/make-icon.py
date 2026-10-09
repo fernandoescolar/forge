@@ -5,7 +5,7 @@ A macOS-style rounded square in Forge Dark's greys, a bold "F" glowing from ambe
 ember orange, like metal in a forge, and a warm yellow spark. Shapes are signed-distance functions,
 so edges are anti-aliased.
 
-    scripts/make-icon.py out.png
+    scripts/make-icon.py out.png [size]   # 1024 px unless a size is given
 """
 import math, struct, sys, zlib
 
@@ -71,23 +71,24 @@ def pixel(x, y):
     return px
 
 
-def png(rows):
+def png(rows, size):
     raw = b"".join(b"\x00" + bytes(row) for row in rows)
     chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", N, N, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
 
 
-def main(out):
+def main(out, size=N):
+    scale = N / size
     rows = []
-    for y in range(N):
+    for y in range(size):
         row = []
-        for x in range(N):
-            r, g, b, a = pixel(x + 0.5, y + 0.5)
+        for x in range(size):
+            r, g, b, a = pixel((x + 0.5) * scale, (y + 0.5) * scale)
             row += [round(r * 255), round(g * 255), round(b * 255), round(a * 255)]
         rows.append(row)
     with open(out, "wb") as f:
-        f.write(png(rows))
+        f.write(png(rows, size))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "forge-icon.png")
+    main(sys.argv[1] if len(sys.argv) > 1 else "forge-icon.png", int(sys.argv[2]) if len(sys.argv) > 2 else N)

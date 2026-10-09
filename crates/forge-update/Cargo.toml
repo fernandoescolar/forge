@@ -13,6 +13,7 @@ gpui = { path = "../../vendor/zed/crates/gpui" }
 http_client = { path = "../../vendor/zed/crates/http_client" }
 log = "0.4"
 serde_json.workspace = true
+sha2 = "0.10"
 tempfile.workspace = true
 workspace = { path = "../../vendor/zed/crates/workspace" }
 

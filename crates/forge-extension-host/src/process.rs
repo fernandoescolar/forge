@@ -122,7 +122,9 @@ impl ExtensionHost {
                 drop(stdin);
             })
             .detach();
-            let pump = |reader: Option<smol::Async<std::fs::File>>, stream: &'static str| {
+            // The pipes' types differ by platform (`Async<File>` on macOS, `ChildStdout` on Linux).
+            type Pipe = Box<dyn futures::AsyncRead + Unpin + Send>;
+            let pump = |reader: Option<Pipe>, stream: &'static str| {
                 let js = js.clone();
                 cx.background_spawn(async move {
                     let Some(mut reader) = reader else { return };
@@ -150,8 +152,8 @@ impl ExtensionHost {
                     }
                 })
             };
-            let stdout = pump(child.stdout.take(), "stdout");
-            let stderr = pump(child.stderr.take(), "stderr");
+            let stdout = pump(child.stdout.take().map(|r| Box::new(r) as Pipe), "stdout");
+            let stderr = pump(child.stderr.take().map(|r| Box::new(r) as Pipe), "stderr");
             let status = child.status();
             let status = match futures::future::select(Box::pin(status), kill_rx).await {
                 futures::future::Either::Left((status, _)) => status.ok(),

@@ -1,4 +1,4 @@
-// A query editor: write SQL, run it (⌘Enter), see each result set and what the statements
+// A query editor: write SQL, run it (⌘Enter, Ctrl+Enter on Linux), see each result set and what the statements
 // did. Long queries can be cancelled.
 import { useEffect, useRef, useState } from 'react';
 import { forge, Button, DataGrid, Input, Select, Spinner, Tabs, Text, View } from '@forge-ide/api';
@@ -65,7 +65,7 @@ export function QueryView({ connectionId: initialConnection, database: initialDa
         {running ? (
           <Button label="Cancel" icon="stop" variant="filled" onClick={() => sql.cancel(running)} />
         ) : (
-          <Button label="Run" icon="play_filled" variant="filled" tooltip="Run (⌘Enter)" disabled={!text.trim()} onClick={() => run()} />
+          <Button label="Run" icon="play_filled" variant="filled" tooltip={`Run (${forge.shortcut('secondary-enter')})`} disabled={!text.trim()} onClick={() => run()} />
         )}
         <Select value={connectionId} options={state.connections.map((c) => ({ value: c.id, label: c.name }))} onChange={(id) => { setConnectionId(id); setDatabase(null); }} />
         {databases.length > 0 && (
@@ -77,7 +77,7 @@ export function QueryView({ connectionId: initialConnection, database: initialDa
       </View>
 
       <View style={{ padding: 8, shrink: false }}>
-        <Input value={text} multiline placeholder="SELECT … (⌘Enter runs it)" onChange={setText} onSubmit={run} autoFocus />
+        <Input value={text} multiline placeholder={`SELECT … (${forge.shortcut('secondary-enter')} runs it)`} onChange={setText} onSubmit={run} autoFocus />
       </View>
 
       <Tabs tabs={tabs} active={active} onSelect={setActive} />

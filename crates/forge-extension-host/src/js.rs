@@ -149,6 +149,9 @@ impl JsThread {
                 }),
             )?;
 
+            // `darwin`, `linux` or `win32`, as Node names them.
+            native.set("platform", crate::process::platform().split('-').next().unwrap_or_default().to_string())?;
+
             ctx.globals().set("__forgeNative", native)?;
             Ok(())
         })?;
