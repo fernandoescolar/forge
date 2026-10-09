@@ -7,8 +7,11 @@
 //! secret path (`/mcp/<token>`) and receives its tool calls on a channel. The transport is
 //! MCP's Streamable HTTP with plain JSON answers: a tool call's request stays open until
 //! the user decides.
+//!
+//! The project's skills (`library`) are tools too, answered here from their files.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::channel::{mpsc, oneshot};
@@ -29,7 +32,14 @@ pub(crate) struct ToolRequest {
 /// What the tool answers the agent: text, and whether it is an error.
 pub(crate) type ToolReply = Result<String, String>;
 
-type Sessions = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ToolRequest>>>>;
+/// A thread's place: where its tool calls go, and its project (for the project's skills).
+#[derive(Clone)]
+struct Session {
+    tx: mpsc::UnboundedSender<ToolRequest>,
+    root: PathBuf,
+}
+
+type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
 struct Server {
     port: u16,
@@ -58,9 +68,9 @@ impl Drop for Registration {
     }
 }
 
-/// Registers a thread, starting the server on `runtime` the first time. `None` when the
-/// server couldn't start (agents then work without Forge's tools).
-pub(crate) fn register(runtime: &tokio::runtime::Handle) -> Option<(Registration, mpsc::UnboundedReceiver<ToolRequest>)> {
+/// Registers a thread working in `root`, starting the server on `runtime` the first time.
+/// `None` when the server couldn't start (agents then work without Forge's tools).
+pub(crate) fn register(runtime: &tokio::runtime::Handle, root: PathBuf) -> Option<(Registration, mpsc::UnboundedReceiver<ToolRequest>)> {
     let server = SERVER.get_or_init(|| match start(runtime) {
         Ok(server) => Some(server),
         Err(e) => {
@@ -71,7 +81,7 @@ pub(crate) fn register(runtime: &tokio::runtime::Handle) -> Option<(Registration
     let server = server.as_ref()?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let (tx, rx) = mpsc::unbounded();
-    server.sessions.lock().unwrap().insert(token.clone(), tx);
+    server.sessions.lock().unwrap().insert(token.clone(), Session { tx, root });
     let url = format!("http://127.0.0.1:{}/mcp/{token}", server.port);
     Some((Registration { token, url, sessions: server.sessions.clone() }, rx))
 }
@@ -134,11 +144,11 @@ async fn serve(stream: tokio::net::TcpStream, sessions: Sessions) -> std::io::Re
         let mut body = vec![0; length];
         read.read_exact(&mut body).await?;
 
-        let tx = path.strip_prefix("/mcp/").and_then(|token| sessions.lock().unwrap().get(token).cloned());
-        let (status, answer) = match (method.as_str(), tx) {
+        let session = path.strip_prefix("/mcp/").and_then(|token| sessions.lock().unwrap().get(token).cloned());
+        let (status, answer) = match (method.as_str(), session) {
             (_, None) => ("404 Not Found", None),
-            ("POST", Some(tx)) => match serde_json::from_slice::<Value>(&body) {
-                Ok(message) => match handle(message, &tx).await {
+            ("POST", Some(session)) => match serde_json::from_slice::<Value>(&body) {
+                Ok(message) => match handle(message, &session).await {
                     Some(answer) => ("200 OK", Some(answer)),
                     None => ("202 Accepted", None),
                 },
@@ -162,7 +172,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// Answers one JSON-RPC message; `None` for notifications.
-async fn handle(message: Value, tx: &mpsc::UnboundedSender<ToolRequest>) -> Option<Value> {
+async fn handle(message: Value, session: &Session) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -172,11 +182,11 @@ async fn handle(message: Value, tx: &mpsc::UnboundedSender<ToolRequest>) -> Opti
             "protocolVersion": params.get("protocolVersion").cloned().unwrap_or_else(|| json!("2025-06-18")),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "instructions": instructions(),
+            "instructions": instructions(&session.root),
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": all_tools() }),
-        "tools/call" => call(&params, tx).await,
+        "tools/list" => json!({ "tools": all_tools(&session.root) }),
+        "tools/call" => call(&params, session).await,
         _ => return Some(error(id, -32601, &format!("method not found: {method}"))),
     };
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
@@ -239,20 +249,39 @@ fn lines_schema(apply: bool) -> Value {
     schema
 }
 
-/// What Forge tells agents about its tools, with the tools extensions add.
-pub fn instructions() -> String {
+/// What Forge tells agents about its tools, with the tools extensions add and the skills
+/// of the project in `root`.
+pub fn instructions(root: &Path) -> String {
+    let mut text = INSTRUCTIONS.to_string();
     let extension_tools = forge_ui::agent_tools::agent_tools().list();
-    if extension_tools.is_empty() {
-        return INSTRUCTIONS.to_string();
+    if !extension_tools.is_empty() {
+        let listed: Vec<String> = extension_tools.iter().map(|t| format!("`{}` ({}, from the {} extension)", t.name, t.title, t.extension)).collect();
+        text.push_str(&format!("\n- The user's extensions add tools to the `forge` server too: {}. Prefer them for what they cover.", listed.join(", ")));
     }
-    let listed: Vec<String> = extension_tools.iter().map(|t| format!("`{}` ({}, from the {} extension)", t.name, t.title, t.extension)).collect();
-    format!("{INSTRUCTIONS}\n- The user's extensions add tools to the `forge` server too: {}. Prefer them for what they cover.", listed.join(", "))
+    let skills = crate::library::skills(root);
+    if !skills.is_empty() {
+        let listed: Vec<String> = skills.iter().map(|s| format!("`{}` ({})", crate::library::tool_name(&s.name), s.description)).collect();
+        text.push_str(&format!(
+            "\n- The user wrote skills for this project, as `forge` tools: {}. When a task matches one, call it first and follow the instructions it returns.",
+            listed.join(", ")
+        ));
+    }
+    text
 }
 
-/// Forge's tools and the ones extensions offer (`forge.agents.registerTool`).
-fn all_tools() -> Value {
+/// Forge's tools, the project's skills and the tools extensions offer (`forge.agents.registerTool`).
+fn all_tools(root: &Path) -> Value {
     let mut tools = tools();
     if let Value::Array(list) = &mut tools {
+        for skill in crate::library::skills(root) {
+            list.push(json!({
+                "name": crate::library::tool_name(&skill.name),
+                "title": format!("Skill: {}", skill.name),
+                "description": format!("{} (a skill the user wrote: call it to get its instructions, then follow them)", skill.description),
+                "inputSchema": { "type": "object", "properties": {} },
+                "annotations": { "readOnlyHint": true },
+            }));
+        }
         for tool in forge_ui::agent_tools::agent_tools().list() {
             let mut description = format!("{} (from the {} extension", tool.description, tool.extension);
             description.push_str(if tool.read_only { ")" } else { "; the user may be asked first)" });
@@ -507,6 +536,9 @@ or that it ended without stopping. Give `test_path` or `test_name` for tests, el
 /// (`mcp__forge__run_tests` or `run_tests`).
 pub fn tool_title(name: &str) -> Option<String> {
     let name = name.strip_prefix(&format!("mcp__{SERVER_NAME}__")).unwrap_or(name);
+    if let Some(skill) = name.strip_prefix("skill_") {
+        return Some(format!("Skill: {skill}"));
+    }
     if let Some(tool) = forge_ui::agent_tools::agent_tools().get(name) {
         return Some(tool.title);
     }
@@ -543,15 +575,18 @@ pub fn tool_summary(args: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-async fn call(params: &Value, tx: &mpsc::UnboundedSender<ToolRequest>) -> Value {
+async fn call(params: &Value, session: &Session) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let known = all_tools().as_array().is_some_and(|ts| ts.iter().any(|t| t["name"] == name.as_str()));
-    let reply = if !known {
+    let known = all_tools(&session.root).as_array().is_some_and(|ts| ts.iter().any(|t| t["name"] == name.as_str()));
+    let skill = name.starts_with("skill_").then(|| crate::library::skill_for_tool(&session.root, &name)).flatten();
+    let reply = if let Some(skill) = skill {
+        Ok(crate::library::skill_reply(&skill))
+    } else if !known {
         Err(format!("Unknown tool: {name}"))
     } else {
         let (reply, answer) = oneshot::channel();
-        match tx.unbounded_send(ToolRequest { name, args, reply }) {
+        match session.tx.unbounded_send(ToolRequest { name, args, reply }) {
             Ok(()) => answer.await.unwrap_or_else(|_| Err("The conversation was closed before the tool answered.".into())),
             Err(_) => Err("The conversation is closed.".into()),
         }
@@ -596,7 +631,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn serves_tools_and_waits_for_the_user() {
-        let (registration, mut requests) = register(&tokio::runtime::Handle::current()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".forge/skills")).unwrap();
+        std::fs::write(project.path().join(".forge/skills/migrations.md"), "---\ndescription: Add a database migration\n---\nRun `make migration NAME=…`.").unwrap();
+        let (registration, mut requests) = register(&tokio::runtime::Handle::current(), project.path().to_path_buf()).unwrap();
         let url = registration.acp_server()["url"].as_str().unwrap().to_string();
 
         let (status, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } })).await;
@@ -604,6 +642,7 @@ mod tests {
         let init: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "forge");
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("`skill_migrations` (Add a database migration)"));
 
         let (status, _) = post(&url, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
         assert_eq!(status, "HTTP/1.1 202 Accepted");
@@ -611,13 +650,20 @@ mod tests {
         let (_, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
         let tools = &serde_json::from_str::<Value>(&body).unwrap()["result"]["tools"];
         // Forge's own (tests elsewhere may register extensions' tools, named `<extension>__<tool>`).
-        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__")).collect();
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__") && !n.starts_with("skill_")).collect();
         assert_eq!(names, [
             "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
             "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
             "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes",
         ]);
         assert_eq!(tools[10]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
+        let skill = tools.as_array().unwrap().iter().find(|t| t["name"] == "skill_migrations").expect("the project's skill");
+        assert_eq!(skill["title"], "Skill: migrations");
+
+        // A skill answers with its instructions, without the thread.
+        let (_, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "skill_migrations", "arguments": {} } })).await;
+        let text = serde_json::from_str::<Value>(&body).unwrap()["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.starts_with("Follow the skill \"migrations\"") && text.ends_with("Run `make migration NAME=…`."), "{text}");
 
         // The call waits until the thread answers.
         let call = tokio::spawn({

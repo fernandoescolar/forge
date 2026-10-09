@@ -19,6 +19,7 @@ mod forge_debug;
 pub mod forge_mcp;
 mod forge_tools;
 mod history;
+mod library;
 mod mentions;
 pub mod permissions;
 pub mod plan_usage;

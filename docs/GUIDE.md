@@ -208,6 +208,22 @@ These calls appear in the thread with their names ("Run tests", "Find references
 
 **What agents learn.** When an agent finds out something every future session should know (how to build or test the project, a convention, a trap), it can propose a note. The note shows in the thread, editable, with *Remember* and *Don't*: kept, it goes under *Notes from agents* in the project's instructions file (the first one that exists, else `.forge/AGENTS.md`), so the next sessions start knowing it.
 
+**Skills and prompts.** Write them once, in Markdown, and every agent gets them, whether it has skills of its own or not:
+
+- A **skill** is a file in the project's `.forge/skills/` (`deploy.md`, or a folder `deploy/` with a `SKILL.md` and whatever files it mentions). Each one is a tool of Forge's `forge` server: agents see its description, and when a task matches they call it and follow the instructions it returns.
+- A **prompt** is a file in `.forge/prompts/` (`review.md`). Type `/review` in a thread (it is offered with the agent's own commands) to send it; `$ARGUMENTS` in it becomes what you type after the command (`/review src/parser.rs`), or that text goes after it. The thread shows what you typed and which prompt it sent.
+
+Both may start with front matter, `name:` and `description:` (otherwise the file's name, and the text's first line):
+
+```markdown
+---
+description: Add a database migration and update the models
+---
+Create the migration with `make migration NAME=<what it does>`, then …
+```
+
+Skills and prompts in Forge's config folder (`skills/` and `prompts/` next to your `AGENTS.md`) are for every project; a project's own replace them by name.
+
 **MCP servers** listed in `agents.json` are passed to every session:
 
 ```jsonc

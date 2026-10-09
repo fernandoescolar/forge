@@ -508,7 +508,7 @@ impl Thread {
         })
         .detach();
 
-        let forge_mcp = crate::forge_mcp::register(&Tokio::handle(cx)).map(|(registration, mut requests)| {
+        let forge_mcp = crate::forge_mcp::register(&Tokio::handle(cx), root.clone()).map(|(registration, mut requests)| {
             cx.spawn_in(window, async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
                 while let Some(request) = requests.next().await {
                     if this.update_in(cx, |this, window, cx| this.handle_tool_request(request, window, cx)).is_err() {
@@ -972,9 +972,12 @@ impl Thread {
             return false;
         }
         let Some((agent, session)) = self.connected.clone() else { return false };
+        // `/name …` for one of the user's prompts sends the prompt; the thread shows what was typed.
+        let prompt = crate::library::expand_prompt(&text, &self.root);
+        let sent = prompt.as_ref().map(|(_, expanded)| expanded.clone()).unwrap_or_else(|| text.clone());
         let mut files: Vec<(PathBuf, Option<u32>)> = Vec::new();
         let mut specials: Vec<String> = Vec::new();
-        for mention in resolve_mentions(&text, &self.root) {
+        for mention in resolve_mentions(&sent, &self.root) {
             match mention {
                 Mention::Path { path, line } => files.push((path, line)),
                 Mention::Special(name) => specials.push(name),
@@ -991,6 +994,9 @@ impl Thread {
             })
             .collect();
         labels.extend(specials.iter().map(|s| format!("@{s}")));
+        if let Some((prompt, _)) = &prompt {
+            labels.insert(0, format!("prompt {}", prompt.path.strip_prefix(&self.root).unwrap_or(&prompt.path).display()));
+        }
         let images = if images.is_empty() || self.accepts_images {
             images
         } else {
@@ -1001,7 +1007,7 @@ impl Thread {
         if let Some(a) = &active {
             labels.push(a.label(&self.root));
         }
-        let mut blocks = prompt_blocks(&text, &files, active.as_ref(), self.embedded_context, &self.root);
+        let mut blocks = prompt_blocks(&sent, &files, active.as_ref(), self.embedded_context, &self.root);
         for image in &images {
             use base64::Engine as _;
             let data = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
@@ -1010,7 +1016,7 @@ impl Thread {
         let extras = crate::context::gather(&specials, self.workspace.clone(), self.project.clone(), self.root.clone(), cx);
         let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file(), self.instructions_files()));
         if !self.rules_sent && self.forge_tools {
-            blocks.push(json!({ "type": "text", "text": crate::forge_mcp::instructions() }));
+            blocks.push(json!({ "type": "text", "text": crate::forge_mcp::instructions(&self.root) }));
         }
         self.rules_sent = true;
         let retry_text = text.clone();
@@ -1489,9 +1495,20 @@ impl Thread {
         self.changed(cx);
     }
 
-    /// The slash commands the agent offers.
-    pub fn commands(&self) -> &[AgentCommand] {
-        &self.agent_commands
+    /// The slash commands: the user's prompts (`library`), then the ones the agent offers
+    /// (a prompt hides an agent command of the same name).
+    pub fn commands(&self) -> Vec<AgentCommand> {
+        let prompts = crate::library::prompts(&self.root);
+        let mut commands: Vec<AgentCommand> = prompts
+            .iter()
+            .map(|p| AgentCommand {
+                name: p.name.clone(),
+                description: if p.description.is_empty() { "Your prompt".into() } else { format!("{} (your prompt)", p.description) },
+                hint: p.body.contains("$ARGUMENTS").then(|| "…".to_string()),
+            })
+            .collect();
+        commands.extend(self.agent_commands.iter().filter(|c| !prompts.iter().any(|p| p.name == c.name)).cloned());
+        commands
     }
 
     /// Another thread has unreviewed changes to `path`, which this one just wrote: both

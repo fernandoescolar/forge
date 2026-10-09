@@ -158,7 +158,7 @@ impl FileMentions {
         Self { project, thread: None }
     }
 
-    /// Also completes the thread's agent commands after a leading `/`.
+    /// Also completes the thread's slash commands (the user's prompts and the agent's) after a leading `/`.
     pub fn with_commands(mut self, thread: WeakEntity<crate::thread::Thread>) -> Self {
         self.thread = Some(thread);
         self
@@ -210,7 +210,7 @@ impl FileMentions {
     }
 
     fn command_completions(&self, buffer: &Entity<Buffer>, position: language::Anchor, cx: &mut Context<Editor>) -> Task<anyhow::Result<Vec<CompletionResponse>>> {
-        let commands = self.thread.as_ref().and_then(|t| t.upgrade()).map(|t| t.read(cx).commands().to_vec()).unwrap_or_default();
+        let commands = self.thread.as_ref().and_then(|t| t.upgrade()).map(|t| t.read(cx).commands()).unwrap_or_default();
         let buffer = buffer.read(cx);
         let offset = position.to_offset(buffer);
         let query: String = buffer.text_for_range(1..offset).collect();

@@ -1846,7 +1846,7 @@ mod tests {
         agent_tools().register(tool("lookup", true));
         agent_tools().register(tool("change", false));
         agent_tools().set_runner(std::sync::Arc::new(Echo));
-        assert!(crate::forge_mcp::instructions().contains("`demo_ext__lookup` (Demo lookup, from the demo-ext extension)"));
+        assert!(crate::forge_mcp::instructions(std::path::Path::new("/nowhere")).contains("`demo_ext__lookup` (Demo lookup, from the demo-ext extension)"));
         assert_eq!(crate::forge_mcp::tool_title("mcp__forge__demo_ext__change").as_deref(), Some("Demo change"));
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2128,6 +2128,61 @@ mod tests {
     /// A thread tab for a fresh workspace without folders, with `config`'s agents.
     /// A thread in a worktree changes the worktree's files, not yours; applying brings its
     /// changes over, and removing the worktree ends the thread.
+    /// `/name …` sends the user's prompt from `.forge/prompts/name.md`, with what follows
+    /// the command in place of `$ARGUMENTS`; the thread shows what was typed.
+    #[gpui::test]
+    async fn sends_the_users_prompts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        // The prompts are read from disk; the files the agent reads, from the project.
+        std::fs::create_dir_all(root.join(".forge/prompts")).unwrap();
+        std::fs::write(root.join(".forge/prompts/peek.md"), "---\ndescription: Read a file\n---\nread $ARGUMENTS").unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(&root, json!({ "b.txt": "uno" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [root.as_path()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let agent = AgentSpec {
+            id: "mock".into(),
+            command: "python3".into(),
+            args: vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/mock-acp-agent.py").to_string_lossy().into_owned()],
+            env: vec![],
+            cwd: Some(tmp.path().to_path_buf()),
+        };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+
+        let peek = thread.read_with(cx, |t, _| t.commands().into_iter().find(|c| c.name == "peek"));
+        assert_eq!(peek.map(|c| (c.description, c.hint)), Some(("Read a file (your prompt)".to_string(), Some("…".to_string()))));
+
+        thread.update_in(cx, |t, window, cx| t.ask("/peek b.txt".into(), window, cx));
+        wait_for(cx, &thread, "the prompt's answer", |t| t.status() == Status::Ready && t.entries.iter().any(|e| matches!(e, Entry::Agent(_)))).await;
+        let (user, answered) = thread.read_with(cx, |t, cx| {
+            let user = t.entries.iter().find_map(|e| match e {
+                Entry::User(text, labels) => Some((text.clone(), labels.clone())),
+                _ => None,
+            });
+            let answered = t.entries.iter().any(|e| matches!(e, Entry::Agent(md) if md.read(cx).source().contains("Read: uno")));
+            (user, answered)
+        });
+        assert_eq!(user, Some(("/peek b.txt".to_string(), vec!["prompt .forge/prompts/peek.md".to_string()])));
+        assert!(answered, "the agent got the prompt, expanded");
+    }
+
     #[gpui::test]
     async fn a_thread_works_in_its_own_worktree(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
