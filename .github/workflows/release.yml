@@ -1,7 +1,7 @@
-# Builds the macOS app and the Linux tarballs for a version tag (v1.2.3, v1.2.3-beta.1),
-# with that version, and publishes them as a GitHub release, whose zips and tarballs Forge
-# updates itself from (forge-update). Linux builds on Ubuntu 22.04 (its glibc, 2.35, is the
-# oldest the tarball runs on), for x86_64 and aarch64. Signs (and notarizes) when the
+# Builds the macOS app, the Linux tarballs and the Windows zip for a version tag (v1.2.3,
+# v1.2.3-beta.1), with that version, and publishes them as a GitHub release, whose zips and
+# tarballs Forge updates itself from (forge-update). Linux builds on Ubuntu 22.04 (its glibc,
+# 2.35, is the oldest the tarball runs on), for x86_64 and aarch64; Windows for x86_64. Signs (and notarizes) when the
 # signing secrets are set:
 #   MACOS_CERTIFICATE           base64 of the .p12: a "Developer ID Application", or Forge's
 #                               own self-signed "Forge Signing" (scripts/create-signing-identity.sh
@@ -205,6 +205,54 @@ jobs:
           name: forge-linux-${{ matrix.arch }}
           path: dist/Forge-*.tar.gz
 
+  build-windows:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: windows-latest
+    env:
+      FORGE_UPDATE_REPOSITORY: ${{ github.repository }}
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-x86_64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Take the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not a version tag: use v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          VERSION="$version" perl -0pi -e 's/^version = ".*?"/version = "$ENV{VERSION}"/m' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+      - name: Apply Forge's patches to Zed
+        shell: bash
+        run: scripts/apply-zed-patches.sh
+      - name: Build the zip
+        shell: pwsh
+        run: scripts/bundle-windows.ps1
+      - name: Check that it starts
+        # `--printenv` exits before opening a window: the program and its libraries load.
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\forge\bin\forge.exe -ArgumentList '--printenv' -Wait -PassThru -NoNewWindow -RedirectStandardOutput env.txt
+          if ($p.ExitCode -ne 0) { throw "forge.exe --printenv exited with $($p.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: forge-windows-x86_64
+          path: dist/Forge-*-windows-*.zip
+
   # The zips as a user's Mac gets them: on a fresh runner that has never seen (or trusted) the
   # signing certificate, unpacked and checked the way scripts/install.sh and forge-update do.
   verify:
@@ -227,7 +275,7 @@ jobs:
           codesign -d -r- unpacked/Forge.app
 
   publish:
-    needs: [build, build-linux, verify]
+    needs: [build, build-linux, build-windows, verify]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

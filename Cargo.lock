@@ -3733,6 +3733,7 @@ dependencies = [
  "debugger_ui",
  "diagnostics",
  "editor",
+ "embed-resource",
  "env_logger 0.11.8",
  "file_finder",
  "file_icons",
@@ -3790,6 +3791,7 @@ dependencies = [
  "util",
  "uuid",
  "watch",
+ "windows 0.62.2",
  "workspace",
  "zed_actions",
 ]

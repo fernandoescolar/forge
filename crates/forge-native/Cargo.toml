@@ -90,6 +90,13 @@ gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["f
 # The window icon (X11 shows it; Wayland takes the launcher's).
 image = { version = "0.25.1", default-features = false, features = ["png"] }
 
+# Windows: the named pipe that keeps one Forge per user.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO"] }
+
+[build-dependencies]
+embed-resource = "3.0"
+
 [dev-dependencies]
 gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
 tempfile.workspace = true

@@ -27,6 +27,14 @@ curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/
 
 It downloads the latest release for your Mac from the [releases page](https://github.com/fernandoescolar/forge/releases), checks its signature, quits Forge if it is running, puts Forge.app in Applications (`~/Applications` if you can't write to Applications) and adds a `forge` command to `~/.local/bin`: `forge .` opens the current folder, `forge file.cs` a file, whether Forge is running or not. `FORGE_VERSION=0.0.2` installs a given version.
 
+On Windows (preview: x86_64), run this in PowerShell instead:
+
+```powershell
+irm https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.ps1 | iex
+```
+
+It downloads `Forge-<version>-windows-x86_64.zip`, checks it against the SHA-256 the release lists, unpacks it into `%LOCALAPPDATA%\Programs\Forge`, adds Forge to the Start menu and a `forge` command to your PATH. As on Linux, `forge .` while Forge runs opens the folder in it, and a Forge that is running keeps running until you restart it. Forge keeps its settings in `%LOCALAPPDATA%\Forge`.
+
 On Linux it downloads `Forge-<version>-linux-<arch>.tar.gz`, checks it against the SHA-256 the release lists, unpacks it into `~/.local/opt/forge`, adds Forge to your desktop's applications (with its icon) and adds the `forge` command. A Forge that is running keeps running: restart it to use the new one. `forge .` while Forge runs opens the folder in it rather than starting another Forge. The tarball can also be unpacked anywhere by hand: `forge/bin/forge` runs it.
 
 To install from the zip instead, download `Forge-<version>-<arch>.zip` (`aarch64` for Apple silicon, `x86_64` for Intel), unzip it and move **Forge.app** to Applications. Until Forge is signed with an Apple Developer ID, macOS quarantines what the browser downloads, and a quarantined Forge doesn't start (not even after *Open Anyway* in System Settings › Privacy & Security). Take it out of quarantine once:

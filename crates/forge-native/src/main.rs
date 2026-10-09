@@ -4,6 +4,9 @@
 //! telemetry, auto-update or extension marketplace. Forge-specific surfaces (ACP agent
 //! panel, React extension host) are added as workspace panels.
 
+// Release builds on Windows are GUI programs: no console window opens with them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod branding;
 mod config_files;
 mod docks;
@@ -11,8 +14,8 @@ mod external_changes;
 mod menus;
 mod search_bars;
 mod settings_view;
-// Used on Linux; built on every Unix so its tests run on macOS too.
-#[cfg(unix)]
+// Used on Linux and Windows; built on macOS too so its tests run there.
+#[cfg(any(unix, windows))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod single_instance;
 mod open_editors;
@@ -62,10 +65,10 @@ fn main() {
     let paths = startup_paths(std::env::args().skip(1));
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
 
-    // Linux: a Forge that is already running opens the paths instead (`forge .` from a
-    // terminal); else this one listens for later ones.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    match single_instance::claim(&single_instance::socket_path(&data_dir), &paths) {
+    // Linux and Windows: a Forge that is already running opens the paths instead (`forge .`
+    // from a terminal); else this one listens for later ones.
+    #[cfg(any(target_os = "linux", windows))]
+    match single_instance::claim(&single_instance::endpoint(&data_dir), &paths) {
         Ok(single_instance::Instance::Forwarded) => return,
         Ok(single_instance::Instance::First(listener)) => {
             let open_tx = open_tx.clone();

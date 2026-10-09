@@ -1,0 +1,2 @@
+// Windows resources of forge.exe (build.rs compiles this).
+1 ICON "assets/images/app_icon.ico"

@@ -51,6 +51,12 @@ pub fn init(cx: &mut App) {
     .detach();
     // Release builds look on their own, at startup and every few hours.
     if !cfg!(debug_assertions) {
+        // Windows: what the last update moved aside can go now.
+        if cfg!(windows) {
+            if let Some(prefix) = current_install() {
+                cx.background_spawn(async move { remove_old_files(&prefix) }).detach();
+            }
+        }
         cx.spawn(async move |cx| {
             loop {
                 cx.update(|cx| check(false, cx));
@@ -87,6 +93,7 @@ pub struct Release {
 pub fn asset_name(version: &str, os: &str, arch: &str) -> String {
     match os {
         "macos" => format!("Forge-{version}-{arch}.zip"),
+        "windows" => format!("Forge-{version}-windows-{arch}.zip"),
         os => format!("Forge-{version}-{os}-{arch}.tar.gz"),
     }
 }
@@ -214,10 +221,13 @@ pub fn install(zip: &Path, app: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Unpacks the Linux tarball `tarball` (a `forge/` folder) and puts it in place of the
-/// installation at `prefix`, once its SHA-256 is `sha256`. The old one is kept until the
-/// new one is in place.
-pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
+/// Unpacks `archive` (the Linux tarball or the Windows zip: a `forge/` folder) and puts it in
+/// place of the installation at `prefix`, once its SHA-256 is `sha256`. On Linux the old
+/// folder is kept until the new one is in place. Windows doesn't let a folder with a running
+/// program in it move, nor that program be overwritten, but it does let it be renamed: there
+/// each file is swapped in on its own ([`swap_in`]).
+pub fn install_tree(archive: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
+    let tarball = archive;
     use sha2::{Digest as _, Sha256};
     let expected = sha256.context("the release doesn't list the download's SHA-256")?;
     let actual: String = Sha256::digest(std::fs::read(tarball)?).iter().map(|b| format!("{b:02x}")).collect();
@@ -229,10 +239,14 @@ pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Resu
     }
     let parent = prefix.parent().context("the installation has no folder")?;
     let staging = tempfile::Builder::new().prefix(".forge-update-").tempdir_in(parent).context("cannot write next to the installation")?;
-    run("tar", &["-xzf".as_ref(), tarball.as_os_str(), "-C".as_ref(), staging.path().as_os_str()])?;
+    // GNU tar reads the gzip of the tarball; Windows' tar (bsdtar) reads the zip.
+    run("tar", &["-xf".as_ref(), tarball.as_os_str(), "-C".as_ref(), staging.path().as_os_str()])?;
     let new_tree = staging.path().join("forge");
     if !is_installation(&new_tree) {
         bail!("the download isn't a Forge tarball");
+    }
+    if cfg!(windows) {
+        return swap_in(&new_tree, prefix);
     }
     let old = staging.path().join("previous");
     std::fs::rename(prefix, &old).context("cannot move the current installation aside")?;
@@ -243,13 +257,75 @@ pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Resu
     Ok(())
 }
 
-/// A folder laid out like the Linux tarball: `bin/forge` and `share/forge`.
+/// What files the update replaces are renamed to, until the next start removes them.
+const OLD: &str = ".forge-old";
+
+/// Puts each file of `new_tree` in its place under `prefix`: the file there is renamed to
+/// `<name>.forge-old` first (a running program can be renamed, not overwritten), and so are
+/// the files the new version no longer has. [`remove_old_files`] deletes them later.
+pub(crate) fn swap_in(new_tree: &Path, prefix: &Path) -> Result<()> {
+    fn files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                files(root, &path, out)?;
+            } else if !path.to_string_lossy().ends_with(OLD) {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let aside = |target: &Path| -> Result<()> {
+        if target.exists() {
+            let old = PathBuf::from(format!("{}{OLD}", target.display()));
+            std::fs::remove_file(&old).ok();
+            std::fs::rename(target, &old).with_context(|| format!("cannot move {} aside", target.display()))?;
+        }
+        Ok(())
+    };
+    let (mut new_files, mut current) = (Vec::new(), Vec::new());
+    files(new_tree, new_tree, &mut new_files)?;
+    files(prefix, prefix, &mut current)?;
+    for relative in &new_files {
+        let target = prefix.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        aside(&target)?;
+        std::fs::rename(new_tree.join(relative), &target).with_context(|| format!("cannot put {} in place", target.display()))?;
+    }
+    for gone in current.iter().filter(|f| !new_files.contains(f)) {
+        aside(&prefix.join(gone))?;
+    }
+    Ok(())
+}
+
+/// Deletes what an update on Windows left aside ([`swap_in`]); files still in use stay
+/// for the next time.
+pub fn remove_old_files(prefix: &Path) {
+    fn walk(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                walk(&path);
+            } else if path.to_string_lossy().ends_with(OLD) {
+                std::fs::remove_file(&path).ok();
+            }
+        }
+    }
+    walk(prefix);
+}
+
+/// The program in an installation's `bin` folder.
+const EXE: &str = if cfg!(windows) { "forge.exe" } else { "forge" };
+
+/// A folder laid out like the Linux tarball or the Windows zip: `bin/forge` and `share/forge`.
 fn is_installation(prefix: &Path) -> bool {
-    prefix.join("bin/forge").is_file() && prefix.join("share/forge").is_dir()
+    prefix.join("bin").join(EXE).is_file() && prefix.join("share/forge").is_dir()
 }
 
 /// What an update replaces: the running app bundle (`…/Forge.app`) on macOS, the folder
-/// the tarball made (`…/forge`, with `bin/forge`) elsewhere; `None` when Forge doesn't run
+/// the tarball or zip made (`…/forge`, with `bin/forge`) elsewhere; `None` when Forge doesn't run
 /// from one (a development build).
 fn current_install() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -349,7 +425,7 @@ pub fn check(asked: bool, cx: &mut App) {
             let bytes = get(&client, &release.download).await?;
             let version = release.version.clone();
             cx.background_spawn(async move {
-                let download = tempfile::Builder::new().suffix(if cfg!(target_os = "macos") { ".zip" } else { ".tar.gz" }).tempfile()?;
+                let download = tempfile::Builder::new().suffix(if cfg!(any(target_os = "macos", windows)) { ".zip" } else { ".tar.gz" }).tempfile()?;
                 std::fs::write(download.path(), &bytes)?;
                 if cfg!(target_os = "macos") { install(download.path(), &target) } else { install_tree(download.path(), release.sha256.as_deref(), &target) }
             })
@@ -408,6 +484,35 @@ mod tests {
             {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz", "digest": "sha256:ABC123"}]}"#;
         let release = newer_release(linux, "0.2.0", "linux", "x86_64").unwrap().unwrap();
         assert_eq!((release.download.as_str(), release.sha256.as_deref()), ("https://x/linux.tar.gz", Some("abc123")));
+    }
+
+    /// Windows' way: file by file, the replaced ones moved aside until the next start.
+    #[test]
+    fn swaps_files_in_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (prefix, new) = (dir.path().join("installed"), dir.path().join("new"));
+        for (root, files) in [(&prefix, &[("bin/forge.exe", "0.2.0"), ("share/forge/extensions/old/package.json", "gone")][..]), (&new, &[("bin/forge.exe", "0.3.0"), ("share/forge/extensions/db/package.json", "db")][..])] {
+            for (file, text) in files {
+                std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+                std::fs::write(root.join(file), text).unwrap();
+            }
+        }
+        swap_in(&new, &prefix).unwrap();
+        let read = |file: &str| std::fs::read_to_string(prefix.join(file)).ok();
+        assert_eq!(read("bin/forge.exe").as_deref(), Some("0.3.0"));
+        assert_eq!(read("bin/forge.exe.forge-old").as_deref(), Some("0.2.0"), "the running one is renamed, not overwritten");
+        assert_eq!(read("share/forge/extensions/db/package.json").as_deref(), Some("db"));
+        assert_eq!(read("share/forge/extensions/old/package.json"), None, "what the new version doesn't have is moved aside too");
+
+        // An update over one that left files aside replaces those too.
+        std::fs::write(new.join("bin/forge.exe"), "0.4.0").unwrap();
+        swap_in(&new, &prefix).unwrap();
+        assert_eq!(read("bin/forge.exe.forge-old").as_deref(), Some("0.3.0"));
+
+        remove_old_files(&prefix);
+        assert_eq!(read("bin/forge.exe").as_deref(), Some("0.4.0"));
+        assert_eq!(read("bin/forge.exe.forge-old"), None, "the next start removes them");
+        assert_eq!(read("share/forge/extensions/old/package.json.forge-old"), None);
     }
 
     /// The Linux tarball replaces the folder it made before, when its SHA-256 matches.

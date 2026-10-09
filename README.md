@@ -27,7 +27,7 @@ Forge is a native, GPU-rendered code editor that makes the decisions for you. Op
 
 ## Get Forge
 
-Forge runs on macOS 13 or later (Apple silicon and Intel) and on Linux (x86_64 and ARM64, Wayland or X11). Install it, or update it, from a terminal:
+Forge runs on macOS 13 or later (Apple silicon and Intel) and on Linux (x86_64 and ARM64, Wayland or X11); Windows (x86_64) is in preview. Install it, or update it, from a terminal (on Windows, see the [guide](docs/GUIDE.md#install-and-update)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
