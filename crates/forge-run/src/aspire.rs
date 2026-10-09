@@ -409,7 +409,8 @@ mod tests {
         assert!(http(port, "DELETE", "/run_session/1", &token, "").await.starts_with("HTTP/1.1 204"), "an ended session is gone");
 
         drop(endpoint);
-        assert!(matches!(notifications.next().await, Some(Ok(Message::Close(_))) | None), "the stream closes with the endpoint");
+        // A close frame, or (on Linux) the connection reset: either way the stream ends.
+        assert!(matches!(notifications.next().await, Some(Ok(Message::Close(_)) | Err(_)) | None), "the stream closes with the endpoint");
     }
 
     /// Plays the IDE for a real app host: its orchestrator must ask for its projects

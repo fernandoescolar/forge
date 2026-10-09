@@ -498,17 +498,18 @@ mod tests {
         cx.update(|cx| {
             settings::init(cx);
             // Zed's default keymap, as the app loads it, then Forge's.
-            let default = settings::KeymapFile::load(include_str!("../../../vendor/zed/assets/keymaps/default-macos.json"), cx);
+            // This platform's (`secondary` is ⌘ on macOS, Ctrl elsewhere).
+            let default = settings::KeymapFile::load(&settings::default_keymap(), cx);
             // Like the app, it skips bindings to actions of Zed crates Forge doesn't ship.
             let (settings::KeymapFileLoadResult::Success { key_bindings } | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. }) = default else { panic!("the default keymap parses") };
             cx.bind_keys(key_bindings);
             bind_forge_keys(cx);
         });
-        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
-        assert_eq!(action_for("cmd-.", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
-        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=http", cx).as_deref(), Some("forge_http::SendRequest"));
-        assert_eq!(action_for("cmd-enter", "Editor mode=full extension=csproj", cx).as_deref(), Some("forge_dotnet::ChangePackageVersion"));
-        assert_ne!(action_for("cmd-enter", "Editor mode=single_line", cx).as_deref(), Some("editor::ToggleCodeActions"), "not in single-line inputs");
+        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
+        assert_eq!(action_for("secondary-.", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
+        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=http", cx).as_deref(), Some("forge_http::SendRequest"));
+        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=csproj", cx).as_deref(), Some("forge_dotnet::ChangePackageVersion"));
+        assert_ne!(action_for("secondary-enter", "Editor mode=single_line", cx).as_deref(), Some("editor::ToggleCodeActions"), "not in single-line inputs");
     }
 
     #[test]
