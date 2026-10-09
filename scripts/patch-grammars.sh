@@ -22,7 +22,9 @@ SRC="$WORK/tree-sitter-c-sharp-$VERSION"
 for patch in "${PATCHES[@]}"; do
     patch -s -p1 -d "$SRC" < "$patch"
 done
-(cd "$SRC" && npx --yes "$CLI" generate --abi 15)
+# npm 12+ blocks install-time scripts of packages npx fetches unless they are allowed; the
+# CLI's install script downloads the tree-sitter binary. Older npm ignores the flag.
+(cd "$SRC" && npx --yes --allow-scripts=tree-sitter-cli "$CLI" generate --abi 15)
 rm -rf "$DEST" && mkdir -p "$(dirname "$DEST")" && mv "$SRC" "$DEST"
 echo "$STAMP" > "$DEST/.forge-stamp"
 echo "built:           tree-sitter-c-sharp $VERSION with $(basename -a "${PATCHES[@]}" | tr '\n' ' ')"
