@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds dist/Forge.app: release binary, Info.plist, icon, the extensions that ship with Forge,
-# signature; then dist/Forge-<version>-<arch>.zip, the file releases and updates use.
+# signature; then dist/Forge-<version>-macos-<arch>.zip, the file releases and updates use.
 #
 #   scripts/bundle-macos.sh                 # runtime-compiled Metal shaders (no Xcode needed)
 #   FORGE_PRECOMPILED_SHADERS=1 scripts/bundle-macos.sh   # needs full Xcode (`xcrun metal`)
@@ -151,7 +151,7 @@ if [ -n "$TARGET" ]; then
 else
   ARCH="$(uname -m | sed 's/^arm64$/aarch64/')"
 fi
-ZIP="$ROOT/dist/Forge-$VERSION-$ARCH.zip"
+ZIP="$ROOT/dist/Forge-$VERSION-macos-$ARCH.zip"
 if [ -n "${FORGE_NOTARY_PROFILE:-}" ]; then
   [ "$IDENTITY" != "-" ] || { echo "error: notarizing needs FORGE_SIGN_IDENTITY (a Developer ID)" >&2; exit 1; }
   echo "==> notarizing with profile $FORGE_NOTARY_PROFILE"

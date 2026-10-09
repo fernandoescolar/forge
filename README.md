@@ -45,7 +45,7 @@ irm https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install
 
 It checks the zip's SHA-256, unpacks it into `%LOCALAPPDATA%\Programs\Forge`, adds Forge to the Start menu and the `forge` command to your PATH. Forge isn't code-signed on Windows yet: SmartScreen may warn the first time it opens.
 
-To install a given version, give it to the installer: `curl -fsSL …/install.sh | FORGE_VERSION=0.0.2 bash`, or in PowerShell `$env:FORGE_VERSION = '0.0.2'` before running it. You can also download the release's files yourself: `Forge-<version>-<arch>.zip` for macOS, `Forge-<version>-linux-<arch>.tar.gz` and `Forge-<version>-windows-x86_64.zip`; the [guide](docs/GUIDE.md#install-and-update) explains each.
+To install a given version, give it to the installer: `curl -fsSL …/install.sh | FORGE_VERSION=0.0.2 bash`, or in PowerShell `$env:FORGE_VERSION = '0.0.2'` before running it. You can also download the release's files yourself: `Forge-<version>-macos-<arch>.zip` for macOS, `Forge-<version>-linux-<arch>.tar.gz` and `Forge-<version>-windows-x86_64.zip`; the [guide](docs/GUIDE.md#install-and-update) explains each.
 
 To build it yourself:
 
