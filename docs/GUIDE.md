@@ -25,7 +25,7 @@ Forge runs on macOS 13 or later (Apple silicon and Intel) and on Linux (x86_64 a
 curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
 ```
 
-It downloads the latest release for your Mac from the [releases page](https://github.com/fernandoescolar/forge/releases), checks its signature, quits Forge if it is running, puts Forge.app in Applications (`~/Applications` if you can't write to Applications) and adds a `forge` command to `~/.local/bin`: `forge .` opens the current folder, `forge file.cs` a file, whether Forge is running or not. `FORGE_VERSION=0.0.2` installs a given version.
+It downloads the latest release for your Mac from the [releases page](https://github.com/fernandoescolar/forge/releases), checks its signature, quits Forge if it is running, puts Forge.app in Applications (`~/Applications` if you can't write to Applications) and adds a `forge` command to `~/.local/bin`: `forge .` opens the current folder, `forge file.cs` a file, whether Forge is running or not. `curl … | FORGE_VERSION=0.0.2 bash` installs a given version.
 
 On Windows (preview: x86_64), run this in PowerShell instead:
 

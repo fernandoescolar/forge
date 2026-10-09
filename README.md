@@ -27,13 +27,25 @@ Forge is a native, GPU-rendered code editor that makes the decisions for you. Op
 
 ## Get Forge
 
-Forge runs on macOS 13 or later (Apple silicon and Intel) and on Linux (x86_64 and ARM64, Wayland or X11); Windows (x86_64) is in preview. Install it, or update it, from a terminal (on Windows, see the [guide](docs/GUIDE.md#install-and-update)):
+Forge runs on macOS 13 or later (Apple silicon and Intel), on Linux (x86_64 and ARM64, glibc 2.35 or later, Wayland or X11) and, in preview, on Windows (x86_64). Each installer downloads the latest [release](https://github.com/fernandoescolar/forge/releases), checks it, installs it and adds a `forge` command (`forge .` opens the current folder, in the Forge that is running if there is one). Run it again to update by hand; release builds also update themselves.
+
+**macOS and Linux**, in a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
 ```
 
-It puts the latest release in Applications (on Linux, in `~/.local/opt/forge` and your desktop's applications) and adds a `forge` command (`forge .` opens the current folder). Release builds then update themselves. You can also download `Forge-<version>-<arch>.zip` from the [releases page](https://github.com/fernandoescolar/forge/releases); the [guide](docs/GUIDE.md#install-and-update) explains the extra step that needs.
+On macOS it checks the app's signature and puts Forge.app in Applications. On Linux it checks the tarball's SHA-256, unpacks it into `~/.local/opt/forge` and adds Forge, with its icon, to your desktop's applications.
+
+**Windows**, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.ps1 | iex
+```
+
+It checks the zip's SHA-256, unpacks it into `%LOCALAPPDATA%\Programs\Forge`, adds Forge to the Start menu and the `forge` command to your PATH. Forge isn't code-signed on Windows yet: SmartScreen may warn the first time it opens.
+
+To install a given version, give it to the installer: `curl -fsSL …/install.sh | FORGE_VERSION=0.0.2 bash`, or in PowerShell `$env:FORGE_VERSION = '0.0.2'` before running it. You can also download the release's files yourself: `Forge-<version>-<arch>.zip` for macOS, `Forge-<version>-linux-<arch>.tar.gz` and `Forge-<version>-windows-x86_64.zip`; the [guide](docs/GUIDE.md#install-and-update) explains each.
 
 To build it yourself:
 
