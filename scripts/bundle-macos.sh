@@ -42,7 +42,7 @@ cargo build --release -p forge-native ${features[@]+"${features[@]}"} ${target_a
 
 # The extensions that ship with Forge. The others in extensions/ are examples for extension
 # authors (debug builds load them all).
-BUNDLED_EXTENSIONS=(db-explorer)
+BUNDLED_EXTENSIONS=(db-explorer containers)
 
 echo "==> building and packing the bundled extensions: ${BUNDLED_EXTENSIONS[*]}"
 PACKAGES="$(mktemp -d)"

@@ -1,0 +1,25 @@
+{
+  "name": "containers",
+  "displayName": "Containers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Docker containers and images, grouped by Compose project: start, stop, restart and remove them, follow their logs and open a shell in a terminal. Agents can list them, read their logs and, when you approve, restart them or bring a Compose project up",
+  "forge": {
+    "entry": "src/extension.tsx",
+    "main": "dist/extension.js",
+    "settings": {
+      "title": "Containers",
+      "properties": {
+        "containers.command": { "type": "string", "default": "docker", "title": "Docker command", "description": "The Docker CLI to run (a path, or `podman` for Podman's Docker-compatible CLI)." },
+        "containers.shell": { "type": "string", "default": "sh", "title": "Shell", "description": "The program Open Shell runs in a container (`bash`, `sh`, `ash`…)." },
+        "containers.logLines": { "type": "integer", "default": 500, "minimum": 10, "maximum": 100000, "title": "Log lines", "description": "How many of a container's last log lines Follow Logs shows before following new ones." },
+        "containers.confirmRemove": { "type": "boolean", "default": true, "title": "Confirm before removing", "description": "Ask before removing a container or an image, or taking a Compose project down." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ../../packages/forge-api/bin/forge-ext.mjs build .",
+    "watch": "node ../../packages/forge-api/bin/forge-ext.mjs watch .",
+    "package": "node ../../packages/forge-api/bin/forge-ext.mjs pack ."
+  }
+}

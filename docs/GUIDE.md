@@ -14,6 +14,7 @@ Forge is the opinionated IDE for real-world .NET, Go, Rust and JavaScript develo
 - [Git and GitHub](#git-and-github)
 - [HTTP requests](#http-requests)
 - [Database Explorer](#database-explorer)
+- [Containers](#containers)
 - [Extensions](#extensions)
 
 ## Install and update
@@ -199,7 +200,7 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 
 These calls appear in the thread with their names ("Run tests", "Find references") and what they were asked.
 
-**Extensions' tools.** Extensions can offer agents tools of their own, through the same `forge` server. The Database Explorer does: agents can list your connections, read their schema, and run SQL on them, without credentials of their own. A tool that only reads runs when an agent calls it. Any other, such as running a query, shows in the thread with its arguments, and runs only if you *Allow* it (with *Super user*, it runs without asking). Agents see an extension's tools in threads started after it loads.
+**Extensions' tools.** Extensions can offer agents tools of their own, through the same `forge` server. The Database Explorer does: agents can list your connections, read their schema, and run SQL on them, without credentials of their own. So does Containers: agents see your containers and read their logs, and start, stop or restart them, or bring a Compose project up. A tool that only reads runs when an agent calls it. Any other, such as running a query, shows in the thread with its arguments, and runs only if you *Allow* it (with *Super user*, it runs without asking). Agents see an extension's tools in threads started after it loads.
 
 **Threads in a worktree.** Agents › *New Thread in Worktree* starts a thread that works in a git worktree of its own (`.forge/worktrees/<name>`, on branch `forge/<name>`, from your last commit): it never touches the files you are editing, nor another thread's. A bar at the top of the thread shows its branch. *Apply to project* copies its changes into your files as uncommitted changes, to review in the Git panel. Your own uncommitted changes stay: each file is merged with yours, and only where you both changed the same lines are there conflict markers, which the merge editor resolves. *Remove…* deletes the worktree, with or without its branch, and ends the thread. Agents › *Worktrees…* applies or removes any of them, also after a restart.
 
@@ -247,6 +248,18 @@ The **Databases** panel (View › Panels › Databases; an extension that comes 
 ![The Databases panel and a query tab with its results](images/database-explorer.jpg)
 
 Its settings (page size, query row limit, whether to confirm before saving) are in Forge › Settings › Database Explorer.
+
+## Containers
+
+The **Containers** panel (View › Panels › Containers; an extension that comes with Forge) shows your Docker containers, grouped by Compose project, and your images. It uses the `docker` command, so it works with whatever runs the engine: Docker Desktop, OrbStack, Colima, or Podman (set *Docker command* to `podman`). It follows Docker's events, so containers you start or stop anywhere else show up at once.
+
+- **Containers.** Each Compose project shows how many of its containers are running; under it, its services with their status (and health) and published ports (`8080→80`). Containers that Compose didn't start are under *Other containers*. Select one for the buttons at the top: start or stop, restart, follow its logs, open a shell.
+- **Logs and shells** open in Forge terminals: double-click a container (or *Follow Logs*) for its last lines and then the new ones as they come, and *Open Shell* runs a shell inside it (`sh`, or the *Shell* setting).
+- **More.** Right-click a container to pause or resume it, inspect it (its `docker inspect`, in a tab), copy its id or remove it. Right-click a project for *Up*, *Start*, *Stop*, *Restart*, *Open Compose File* and *Down* (which removes its containers and networks, not its volumes).
+- **Images.** The *Images* view lists them with their size and age, the ones in use highlighted; right-click to inspect or remove one.
+- **Compose Up.** *Containers: Compose Up* in the command palette runs `docker compose up -d` for the active compose file, or for the project's.
+
+Agents get four tools: `containers` and `logs` (with a `grep`) read at once; `control` (start, stop or restart a container or a project) and `compose_up` ask you first. Its settings (the Docker command, the shell, how many log lines to show, whether to confirm before removing) are in Forge › Settings › Containers.
 
 ## Extensions
 

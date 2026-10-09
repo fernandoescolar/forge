@@ -2,13 +2,14 @@
 
 Forge extensions are written in TypeScript with React, and Forge draws them with its own native UI: no web view, no DOM, no CSS. An extension can add panels, tabs in the editor area, commands and settings. It can also read and change the code in the active editor, run programs (including ones it ships, called *sidecars*) and keep data and secrets. When an extension needs the DOM (a chart library, an existing web app), it can open a web view panel instead.
 
-This guide goes from an empty folder to a packaged extension, then covers the components and the API. Three complete extensions live in this repository's `extensions/` folder:
+This guide goes from an empty folder to a packaged extension, then covers the components and the API. Four complete extensions live in this repository's `extensions/` folder:
 
 | Example | What it shows |
 | --- | --- |
 | `workspace-notes` | A native panel with state, settings and the workspace API: the place to start |
 | `webview-demo` | A web view panel exchanging messages with its extension |
 | `db-explorer` | Database Explorer, which ships with Forge: a tree, tabs in the editor area, an editable data grid, a Rust sidecar, keychain secrets and dialogs |
+| `containers` | Containers, which ships with Forge: a tree kept current by a long-running process (`docker events`), commands in Forge terminals, and agent tools |
 
 - [Your first extension](#your-first-extension)
 - [The manifest](#the-manifest)
@@ -404,7 +405,7 @@ ctx.subscriptions.push(
 - **When agents see it.** Agents get the list of tools when a thread starts: a tool registered later shows in threads started after. Forge also names the extensions' tools in the instructions it gives agents with a thread's first message.
 - **Unloading.** Like everything an extension registers, its tools go away when it unloads; `dispose()` takes one away sooner.
 
-The Database Explorer (`extensions/db-explorer/src/agentTools.ts`) offers agents its SQL connections: `connections` and `schema` read, and `query` runs SQL the user approves.
+The Database Explorer (`extensions/db-explorer/src/agentTools.ts`) offers agents its SQL connections: `connections` and `schema` read, and `query` runs SQL the user approves. Containers (`extensions/containers/src/agentTools.ts`) lets them list containers and read their logs, and asks before `control` starts, stops or restarts one or `compose_up` brings a Compose project up.
 
 ## Packaging and sharing
 

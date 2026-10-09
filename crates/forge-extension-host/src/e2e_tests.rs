@@ -1,7 +1,8 @@
 //! Database Explorer (extensions/db-explorer) end to end: the real extension bundle in
 //! QuickJS, its real `forge-sql` sidecar and a SQLite file, driven through the UI events a
 //! user's clicks and typing send. Skipped when the extension or its sidecar isn't built
-//! (`npm run build && npm run sidecar -- --host-only` in extensions/db-explorer).
+//! (`npm run build && npm run sidecar -- --host-only` in extensions/db-explorer). Containers
+//! (extensions/containers) too, against the real Docker CLI when Docker is running.
 
 use std::{
     path::PathBuf,
@@ -559,4 +560,93 @@ async fn database_explorer_redis_end_to_end(cx: &mut gpui::TestAppContext) {
     ui.send(line, "onChange", json!("HGET user:queue x"));
     ui.send(line, "onSubmit", json!("HGET user:queue x"));
     ui.text(&console, "(error) WRONGTYPE");
+}
+
+/// Runs the Docker CLI for the containers test; `None` when it fails.
+fn docker(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("docker").args(args).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Containers (extensions/containers) end to end with the real Docker CLI: a container that
+/// Compose would have made shows under its project, agents can list it, and it can be removed.
+/// Skipped when the extension isn't built or Docker isn't running or has no image to use.
+#[gpui::test]
+async fn containers_end_to_end(cx: &mut gpui::TestAppContext) {
+    let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/containers");
+    if !extension.join("dist/extension.js").is_file() {
+        eprintln!("skipping: build extensions/containers first");
+        return;
+    }
+    let Some(image) = docker(&["images", "--format", "{{.ID}}"]).and_then(|ids| ids.lines().next().map(str::to_string)) else {
+        eprintln!("skipping: Docker isn't running or has no images");
+        return;
+    };
+    // A stopped container with Compose's labels (it is never started).
+    let project = format!("forge-e2e-{}", std::process::id());
+    let name = format!("{project}-web-1");
+    let project_label = format!("com.docker.compose.project={project}");
+    let Some(id) = docker(&["create", "--name", &name, "--label", &project_label, "--label", "com.docker.compose.service=web", &image]) else {
+        eprintln!("skipping: couldn't create a container");
+        return;
+    };
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            docker(&["rm", "-f", &self.0]);
+        }
+    }
+    let _cleanup = Cleanup(id.clone());
+
+    cx.executor().allow_parking();
+    let params = cx.update(workspace::AppState::test);
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        editor::init(cx);
+        crate::init_for_tests(cx);
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let host = cx.update(|cx| ExtensionHost::init(vec![extension.clone()], cx)).unwrap();
+    params.fs.as_fake().insert_tree(tmp.path(), json!({})).await;
+    let workspace_project = project::Project::test(params.fs.clone(), [tmp.path()], cx).await;
+    let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(workspace_project.clone(), window, cx));
+    let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let weak = workspace.downgrade();
+    cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+    let mut ui = Ui { host: host.clone(), cx };
+
+    // The project, with its one stopped container under it.
+    let project_row = ui.by_label("containers", "treeItem", &project);
+    assert_eq!(ui.prop("containers", project_row, "description"), json!("0/1 running"));
+    let web = ui.by_label("containers", "treeItem", "web");
+    assert!(ui.prop("containers", web, "description").as_str().is_some_and(|d| d.starts_with("Created")), "{:?}", ui.prop("containers", web, "description"));
+
+    // Agents see it too.
+    let tools = forge_ui::agent_tools::agent_tools();
+    let listed = ui.cx.background_executor.spawn(tools.run("containers__containers", json!({}), tmp.path().to_path_buf()));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !listed.is_ready() {
+        assert!(Instant::now() < deadline, "the containers tool didn't answer");
+        ui.cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let listed = listed.await.unwrap();
+    assert!(listed.contains(&format!("Compose project {project}")) && listed.contains(&format!("- web: {name}")), "{listed}");
+
+    // Remove it from its menu (after confirming): it leaves the panel.
+    ui.send(web, "onContextMenu", json!({ "id": "rm" }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ui.cx.has_pending_prompt() {
+        assert!(Instant::now() < deadline, "no confirmation before removing");
+        ui.cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    ui.cx.simulate_prompt_answer("Remove");
+    ui.wait("the project gone", |h| {
+        let tree = h.trees.get("containers")?;
+        let left = collect(tree, |n| matches!(&n.kind, NodeKind::Element { kind, props, .. } if kind == "treeItem" && props.get("label").and_then(Value::as_str) == Some(project.as_str())));
+        left.is_empty().then_some(())
+    });
+    assert!(docker(&["inspect", &id]).is_none(), "the container was removed");
 }
