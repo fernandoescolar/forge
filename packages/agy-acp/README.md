@@ -21,7 +21,7 @@ It runs `agy` in its documented stream-json print mode (`--input-format stream-j
 
 The adapter offers two terminal sign-in methods, which ACP clients run for you:
 
-- **Gemini API key** (`forge-agy-acp --api-key`): paste a key from Google AI Studio. It is kept in the macOS Keychain (elsewhere in `~/.config/forge-agy-acp/api-key`, readable only by you) and given to agy as `GEMINI_API_KEY`. An API key is the safer choice for using agy from other tools.
+- **Gemini API key** (`forge-agy-acp --api-key`): paste a key from Google AI Studio. It is kept in the macOS Keychain; on Linux in your keyring through Secret Service (GNOME Keyring, KWallet; it needs `secret-tool`, from the `libsecret-tools` package on Debian and Ubuntu), or, without one, in `~/.config/forge-agy-acp/api-key`, readable only by you. It is given to agy as `GEMINI_API_KEY`. An API key is the safer choice for using agy from other tools.
 - **Google account** (`forge-agy-acp --login`): agy's own interactive sign-in.
 
 ## Permissions
