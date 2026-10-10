@@ -8,9 +8,9 @@
 //! An update is downloaded, unpacked and checked next to the running Forge, then swapped
 //! in; it runs from the next start. On macOS it must be a signed Forge.app; on Linux its
 //! SHA-256 must be the one GitHub lists for the asset, and the folder it replaces must be
-//! one the tarball made (`bin/forge` and `share/forge`). Forge then asks, in a
-//! dialog, whether to restart now: restarting saves (or asks about) unsaved work and
-//! reopens the projects that were open.
+//! one the tarball made (`bin/forge` and `share/forge`). Forge then offers, in a
+//! notification in every window, to restart now: restarting saves (or asks about) unsaved
+//! work and reopens the projects that were open.
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -19,10 +19,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use futures::AsyncReadExt as _;
-use gpui::{App, AppContext as _, Global, PromptLevel, WindowHandle, actions};
+use gpui::{App, AppContext as _, Global, WindowHandle, actions};
 use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, RedirectPolicy};
 use serde_json::Value;
-use workspace::{MultiWorkspace, Workspace, notifications::NotificationId};
+use workspace::{
+    MultiWorkspace, Workspace,
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
+};
 
 actions!(forge, [
     /// Looks for a newer Forge release and installs it.
@@ -39,14 +42,8 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub fn init(cx: &mut App) {
     cx.set_global(UpdateState::default());
-    cx.observe_new(|workspace: &mut Workspace, _, cx| {
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|_, _: &CheckForUpdates, _, cx| check(true, cx));
-        // An update installed before any window was open asks in the first one.
-        if cx.global::<UpdateState>().unanswered {
-            if let Some(version) = cx.global::<UpdateState>().installed.clone() {
-                offer_restart(&version, cx);
-            }
-        }
     })
     .detach();
     // Release builds look on their own, at startup and every few hours.
@@ -72,10 +69,6 @@ struct UpdateState {
     busy: bool,
     /// A version already installed, waiting for a restart.
     installed: Option<String>,
-    /// The restart dialog for `installed` couldn't be shown yet (no window was open).
-    unanswered: bool,
-    /// The restart dialog is on screen.
-    asking: bool,
 }
 impl Global for UpdateState {}
 
@@ -355,39 +348,27 @@ fn notify(message: impl Into<String>, cx: &mut App) {
     workspace.update(cx, |ws, cx| ws.show_toast(toast, cx));
 }
 
-/// Asks whether to restart into the installed `version` now; asks in the first window
-/// that opens when none is open yet. Check for Updates runs while its window is being
-/// updated, and the dialog needs that window: ask right after.
+/// Offers to restart into the installed `version` in a notification in every window
+/// (and in windows opened later, when none is open yet). Closing it is "later": Check for
+/// Updates offers again.
 fn offer_restart(version: &str, cx: &mut App) {
-    let version = version.to_string();
-    cx.defer(move |cx| ask_to_restart(&version, cx));
+    let message = format!("Forge {version} is installed. Restart now to use it: Forge reopens your projects, and asks first about unsaved changes.");
+    workspace::notifications::show_app_notification(restart_notification_id(), cx, move |cx| {
+        let message = message.clone();
+        cx.new(move |cx| {
+            MessageNotification::new(message, cx)
+                .with_title("Update ready")
+                .show_suppress_button(false)
+                .primary_message("Restart Now")
+                .primary_on_click(|_, cx| cx.spawn(async move |_, cx| restart_forge(cx).await).detach())
+                .secondary_message("Later")
+                .secondary_on_click(|_, _| {})
+        })
+    });
 }
 
-fn ask_to_restart(version: &str, cx: &mut App) {
-    let state = cx.global_mut::<UpdateState>();
-    if state.asking {
-        return;
-    }
-    let Some(window) = windows(cx).into_iter().next() else {
-        cx.global_mut::<UpdateState>().unanswered = true;
-        return;
-    };
-    let message = format!("Forge {version} is installed");
-    let detail = "Restart now to use it. Forge reopens your projects, and asks first about unsaved changes.";
-    let Ok(answer) = window.update(cx, |_, window, cx| window.prompt(PromptLevel::Info, &message, Some(detail), &["Restart Now", "Later"], cx)) else {
-        return;
-    };
-    let state = cx.global_mut::<UpdateState>();
-    state.asking = true;
-    state.unanswered = false;
-    cx.spawn(async move |cx| {
-        let restart = answer.await == Ok(0);
-        cx.update(|cx| cx.global_mut::<UpdateState>().asking = false);
-        if restart {
-            restart_forge(cx).await;
-        }
-    })
-    .detach();
+fn restart_notification_id() -> NotificationId {
+    NotificationId::named("forge-update-restart".into())
 }
 
 /// Restarts into the installed update once every window is ready to close (unsaved work
@@ -574,10 +555,11 @@ mod tests {
         assert!(Path::new(&app).join("Contents/MacOS/forge").is_file());
     }
 
-    /// An update found before any window is open asks in the first one; Later keeps
-    /// Forge running, and Check for Updates asks again and restarts.
+    /// An update found before any window is open is offered in the first one, in the
+    /// window rather than in a dialog; Later keeps Forge running, and Check for Updates
+    /// offers again.
     #[gpui::test]
-    async fn asks_to_restart_into_an_installed_update(cx: &mut gpui::TestAppContext) {
+    async fn offers_to_restart_into_an_installed_update(cx: &mut gpui::TestAppContext) {
         let params = cx.update(workspace::AppState::test);
         cx.update(|cx| {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
@@ -587,28 +569,24 @@ mod tests {
             offer_restart("9.9.9", cx);
         });
         cx.run_until_parked();
-        assert!(cx.update(|cx| cx.global::<UpdateState>().unanswered), "no window to ask in yet");
 
         params.fs.as_fake().insert_tree("/root", serde_json::json!({ "a.txt": "" })).await;
         let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
         let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let (message, _) = cx.pending_prompt().expect("asks as soon as a window opens");
-        assert!(message.contains("Forge 9.9.9 is installed"), "{message}");
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let shown = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |ws, _| ws.has_notification(&restart_notification_id()));
+        assert!(shown(cx), "offered as soon as a window opens");
+        assert!(!cx.has_pending_prompt(), "not in a dialog");
 
-        cx.simulate_prompt_answer("Later");
+        workspace.update(cx, |ws, cx| ws.dismiss_notification(&restart_notification_id(), cx));
         cx.run_until_parked();
-        assert!(!cx.has_pending_prompt());
-        assert!(!cx.update(|_, cx| cx.global::<UpdateState>().asking));
+        assert!(!shown(cx));
 
-        let restarted = cx.expect_restart();
         cx.update(|_, cx| check(true, cx));
         cx.run_until_parked();
-        cx.simulate_prompt_answer("Restart Now");
-        cx.run_until_parked();
-        let (path, args) = restarted.await.expect("Forge restarts");
-        assert!(path.is_none() && args.is_empty(), "the new Forge starts plain, restoring the last session");
+        assert!(shown(cx), "Check for Updates offers again");
     }
 
     #[test]
