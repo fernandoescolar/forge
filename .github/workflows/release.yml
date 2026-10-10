@@ -61,7 +61,7 @@ jobs:
           fi
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
-  build:
+  build-macos:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     strategy:
@@ -259,8 +259,8 @@ jobs:
 
   # The zips as a user's Mac gets them: on a fresh runner that has never seen (or trusted) the
   # signing certificate, unpacked and checked the way scripts/install.sh and forge-update do.
-  verify:
-    needs: build
+  verify-macos:
+    needs: build-macos
     if: startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
@@ -279,7 +279,7 @@ jobs:
           codesign -d -r- unpacked/Forge.app
 
   publish:
-    needs: [build, build-linux, build-windows, verify]
+    needs: [build-macos, build-linux, build-windows, verify-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
