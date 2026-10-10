@@ -83,6 +83,7 @@ env_logger = "0.11"
 semver = "1"
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+which = "8"
 
 # Linux: GPUI draws through Wayland or X11, whichever the session offers.
 [target.'cfg(target_os = "linux")'.dependencies]

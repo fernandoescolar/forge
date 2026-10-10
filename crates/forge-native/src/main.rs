@@ -12,6 +12,7 @@ mod config_files;
 mod docks;
 mod external_changes;
 mod menus;
+mod missing_tools;
 mod search_bars;
 mod settings_view;
 // Used on Linux and Windows; built on macOS too so its tests run there.
@@ -189,6 +190,7 @@ fn main() {
         docks::init(cx);
         settings_view::init(cx);
         external_changes::init(cx);
+        missing_tools::init(cx);
         titlebar::init(cx);
         cx.set_menus(menus::app_menus(cx));
         // Extension panels and commands appear in the menus: set them again when they change.

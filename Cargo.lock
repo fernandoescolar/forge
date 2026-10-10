@@ -3795,6 +3795,7 @@ dependencies = [
  "util",
  "uuid",
  "watch",
+ "which",
  "windows 0.62.2",
  "workspace",
  "zed_actions",
