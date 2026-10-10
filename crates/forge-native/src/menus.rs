@@ -106,6 +106,10 @@ pub fn init(cx: &mut App) {
             .register_action(|_, _: &Zoom, window, _| window.zoom_window())
             .register_action(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen())
             .register_action(|_, _: &About, window, cx| about(window, cx))
+            // Zed's "Install Themes" buttons and the like: Forge's extensions are in its panel.
+            .register_action(|ws, _: &zed_actions::Extensions, window, cx| {
+                ws.focus_panel::<forge_extension_host::ExtensionsPanel>(window, cx);
+            })
             .register_action(|ws, _: &SelectRunTarget, window, cx| select_run_target(ws, window, cx))
             .register_action(|ws, _: &workspace::ReloadActiveItem, window, cx| {
                 if let Some(item) = ws.active_item(cx) {
@@ -318,6 +322,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
                 MenuItem::action("Open Default Key Bindings", OpenDefaultKeymap),
             ])),
             MenuItem::action("Select Theme…", zed_actions::theme_selector::Toggle::default()),
+            MenuItem::action("Select Icon Theme…", zed_actions::icon_theme_selector::Toggle::default()),
             MenuItem::action("Colour Palettes…", OpenPalettesFolder),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),

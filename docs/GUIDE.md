@@ -43,7 +43,9 @@ To install from the zip instead, download `Forge-<version>-macos-<arch>.zip` (`a
 xattr -dr com.apple.quarantine /Applications/Forge.app
 ```
 
-Release builds keep themselves up to date (on Linux, when installed from the tarball): they look for a new version at startup and every few hours and install it in the background. Then a dialog asks whether to restart now: *Restart Now* asks about unsaved changes, if there are any, and opens the new version with the projects you had open; *Later* keeps working with the current one, and the update applies the next time Forge starts. Forge › *Check for Updates…* looks right away (or asks again about an update that is waiting).
+Release builds keep themselves up to date (on Linux, when installed from the tarball): they look for a new version at startup and every few hours and install it in the background. Then a notification in the corner of every window offers to restart now: *Restart Now* asks about unsaved changes, if there are any, and opens the new version with the projects you had open; *Later* (or closing it) keeps working with the current one, and the update applies the next time Forge starts. Forge › *Check for Updates…* looks right away (or offers again an update that is waiting).
+
+Opening a project also checks that the tools it needs are installed: `git` for a Git repository, `cargo` and `rustc` for a Rust crate, `node`, `npm` and `npx` (and `pnpm`, `yarn` or `bun`, from the lock file) for a `package.json`, `go`, Python, and for .NET `dotnet` with an SDK that can build it (the one `global.json` asks for, or the newest `net<N>.0` the projects target). When one is missing, a notification says which, and *Download* opens where to get it.
 
 Forge uses the tools you already have, found through your shell's `PATH`:
 
@@ -97,6 +99,8 @@ The settings are stored in files in `~/Library/Application Support/Forge/config`
 | `settings.json` | Your settings, on top of Forge's defaults (*Open Default Settings* lists them all) |
 | `keymap.json` | Your key bindings, over the defaults (*Open Default Key Bindings* lists them); Forge applies them when the file changes |
 | `palettes/*.json` | Colour palettes, one theme each |
+| `themes/*.json` | Zed theme files |
+| `icon_themes/*.json` | Zed icon theme files, with their icons |
 | `agents.json` | The agents threads can talk to, and MCP servers |
 | `dotnet.json` | Solution Explorer and NuGet options |
 | `extensions.json` | Extension settings |
@@ -127,6 +131,12 @@ When you save a palette, its theme reloads. Syntax scopes inherit from their pre
   "buffer_font_size": 14
 }
 ```
+
+**Zed themes.** Forge also loads Zed theme files: put them in `config/themes/` (a theme from a Zed extension is the `.json` in its `themes/` folder). They reload when saved, like palettes.
+
+**File icons.** Forge's icons are **Forge Dark** and **Forge Light** (based on [Catppuccin Icons](https://github.com/catppuccin/zed-icons)), following the system appearance like the colour themes. Forge also ships **Modern Icons**, **Colored Zed Icons**, **VSCode Great Icons** and **Seti Icons**, and Zed's own set as **Zed (Default)**. Pick one with Forge › *Select Icon Theme…*, in Settings › *File icons*, or with `"icon_theme"` in `settings.json` (a name, or `{ "mode": "system", "dark": …, "light": … }`). To add one, put a Zed icon theme file in `config/icon_themes/`; its icon paths are relative to that folder, so a theme from a Zed extension works if you copy its `icon_themes/*.json` there with its `icons/` folder next to it.
+
+**From extensions.** Extensions can bring themes and icon themes too. They show in the selectors while the extension is installed. *Install Themes* in either selector opens the Extensions panel. See [EXTENSIONS.md](EXTENSIONS.md#themes-and-icon-themes).
 
 ## Run and debug
 
@@ -297,11 +307,11 @@ Agents get four tools: `containers` and `logs` (with a `grep`) read at once; `co
 
 ## Extensions
 
-Extensions add panels, tabs and commands, and can work with the editor, run programs and keep their own data. They are written in TypeScript with React, and Forge renders them natively. Open the **Extensions** panel to see the installed ones.
+Extensions add panels, tabs, commands, themes and icon themes, and can work with the editor, run programs and keep their own data. They are written in TypeScript with React, and Forge renders them natively. Open the **Extensions** panel to see the installed ones.
 
 Extensions are shared as packages: a `.forgeext` file holds an extension with the programs it needs. To install one, use **Extensions › Install from Package…** (or *Install* in the Extensions panel) and pick the file; Forge checks it, unpacks it into `~/Library/Application Support/Forge/extensions` and starts it, replacing an older copy. *Install from Folder…* does the same with an extension's folder.
 
-The **Extensions** panel (Extensions › Extensions Panel) shows a card for each extension: its version and description, where it comes from (*Included with Forge*, *Installed* or *Development*), whether it is running or failed (with the error), the panels it adds (click one to show it) and its commands. The ⋯ button has *Reload*, *Settings* (when it has some), *Export as Package…* (a `.forgeext` file to give to someone else), *Reveal in Finder* and, for ones you installed, *Uninstall…*; none needs a restart. The search box filters the list.
+The **Extensions** panel (Extensions › Extensions Panel) shows a card for each extension: its version and description, where it comes from (*Included with Forge*, *Installed* or *Development*), whether it is running or failed (with the error), the panels it adds (click one to show it), its commands and its themes. The ⋯ button has *Reload*, *Settings* (when it has some), *Export as Package…* (a `.forgeext` file to give to someone else), *Reveal in Finder* and, for ones you installed, *Uninstall…*; none needs a restart. The search box filters the list.
 
 What extensions add is also in the menus: their panels under View › Panels, their commands under Extensions › *the extension's name* (and in the command palette). Extensions run with your rights (they can read files and run programs), so install only ones you trust. [EXTENSIONS.md](EXTENSIONS.md) explains how to write one.
 

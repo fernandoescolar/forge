@@ -30,11 +30,13 @@ rquickjs = "0.14"
 schemars = { version = "1.0", features = ["indexmap2"] }
 serde.workspace = true
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
 smol = "2.0"
 tempfile.workspace = true
 task = { path = "../../vendor/zed/crates/task" }
 text = { path = "../../vendor/zed/crates/text" }
 theme = { path = "../../vendor/zed/crates/theme" }
+theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
 ui = { path = "../../vendor/zed/crates/ui" }
 util = { path = "../../vendor/zed/crates/util" }
 workspace = { path = "../../vendor/zed/crates/workspace" }
@@ -46,6 +48,5 @@ gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
 project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
 remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
 settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
-theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
 workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }
 tempfile.workspace = true

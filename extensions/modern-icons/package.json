@@ -1,0 +1,19 @@
+{
+  "name": "modern-icons",
+  "displayName": "Modern Icons",
+  "version": "0.7.2",
+  "private": true,
+  "description": "File and folder icons from VSCode Icons, for light and dark themes",
+  "forge": {
+    "iconThemes": [
+      "icon_themes"
+    ],
+    "files": [
+      "icon_themes",
+      "icons",
+      "README.md",
+      "LICENSE",
+      "ICONS_LICENSE"
+    ]
+  }
+}

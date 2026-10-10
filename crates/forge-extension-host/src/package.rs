@@ -4,7 +4,8 @@
 //! platform under `bin/<platform>/` (`darwin-arm64`, `darwin-x64`, `linux-x64`, `win32-x64`…).
 //!
 //! `package.json` can list what goes in with `forge.files` (paths relative to the folder);
-//! by default it is the folders and files in [`DEFAULT_FILES`]. Declared sidecars
+//! by default it is the folders and files in [`DEFAULT_FILES`]. The theme files it declares
+//! (`forge.themes`, `forge.iconThemes`) always go in. Declared sidecars
 //! (`forge.sidecars: ["name"]`) must be built for at least one platform to pack, and for this
 //! machine's to install.
 //!
@@ -21,7 +22,7 @@ use crate::process::{platform, sidecar_path};
 pub const EXTENSION: &str = "forgeext";
 
 /// What a package holds when `package.json` doesn't say (`forge.files`).
-pub const DEFAULT_FILES: &[&str] = &["package.json", "dist", "assets", "media", "bin", "README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"];
+pub const DEFAULT_FILES: &[&str] = &["package.json", "dist", "assets", "media", "bin", "themes", "icon_themes", "icons", "README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"];
 
 /// Never packed, wherever they are.
 const SKIPPED: &[&str] = &["node_modules", ".git", ".DS_Store"];
@@ -64,14 +65,21 @@ pub fn inspect(dir: &Path) -> Result<PackageInfo> {
 pub fn files(dir: &Path) -> Result<Vec<(String, PathBuf, u32)>> {
     let manifest: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("package.json"))?)?;
     let forge = manifest.get("forge").cloned().unwrap_or_default();
-    let main = forge.get("main").and_then(Value::as_str).unwrap_or("dist/extension.js");
-    anyhow::ensure!(dir.join(main).is_file(), "{main} is missing: build the extension first (`forge-ext build`)");
+    let main = forge.get("main").and_then(Value::as_str);
+    let listed = |key: &str| -> Vec<String> { forge.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(|f| f.as_str().map(|f| f.trim_start_matches("./").trim_end_matches('/').to_string())).collect() };
+    let themes: Vec<String> = [listed("themes"), listed("iconThemes")].concat();
+    // An extension that only brings themes needs no code.
+    let main = main.or((themes.is_empty() || dir.join("dist/extension.js").is_file()).then_some("dist/extension.js"));
+    if let Some(main) = main {
+        anyhow::ensure!(dir.join(main).is_file(), "{main} is missing: build the extension first (`forge-ext build`)");
+    }
     let mut roots: Vec<String> = match forge.get("files").and_then(Value::as_array) {
-        Some(listed) => listed.iter().filter_map(|f| f.as_str().map(|f| f.trim_start_matches("./").trim_end_matches('/').to_string())).collect(),
+        Some(_) => listed("files"),
         None => DEFAULT_FILES.iter().map(|f| f.to_string()).collect(),
     };
     roots.push("package.json".into());
-    roots.push(main.into());
+    roots.extend(main.map(str::to_string));
+    roots.extend(themes);
     roots.sort();
     roots.dedup();
 
@@ -236,6 +244,18 @@ mod tests {
         let info = inspect(tmp.path()).unwrap();
         assert_eq!(info.platforms[0].1.len(), 2);
         assert_eq!(file_name(&info), "db-1.2.0.forgeext");
+    }
+
+    #[test]
+    fn packs_an_extension_that_only_brings_themes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("colours")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("icons")).unwrap();
+        std::fs::write(tmp.path().join("package.json"), r#"{"name":"ocean","forge":{"themes":["colours/ocean.json"]}}"#).unwrap();
+        std::fs::write(tmp.path().join("colours/ocean.json"), "{}").unwrap();
+        std::fs::write(tmp.path().join("icons/rust.svg"), "<svg/>").unwrap();
+        let names: Vec<String> = files(tmp.path()).unwrap().into_iter().map(|(n, ..)| n).collect();
+        assert_eq!(names, ["colours/ocean.json", "icons/rust.svg", "package.json"], "declared themes go in wherever they are");
     }
 
     #[test]

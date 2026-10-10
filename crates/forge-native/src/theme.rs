@@ -3,7 +3,8 @@
 //! A palette names ~30 colours (see `assets/palettes/*.json`). [`expand`] turns it into a
 //! full Zed theme by overriding Zed's One Dark, so any key a palette doesn't mention still
 //! has a sensible value. Every `<config>/palettes/*.json` becomes a selectable theme and is
-//! reloaded whenever it is saved.
+//! reloaded whenever it is saved. Zed theme files in `<config>/themes` and Zed icon themes
+//! in `<config>/icon_themes` load the same way.
 
 use anyhow::{Context as _, Result, bail};
 use fs::Fs;
@@ -22,11 +23,10 @@ pub const BUILTIN_PALETTES: &[(&str, &str)] = &[
 ];
 const BASE_THEME: &str = include_str!("../../../vendor/zed/assets/themes/one/one.json");
 
-/// Forge's file icon theme: the built-in icon set under Forge's name.
-pub const ICON_THEME: &str = "Forge";
-
 pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
-    register_icon_theme(cx).log_err();
+    // Extensions can bring palettes too.
+    forge_extension_host::themes::set_palette_expander(expand);
+    migrate_icon_theme_setting().log_err();
     let dir = paths::config_dir().join("palettes");
     install_builtins(&dir).log_err();
     // Register built-ins synchronously so the first frame already uses the right colours;
@@ -36,30 +36,52 @@ pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
     }
     watch_dir(fs.clone(), dir, |text, cx| register(text, cx).map(|_| ()), cx);
     // Plain Zed theme files keep working too, as in Zed.
-    watch_dir(fs, paths::themes_dir().clone(), |text, cx| {
+    watch_dir(fs.clone(), paths::themes_dir().clone(), |text, cx| {
         theme_settings::load_user_theme(&ThemeRegistry::global(cx), text.as_bytes())?;
         theme_settings::reload_theme(cx);
         Ok(())
     }, cx);
+    watch_dir(fs, icon_themes_dir(), load_user_icon_theme, cx);
 }
 
-fn register_icon_theme(cx: &App) -> Result<()> {
-    use theme::{AppearanceContent, ChevronIconsContent, DirectoryIconsContent, IconDefinitionContent, IconThemeContent, IconThemeFamilyContent};
-    let base = theme::default_icon_theme();
-    let content = IconThemeContent {
-        name: ICON_THEME.into(),
-        appearance: AppearanceContent::Dark,
-        directory_icons: DirectoryIconsContent { collapsed: base.directory_icons.collapsed.clone(), expanded: base.directory_icons.expanded.clone() },
-        named_directory_icons: Default::default(),
-        chevron_icons: ChevronIconsContent { collapsed: base.chevron_icons.collapsed.clone(), expanded: base.chevron_icons.expanded.clone() },
-        // Stems and suffixes are inherited from the built-in set.
-        file_stems: Default::default(),
-        file_suffixes: Default::default(),
-        file_icons: base.file_icons.iter().map(|(k, v)| (k.clone(), IconDefinitionContent { path: v.path.clone() })).collect(),
-    };
-    let family = IconThemeFamilyContent { name: ICON_THEME.into(), author: "Forge".into(), themes: vec![content] };
-    // Asset paths: an empty root leaves them as they are.
-    ThemeRegistry::global(cx).load_icon_theme(family, Path::new(""))
+/// The icon theme that was called "Forge" (Zed's icons) became "Forge Dark" and "Forge
+/// Light" (the Forge Icons extension): a `settings.json` that names it gets the new names.
+fn migrate_icon_theme_setting() -> Result<()> {
+    use forge_ui::settings_registry::SettingsFile;
+    let Some(current) = SettingsFile::User.read().get("icon_theme").cloned() else { return Ok(()) };
+    if let Some(renamed) = renamed_icon_theme(&current) {
+        SettingsFile::User.write(&["icon_theme".into()], Some(&renamed))?;
+    }
+    Ok(())
+}
+
+fn renamed_icon_theme(value: &Value) -> Option<Value> {
+    const OLD: &str = "Forge";
+    match value {
+        Value::String(name) if name == OLD => Some(json!({ "mode": "system", "dark": "Forge Dark", "light": "Forge Light" })),
+        Value::Object(selection) => {
+            let mut renamed = selection.clone();
+            for (key, new) in [("dark", "Forge Dark"), ("light", "Forge Light")] {
+                if renamed.get(key).and_then(Value::as_str) == Some(OLD) {
+                    renamed.insert(key.into(), json!(new));
+                }
+            }
+            (&renamed != selection).then_some(Value::Object(renamed))
+        }
+        _ => None,
+    }
+}
+
+/// Zed icon theme files the user adds; their icon paths are relative to this folder.
+pub fn icon_themes_dir() -> std::path::PathBuf {
+    paths::config_dir().join("icon_themes")
+}
+
+fn load_user_icon_theme(text: &str, cx: &mut App) -> Result<()> {
+    let family: theme::IconThemeFamilyContent = serde_json_lenient::from_str(text).context("not a Zed icon theme")?;
+    ThemeRegistry::global(cx).load_icon_theme(family, &icon_themes_dir())?;
+    theme_settings::reload_icon_theme(cx);
+    Ok(())
 }
 
 /// Syntax highlighting maps tree-sitter captures through the active theme. The language
@@ -382,20 +404,28 @@ mod tests {
         assert_eq!(syntax["comment"]["font_style"], "italic");
     }
 
-    /// "Forge" is the built-in icon set under Forge's name.
+    /// An icon theme in config/icon_themes finds its icons next to it.
     #[gpui::test]
-    fn registers_forge_icon_theme(cx: &mut gpui::TestAppContext) {
+    fn loads_user_icon_themes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = settings::SettingsStore::test(cx);
             cx.set_global(store);
             theme_settings::init(::theme::LoadThemes::JustBase, cx);
-            register_icon_theme(cx).unwrap();
-            let forge = ThemeRegistry::global(cx).get_icon_theme(ICON_THEME).unwrap();
-            let base = ::theme::default_icon_theme();
-            assert_eq!(forge.file_icons.len(), base.file_icons.len());
-            assert_eq!(forge.file_suffixes.len(), base.file_suffixes.len());
-            assert_eq!(forge.directory_icons.collapsed, base.directory_icons.collapsed);
+            let text = r#"{ "name": "Shapes", "author": "me", "themes": [{ "name": "Shapes", "appearance": "dark", "file_icons": { "rust": { "path": "icons/rust.svg" } } }] }"#;
+            load_user_icon_theme(text, cx).unwrap();
+            let shapes = ThemeRegistry::global(cx).get_icon_theme("Shapes").unwrap();
+            assert_eq!(Path::new(shapes.file_icons["rust"].path.as_ref()), icon_themes_dir().join("icons/rust.svg"));
+            assert!(load_user_icon_theme("{ \"name\": \"not an icon theme\" }", cx).is_err());
         });
+    }
+
+    #[test]
+    fn renames_the_old_forge_icon_theme() {
+        assert_eq!(renamed_icon_theme(&json!("Forge")), Some(json!({ "mode": "system", "dark": "Forge Dark", "light": "Forge Light" })));
+        assert_eq!(renamed_icon_theme(&json!({ "mode": "light", "light": "Forge", "dark": "Forge" })), Some(json!({ "mode": "light", "light": "Forge Light", "dark": "Forge Dark" })));
+        assert_eq!(renamed_icon_theme(&json!({ "mode": "dark", "light": "Seti Icon Theme", "dark": "Forge" })), Some(json!({ "mode": "dark", "light": "Seti Icon Theme", "dark": "Forge Dark" })));
+        assert_eq!(renamed_icon_theme(&json!("Zed (Default)")), None);
+        assert_eq!(renamed_icon_theme(&json!({ "light": "Forge Light", "dark": "Forge Dark" })), None);
     }
 
     #[test]

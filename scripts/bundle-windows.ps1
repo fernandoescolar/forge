@@ -24,7 +24,7 @@ Write-Host '==> cargo build --release'
 Invoke-Checked cargo @('build', '--release', '-p', 'forge-native')
 
 # The extensions that ship with Forge (the same as on macOS and Linux).
-$Bundled = @('db-explorer', 'containers')
+$Bundled = @('db-explorer', 'containers', 'forge-icons', 'modern-icons', 'colored-icons', 'vscode-great-icons', 'seti-icons')
 $Packages = Join-Path ([System.IO.Path]::GetTempPath()) ("forge-packages-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $Packages | Out-Null
 Write-Host "==> building and packing the bundled extensions: $($Bundled -join ' ')"

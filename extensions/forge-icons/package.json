@@ -1,0 +1,12 @@
+{
+  "name": "forge-icons",
+  "displayName": "Forge Icons",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Forge's file and folder icons: Forge Dark and Forge Light, from Catppuccin Icons (Mocha and Latte)",
+  "forge": {
+    "iconThemes": [
+      "icon_themes"
+    ]
+  }
+}

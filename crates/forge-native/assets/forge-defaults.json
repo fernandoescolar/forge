@@ -8,7 +8,8 @@
   "ui_font_family": ".SystemUIFont",
   "buffer_font_family": "Hack Nerd Font Mono",
   "buffer_font_features": { "calt": true },
-  "icon_theme": "Forge",
+  // Forge's file icons (the Forge Icons extension, from Catppuccin), following the system too.
+  "icon_theme": { "mode": "system", "dark": "Forge Dark", "light": "Forge Light" },
   // Agents come in through ACP (Agents › Threads); the built-in AI features are off.
   "disable_ai": true,
   "telemetry": { "diagnostics": false, "metrics": false },

@@ -25,6 +25,7 @@ pub mod panel;
 pub mod process;
 pub mod surface;
 pub mod tab;
+pub mod themes;
 
 pub use host::ExtensionHost;
 pub use panel::ExtensionsPanel;

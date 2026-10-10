@@ -28,7 +28,7 @@ echo "==> cargo build --release ${target_args[*]:-}"
 cargo build --release -p forge-native ${target_args[@]+"${target_args[@]}"}
 
 # The extensions that ship with Forge (the same as on macOS).
-BUNDLED_EXTENSIONS=(db-explorer containers)
+BUNDLED_EXTENSIONS=(db-explorer containers forge-icons modern-icons colored-icons vscode-great-icons seti-icons)
 
 echo "==> building and packing the bundled extensions: ${BUNDLED_EXTENSIONS[*]}"
 PACKAGES="$(mktemp -d)"

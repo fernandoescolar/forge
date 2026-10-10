@@ -141,7 +141,7 @@ fn register_core_pages(cx: &mut App) {
             "theme".into(),
             json!({
                 "type": "object",
-                "description": "The colour theme. Every palette in config/palettes is one.",
+                "description": "The colour theme: every palette in config/palettes, Zed theme in config/themes, and theme an extension brings.",
                 "properties": {
                     "mode": { "enum": ["system", "light", "dark"], "enumDescriptions": ["Follow the system", "Light", "Dark"], "description": "Which of the two themes to use." },
                     "dark": { "enum": theme_names, "title": "Dark theme" },
@@ -149,7 +149,19 @@ fn register_core_pages(cx: &mut App) {
                 }
             }),
         );
-        properties.insert("icon_theme".into(), json!({ "enum": icon_theme_names, "title": "File icons", "description": "The icons for files and folders." }));
+        properties.insert(
+            "icon_theme".into(),
+            json!({
+                "type": "object",
+                "title": "File icons",
+                "description": "The icons for files and folders: every icon theme in config/icon_themes, and those extensions bring.",
+                "properties": {
+                    "mode": { "enum": ["system", "light", "dark"], "enumDescriptions": ["Follow the system", "Light", "Dark"], "description": "Which of the two icon themes to use." },
+                    "dark": { "enum": icon_theme_names, "title": "Dark icons" },
+                    "light": { "enum": icon_theme_names, "title": "Light icons" },
+                }
+            }),
+        );
     }
     let defaults = crate::default_settings_value().unwrap_or_else(|_| json!({}));
     let all_keys: Vec<String> = schema.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
@@ -265,12 +277,12 @@ impl SettingsView {
     }
 
     fn set(&mut self, file: SettingsFile, path: Vec<String>, value: Option<Value>, cx: &mut Context<Self>) {
-        // `"theme": "Name"` is shorthand for one theme in both appearances: expand it
-        // before setting one of its parts.
-        if file == SettingsFile::User && path.len() > 1 && path[0] == "theme" {
-            if let Some(Value::String(name)) = self.user_value(&file, &path[..1]) {
-                let expanded = json!({ "mode": "system", "light": name, "dark": name });
-                self.registry.update(cx, |r, cx| r.set(&file, &path[..1], Some(expanded), cx)).ok();
+        // `theme` and `icon_theme` are a name or a whole `{ mode, light, dark }`: an object
+        // missing a part is invalid, and Zed ignores it. Write the whole object before one part.
+        if file == SettingsFile::User && path.len() > 1 && (path[0] == "theme" || path[0] == "icon_theme") {
+            let defaults = crate::default_settings_value().unwrap_or_default();
+            if let Some(whole) = complete_selection(self.user_value(&file, &path[..1]), defaults.get(&path[0])) {
+                self.registry.update(cx, |r, cx| r.set(&file, &path[..1], Some(whole), cx)).ok();
             }
         }
         let result = self.registry.update(cx, |r, cx| r.set(&file, &path, value, cx));
@@ -677,10 +689,37 @@ impl Item for SettingsView {
     }
 }
 
+/// A `theme`/`icon_theme` value with all of `mode`, `light` and `dark`, when `current` lacks
+/// some: a name stands for both appearances, and missing parts come from `default`.
+fn complete_selection(current: Option<Value>, default: Option<&Value>) -> Option<Value> {
+    let default = default.and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut whole = match current {
+        Some(Value::String(name)) => serde_json::Map::from_iter([("light".to_string(), json!(name)), ("dark".to_string(), json!(name))]),
+        Some(Value::Object(parts)) if ["mode", "light", "dark"].iter().all(|k| parts.contains_key(*k)) => return None,
+        Some(Value::Object(parts)) => parts,
+        _ => serde_json::Map::new(),
+    };
+    for key in ["mode", "light", "dark"] {
+        if !whole.contains_key(key) {
+            whole.insert(key.into(), default.get(key).cloned()?);
+        }
+    }
+    Some(Value::Object(whole))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[test]
+    fn completes_theme_selections() {
+        let default = json!({ "mode": "system", "light": "Forge Light", "dark": "Forge Dark" });
+        assert_eq!(complete_selection(None, Some(&default)), Some(default.clone()), "nothing yet: the defaults");
+        assert_eq!(complete_selection(Some(json!({ "mode": "light" })), Some(&default)), Some(json!({ "mode": "light", "light": "Forge Light", "dark": "Forge Dark" })));
+        assert_eq!(complete_selection(Some(json!("Dracula")), Some(&default)), Some(json!({ "light": "Dracula", "dark": "Dracula", "mode": "system" })));
+        assert_eq!(complete_selection(Some(default.clone()), Some(&default)), None, "already whole");
+    }
 
     /// The tab opens once, lists the editor's settings by section with the right controls,
     /// and hides features Forge doesn't have.

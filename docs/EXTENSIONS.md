@@ -1,14 +1,15 @@
 # Writing Forge extensions
 
-Forge extensions are written in TypeScript with React, and Forge draws them with its own native UI: no web view, no DOM, no CSS. An extension can add panels, tabs in the editor area, commands and settings. It can also read and change the code in the active editor, run programs (including ones it ships, called *sidecars*) and keep data and secrets.
+Forge extensions are written in TypeScript with React, and Forge draws them with its own native UI: no web view, no DOM, no CSS. An extension can add panels, tabs in the editor area, commands, settings, themes and icon themes. It can also read and change the code in the active editor, run programs (including ones it ships, called *sidecars*) and keep data and secrets.
 
-This guide goes from an empty folder to a packaged extension, then covers the components and the API. Three complete extensions live in this repository's `extensions/` folder:
+This guide goes from an empty folder to a packaged extension, then covers the components and the API. Complete extensions live in this repository's `extensions/` folder:
 
 | Example | What it shows |
 | --- | --- |
 | `workspace-notes` | A native panel with state, settings and the workspace API: the place to start |
 | `db-explorer` | Database Explorer, which ships with Forge: a tree, tabs in the editor area, an editable data grid, a Rust sidecar, keychain secrets and dialogs |
 | `containers` | Containers, which ships with Forge: a tree kept current by a long-running process (`docker events`), commands in Forge terminals, and agent tools |
+| `forge-icons` | Forge's file icons, which ship with Forge: an extension with no code that only brings icon themes (as do `modern-icons`, `colored-icons`, `vscode-great-icons` and `seti-icons`) |
 
 - [Your first extension](#your-first-extension)
 - [The manifest](#the-manifest)
@@ -20,6 +21,7 @@ This guide goes from an empty folder to a packaged extension, then covers the co
 - [Settings, storage and secrets](#settings-storage-and-secrets)
 - [Dialogs, messages and the clipboard](#dialogs-messages-and-the-clipboard)
 - [Tools for agents](#tools-for-agents)
+- [Themes and icon themes](#themes-and-icon-themes)
 - [Packaging and sharing](#packaging-and-sharing)
 - [Debugging](#debugging)
 - [API reference](#api-reference)
@@ -119,6 +121,7 @@ An extension is a folder whose `package.json` has a `forge` section:
 | `forge.settings` | Settings the extension declares, as a JSON schema (see [Settings](#settings-storage-and-secrets)) |
 | `forge.sidecars` | Names of the programs it ships in `bin/<platform>/` (see [Sidecars](#programs-and-sidecars)) |
 | `forge.files` | The files a package includes, if the defaults don't suit (see [Packaging](#packaging-and-sharing)) |
+| `forge.themes`, `forge.iconThemes` | Theme and icon theme files it brings, or folders of them (see [Themes](#themes-and-icon-themes)) |
 
 Forge looks for extensions in `~/Library/Application Support/Forge/extensions` (on Linux, `~/.local/share/forge/extensions`; where installing puts them), in the app bundle or, on Linux, `share/forge/extensions` next to `bin/forge` (the ones that ship with Forge), in the folders listed in `$FORGE_EXTENSIONS_PATH` (colon-separated), and in debug builds in this repository's `extensions/`.
 
@@ -407,9 +410,29 @@ ctx.subscriptions.push(
 
 The Database Explorer (`extensions/db-explorer/src/agentTools.ts`) offers agents its SQL connections: `connections` and `schema` read, and `query` runs SQL the user approves. Containers (`extensions/containers/src/agentTools.ts`) lets them list containers and read their logs, and asks before `control` starts, stops or restarts one or `compose_up` brings a Compose project up.
 
+## Themes and icon themes
+
+An extension can bring colour themes and file icon themes. List their files (or folders of `*.json` files) in the manifest:
+
+```json
+{
+  "name": "ocean-themes",
+  "displayName": "Ocean Themes",
+  "forge": {
+    "themes": ["themes"],
+    "iconThemes": ["icon_themes/ocean-icons.json"]
+  }
+}
+```
+
+- **Themes** are Zed theme files (`{ "name", "author", "themes": [...] }`, as in Zed's extensions) or Forge palettes (`{ "name", "ui", "syntax", ... }`, see the guide's [Colours and fonts](GUIDE.md#colours-and-fonts)).
+- **Icon themes** are Zed icon theme files. Their icon paths are relative to the extension's folder (`"path": "./icons/rust.svg"`), as in Zed.
+
+They show in *Select Theme…* and *Select Icon Theme…* and in Settings as soon as the extension loads, and go away when it unloads. A theme-only extension needs no code: without `src/extension.tsx`, `forge-ext pack` packs it without building, and Forge loads it without a bundle. To port a Zed theme extension, copy its `themes/`, `icon_themes/` and `icons/` folders into a folder with a `package.json` like the one above.
+
 ## Packaging and sharing
 
-A `.forgeext` file is a zip of what an extension needs at run time: `package.json`, `dist/`, its assets, and its sidecars for every platform they were built for. Sources and `node_modules` stay out. By default a package takes `package.json`, `dist`, `assets`, `media`, `bin`, `README.md`, `CHANGELOG.md`, `LICENSE` and `icon.png`; list `forge.files` in the manifest to choose yourself.
+A `.forgeext` file is a zip of what an extension needs at run time: `package.json`, `dist/`, its assets, its themes and its sidecars for every platform they were built for. Sources and `node_modules` stay out. By default a package takes `package.json`, `dist`, `assets`, `media`, `bin`, `themes`, `icon_themes`, `icons`, `README.md`, `CHANGELOG.md`, `LICENSE` and `icon.png`, plus the files `forge.themes` and `forge.iconThemes` name; list `forge.files` in the manifest to choose yourself.
 
 ```bash
 npx forge-ext pack .          # → hello-0.1.0.forgeext
