@@ -20,6 +20,8 @@ mod netcoredbg;
 mod omnisharp;
 mod csharp_fix_all;
 mod roslyn;
+mod roslyn_code_actions;
+pub mod type_hierarchy;
 
 pub use netcoredbg::target_frameworks;
 
@@ -32,6 +34,7 @@ pub(crate) struct LanguageDir;
 pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
     csharp_metadata::init(cx);
     csharp_fix_all::init(cx);
+    type_hierarchy::init(cx);
     cx.update_default_global(|registry: &mut dap::DapRegistry, _| {
         registry.add_adapter(Arc::new(netcoredbg::NetcoredbgAdapter));
         registry.add_locator(Arc::new(netcoredbg::DotnetTestLocator));
@@ -44,7 +47,11 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
         ("sln", SLN),
         ("http", HTTP),
     ]);
-    let csharp_server: Arc<dyn LspAdapter> = if roslyn::use_roslyn() { Arc::new(roslyn::RoslynLspAdapter) } else { Arc::new(omnisharp::OmniSharpLspAdapter) };
+    let use_roslyn = roslyn::use_roslyn();
+    if use_roslyn {
+        roslyn_code_actions::init(cx);
+    }
+    let csharp_server: Arc<dyn LspAdapter> = if use_roslyn { Arc::new(roslyn::RoslynLspAdapter) } else { Arc::new(omnisharp::OmniSharpLspAdapter) };
     register(&languages, "csharp", vec![csharp_server], Some(Arc::new(csharp_tasks::CSharpContextProvider)));
     // Project files, .props/.targets and .slnx; package completions and version hints
     // come from forge-dotnet.

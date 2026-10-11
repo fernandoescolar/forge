@@ -38,6 +38,7 @@ tree-sitter-c-sharp = "0.23"
 tree-sitter-language = "0.1"
 tree-sitter-xml = "0.7"
 util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
 
 [build-dependencies]
 cc = "1"

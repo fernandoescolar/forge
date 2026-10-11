@@ -3724,6 +3724,7 @@ dependencies = [
  "tree-sitter-language",
  "tree-sitter-xml",
  "util",
+ "workspace",
 ]
 
 [[package]]

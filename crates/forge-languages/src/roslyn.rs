@@ -187,6 +187,10 @@ impl RoslynLspAdapter {
             "csharp|completion.dotnet_show_name_completion_suggestions": true,
             "csharp|completion.dotnet_provide_regex_completions": true,
             "csharp|symbol_search.dotnet_search_reference_assemblies": true,
+            // Go to definition into packages: their real sources (SourceLink, embedded),
+            // else decompiled ones.
+            "csharp|navigation.dotnet_navigate_to_source_link_and_embedded_sources": true,
+            "csharp|navigation.dotnet_navigate_to_decompiled_sources": true,
             "csharp|inlay_hints.dotnet_enable_inlay_hints_for_parameters": true,
             "csharp|inlay_hints.dotnet_enable_inlay_hints_for_literal_parameters": true,
             "csharp|inlay_hints.dotnet_enable_inlay_hints_for_indexer_parameters": true,
@@ -200,8 +204,9 @@ impl RoslynLspAdapter {
             "csharp|inlay_hints.csharp_enable_inlay_hints_for_lambda_parameter_types": true,
             "csharp|inlay_hints.csharp_enable_inlay_hints_for_implicit_object_creation": false,
             "csharp|inlay_hints.csharp_enable_inlay_hints_for_collection_expressions": false,
-            // Its lenses run commands of VS Code's ("Unknown Command" elsewhere).
-            "csharp|code_lens.dotnet_enable_references_code_lens": false,
+            // "N references" above types and members (see `client_command`). The test lenses
+            // run VS Code's commands; the gutter's run buttons do that here.
+            "csharp|code_lens.dotnet_enable_references_code_lens": true,
             "csharp|code_lens.dotnet_enable_tests_code_lens": false,
             "csharp|formatting.dotnet_organize_imports_on_format": true,
         })
@@ -212,6 +217,18 @@ impl RoslynLspAdapter {
 impl LspAdapter for RoslynLspAdapter {
     fn name(&self) -> LanguageServerName {
         SERVER_NAME
+    }
+
+    /// The "N references" lens asks the client to show the references at its position.
+    fn client_command(&self, command: &str, _: &[Value]) -> Option<language::ClientCommand> {
+        (command == "roslyn.client.peekReferences").then_some(language::ClientCommand::ShowLocations)
+    }
+
+    /// Decompiled sources are read outside any project, so they would be full of errors.
+    fn process_diagnostics(&self, params: &mut lsp::PublishDiagnosticsParams, _: language::LanguageServerId) {
+        if crate::csharp_metadata::is_roslyn_metadata_path(params.uri.as_str()) {
+            params.diagnostics.clear();
+        }
     }
 
     async fn workspace_configuration(self: Arc<Self>, _: &Arc<dyn LspAdapterDelegate>, _: Option<Toolchain>, _: Option<Uri>, _: &mut AsyncApp) -> Result<Value> {

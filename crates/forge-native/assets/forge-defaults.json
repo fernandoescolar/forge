@@ -28,6 +28,8 @@
   // Same density as the Solution Explorer, and VS Code-style git letters (M, U, A, D).
   "project_panel": { "entry_spacing": "standard", "indent_size": 12, "git_status_indicator": true },
   "terminal": { "font_family": "Hack Nerd Font Mono", "font_size": 13, "blinking": "off" },
+  // "N references" above C# types and members (Roslyn), like Visual Studio.
+  "code_lens": "on",
   // The C# servers send parameter-name and inferred-type hints (see forge-languages/src/roslyn.rs and omnisharp.rs).
   "languages": { "C#": { "inlay_hints": { "enabled": true } } }
 }

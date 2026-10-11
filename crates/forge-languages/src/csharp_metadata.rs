@@ -5,6 +5,9 @@
 //! `file:///$metadata$/Project/CacheService/Tests/Assembly/xunit/core/Symbol/Xunit/FactAttribute.cs`.
 //! Nothing exists at that path, so Zed opens an empty buffer. Here we notice those buffers,
 //! ask OmniSharp for the generated source (`o#/metadata`), and show it read-only.
+//!
+//! Roslyn writes the decompiled source to a real file under `$TMPDIR/MetadataAsSource/`,
+//! which opens like any other; it is only made read-only here.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,6 +29,11 @@ pub fn is_metadata_path(path: &str) -> bool {
     path.contains("$metadata$/") || path.contains("%24metadata%24/")
 }
 
+/// A source Roslyn decompiled (or took from a symbol server) for an assembly.
+pub fn is_roslyn_metadata_path(path: &str) -> bool {
+    path.contains("/MetadataAsSource/") || path.contains("\\MetadataAsSource\\")
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|editor: &mut Editor, _, cx| {
         let Some(project) = editor.project().cloned() else {
@@ -34,6 +42,11 @@ pub fn init(cx: &mut App) {
         let Some(buffer) = editor.buffer().read(cx).as_singleton() else {
             return;
         };
+        let roslyn_source = buffer.read(cx).file().and_then(|f| f.as_local()).is_some_and(|f| is_roslyn_metadata_path(&f.abs_path(cx).to_string_lossy()));
+        if roslyn_source {
+            buffer.update(cx, |buffer, cx| buffer.set_capability(Capability::ReadOnly, cx));
+            return;
+        }
         let Some(request) = metadata_request(&buffer, cx) else {
             return;
         };
