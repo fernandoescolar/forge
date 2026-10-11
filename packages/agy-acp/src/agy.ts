@@ -4,9 +4,10 @@
 //   {"event":"step_update","step_update":{"step_index":…,"state":"ACTIVE|DONE|ERROR","step_type":"user_input|agent_response|tool",
 //     "text_delta"?:…, "tool_name"?:…, "tool_info"?:{"name","parameters","output"?,"error"?}, "usage"?:…}}
 //   {"event":"result","result":{"status":"SUCCESS|ERROR","error"?:…,"usage":…}}
-// The print mode can't ask for permissions (it denies what needs one) and ignores
-// `interrupt`, so permissions are a mode chosen up front and cancelling restarts the
-// process on the same conversation.
+// The print mode can't ask for permissions (it denies what needs one): the adapter asks
+// the client from a PreToolUse hook instead (see `permissions.ts`), and runs agy with its
+// own checks off. It ignores `interrupt`, but SIGINT ends the turn ("interrupted") and the
+// process: cancelling restarts the process on the same conversation.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -52,12 +53,17 @@ export type AgyEvent =
   | { event: "step_update"; step_update: StepUpdate }
   | { event: "result"; result: TurnResult };
 
-/** How permissions work in a session: agy's print mode can't ask for them. */
-export type PermissionMode = "bypassPermissions" | "editsOnly" | "plan";
+/**
+ * How permissions work in a session: `default` asks the client before edits and commands,
+ * `acceptEdits` only before commands, `bypassPermissions` never, and `plan` changes nothing.
+ */
+export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
 
 export interface SessionOptions {
   cwd: string;
   mode: PermissionMode;
+  /** The adapter's hook answers agy's permission checks (else the print mode denies them). */
+  hooked?: boolean;
   model?: string;
   effort?: string;
   /** Continue this conversation instead of starting one. */
@@ -69,14 +75,18 @@ export interface SessionOptions {
 export function agyArgs(options: SessionOptions): string[] {
   const args = ["--input-format", "stream-json", "--output-format", "stream-json"];
   switch (options.mode) {
-    case "editsOnly":
-      args.push("--mode", "accept-edits");
-      break;
     case "plan":
       args.push("--mode", "plan");
       break;
     case "bypassPermissions":
       args.push("--dangerously-skip-permissions");
+      break;
+    // With the hook, it decides: agy's own checks would only deny.
+    case "acceptEdits":
+      args.push(...(options.hooked ? ["--dangerously-skip-permissions"] : ["--mode", "accept-edits"]));
+      break;
+    case "default":
+      if (options.hooked) args.push("--dangerously-skip-permissions");
       break;
   }
   if (options.model) args.push("--model", options.model);
@@ -114,10 +124,15 @@ export class AgyProcess extends EventEmitter {
   /** Appends to `FORGE_AGY_ACP_LOG`, when set: what went to and came from agy. */
   private trace: (direction: string, line: string) => void = () => {};
   private exited = false;
+  /** The adapter stopped it: what it still says is for nobody. */
+  stopped = false;
+  /** Resolves once the process has ended. */
+  readonly done: Promise<void>;
 
   constructor(options: SessionOptions, env: NodeJS.ProcessEnv) {
     super();
     this.child = spawn(agyBinary(), agyArgs(options), { cwd: options.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    this.done = new Promise((resolve) => this.once("exit", () => resolve()));
     this.ready = new Promise((resolve, reject) => {
       const onEvent = (event: AgyEvent) => {
         if (event.event === "init") {
@@ -193,8 +208,27 @@ export class AgyProcess extends EventEmitter {
   }
 
   kill(): void {
+    this.stopped = true;
     if (this.exited) return;
     this.child.stdin.end();
     this.child.kill("SIGTERM");
+  }
+
+  /**
+   * Stops the turn the way Ctrl+C does (agy ends it as "interrupted" and exits); kills the
+   * process if it is still there after `graceMs`. Resolves once it has ended.
+   */
+  interrupt(graceMs = 2_000): Promise<void> {
+    this.stopped = true;
+    if (this.exited) return this.done;
+    this.child.kill("SIGINT");
+    const timer = setTimeout(() => {
+      this.kill();
+      // SIGTERM ignored too: no more asking.
+      setTimeout(() => this.alive && this.child.kill("SIGKILL"), graceMs).unref();
+    }, graceMs);
+    timer.unref();
+    void this.done.then(() => clearTimeout(timer));
+    return this.done;
   }
 }
