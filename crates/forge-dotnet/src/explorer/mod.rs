@@ -77,6 +77,10 @@ actions!(
         Publish,
         /// Opens the NuGet package manager for the selected project or the solution.
         ManagePackages,
+        /// Opens the selected project's properties (target framework, nullable, language version…).
+        ProjectProperties,
+        /// Opens the Assembly Explorer on the selected project's build output.
+        ExploreAssemblies,
         /// Opens the selected project's user secrets (`secrets.json`), setting them up first.
         ManageUserSecrets,
         /// The `using` directives of every C# file of the selected project become global
@@ -1005,6 +1009,8 @@ impl Render for SolutionExplorer {
             .on_action(cx.listener(Self::pack))
             .on_action(cx.listener(Self::publish))
             .on_action(cx.listener(Self::manage_packages))
+            .on_action(cx.listener(Self::project_properties))
+            .on_action(cx.listener(Self::explore_assemblies))
             .on_action(cx.listener(Self::manage_user_secrets))
             .on_action(cx.listener(Self::move_usings_to_global_usings))
             .on_action(cx.listener(Self::add_migration))

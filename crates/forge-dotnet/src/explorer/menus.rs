@@ -124,6 +124,8 @@ impl SolutionExplorer {
                                 .action("List Migrations", Box::new(ListMigrations))
                         })
                         .separator()
+                        .action("Properties…", Box::new(ProjectProperties))
+                        .action("Explore Assemblies", Box::new(ExploreAssemblies))
                         .action("Open Project File", Box::new(Open))
                         .action("Rename", Box::new(Rename))
                         .action("Remove from Solution", Box::new(RemoveFromSolution));

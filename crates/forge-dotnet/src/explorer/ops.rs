@@ -721,6 +721,17 @@ impl SolutionExplorer {
         pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::nuget_view::open(workspace, model, project, window, cx));
     }
 
+    pub(super) fn project_properties(&mut self, _: &ProjectProperties, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
+        let model = self.model.clone();
+        pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::project_properties::open(workspace, model, project, window, cx));
+    }
+
+    pub(super) fn explore_assemblies(&mut self, _: &ExploreAssemblies, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
+        pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::assembly_explorer::open(workspace, project, window, cx));
+    }
+
     pub(super) fn add_project_reference(&mut self, _: &AddProjectReference, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project_path) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
         let model = self.model.read(cx);

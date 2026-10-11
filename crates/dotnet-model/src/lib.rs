@@ -5,6 +5,8 @@
 pub mod assets;
 pub mod build_log;
 pub mod cli;
+pub mod decompiler;
+pub mod editorconfig;
 pub mod explorer;
 pub mod msbuild;
 pub mod nuget;

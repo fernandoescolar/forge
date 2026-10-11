@@ -452,6 +452,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Go to Type Definition", ed::GoToTypeDefinition::default()),
             MenuItem::action("Go to Implementation", ed::GoToImplementation::default()),
             MenuItem::action("Find All References", ed::FindAllReferences::default()),
+            MenuItem::action("Type Hierarchy", forge_languages::type_hierarchy::ShowTypeHierarchy),
             MenuItem::separator(),
             MenuItem::action("Next Problem", ed::GoToDiagnostic::default()),
             MenuItem::action("Previous Problem", ed::GoToPreviousDiagnostic::default()),
@@ -484,6 +485,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             ])),
             MenuItem::submenu(Menu::new(".NET").items([
                 MenuItem::action("Manage NuGet Packages", forge_dotnet::explorer::ManagePackages),
+                MenuItem::action("Code Analysis", forge_dotnet::code_analysis::OpenCodeAnalysis),
             ])),
         ]),
         Menu::new("Git").items([
