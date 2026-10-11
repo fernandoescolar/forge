@@ -3531,6 +3531,7 @@ dependencies = [
  "dotnet-model",
  "editor",
  "file_icons",
+ "forge-languages",
  "forge-tests",
  "forge-ui",
  "fs",

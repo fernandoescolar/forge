@@ -7,6 +7,7 @@
 //! and the project and its git state move to the right, ahead of the solution and run
 //! controls: next to the menus they read as one more menu.
 
+use forge_languages::active_build::ActiveBuild;
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
 use gpui::{
@@ -146,8 +147,73 @@ impl ForgeTitleBar {
         if !self.watched_solution {
             self.watched_solution = true;
             self._subscriptions.push(cx.observe(&model, |_, _, cx| cx.notify()));
+            self._subscriptions.push(cx.observe_global::<ActiveBuild>(|_, cx| cx.notify()));
         }
         Some(model)
+    }
+
+    /// The configuration (Debug, Release…) and, when a project has several, the target
+    /// framework that Run, Debug, Tests and the Solution Explorer's commands build.
+    fn build_picker(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = self.dotnet_model(cx)?;
+        let (configurations, frameworks) = {
+            let m = model.read(cx);
+            m.solution.as_ref()?;
+            (m.configurations(), if m.is_multi_targeted() { m.frameworks() } else { Vec::new() })
+        };
+        let build = ActiveBuild::get(cx);
+        let model = model.downgrade();
+        Some(
+            PopoverMenu::new("tb-build-menu")
+                .trigger(
+                    ButtonLike::new("tb-build")
+                        .style(ButtonStyle::Subtle)
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Label::new(build.label()).size(LabelSize::Small))
+                                .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall).color(Color::Muted)),
+                        )
+                        .tooltip(Tooltip::text("Build configuration and target framework")),
+                )
+                .menu(move |window, cx| {
+                    let (configurations, frameworks, build, model) = (configurations.clone(), frameworks.clone(), build.clone(), model.clone());
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        menu = menu.header("Configuration");
+                        for entry in configurations {
+                            let (configuration, platform) = match entry.split_once('|') {
+                                Some((configuration, platform)) => (configuration.trim().to_string(), Some(platform.trim().to_string())),
+                                None => (entry.trim().to_string(), None),
+                            };
+                            let chosen = ActiveBuild { configuration: Some(configuration.clone()), platform: platform.clone(), framework: build.framework.clone() };
+                            let checked = build.configuration_name() == configuration && build.msbuild_platform() == chosen.msbuild_platform();
+                            let label = match chosen.msbuild_platform() {
+                                Some(platform) => format!("{configuration} | {platform}"),
+                                None => configuration,
+                            };
+                            let model = model.clone();
+                            menu = menu.toggleable_entry(label, checked, ui::IconPosition::Start, None, move |_, cx| {
+                                model.update(cx, |m, cx| m.select_build(chosen.clone(), cx)).ok();
+                            });
+                        }
+                        if !frameworks.is_empty() {
+                            menu = menu.separator().header("Target framework");
+                            let options = std::iter::once(None).chain(frameworks.into_iter().map(Some));
+                            for framework in options {
+                                let label = framework.clone().unwrap_or_else(|| "Each project's default".into());
+                                let checked = build.framework == framework;
+                                let chosen = ActiveBuild { framework, ..build.clone() };
+                                let model = model.clone();
+                                menu = menu.toggleable_entry(label, checked, ui::IconPosition::Start, None, move |_, cx| {
+                                    model.update(cx, |m, cx| m.select_build(chosen.clone(), cx)).ok();
+                                });
+                            }
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
+        )
     }
 
     /// The solution the Solution Explorer shows; with several in the workspace, a menu
@@ -381,14 +447,15 @@ impl Render for ForgeTitleBar {
             .when(!global_menu_bar, |row| row.children(app_menu_bar(cx)))
             .children(project_left);
 
-        let (solution, run) = (self.solution_picker(cx), self.run_controls(cx));
-        let has_solution = solution.is_some();
+        let (solution, build, run) = (self.solution_picker(cx), self.build_picker(cx), self.run_controls(cx));
+        let has_solution = solution.is_some() || build.is_some();
         let right = h_flex()
             .gap_1()
             .pr_2()
             .children(project_right)
             .when(!global_menu_bar && (has_solution || run.is_some()), |row| row.child(separator()))
             .children(solution.map(clickable))
+            .children(build.map(clickable))
             .when(has_solution && run.is_some(), |row| row.child(separator()))
             .children(run.map(clickable))
             .children(self.test_summary(cx).map(clickable));

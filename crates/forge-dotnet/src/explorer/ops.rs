@@ -16,6 +16,7 @@ use workspace::tasks::ScheduledTaskResult;
 
 use super::*;
 use crate::build_problems;
+use forge_languages::active_build::ActiveBuild;
 use forge_ui::pick::{self, Choice};
 
 /// The `dotnet` commands whose errors and warnings go to the Problems panel.
@@ -619,7 +620,18 @@ impl SolutionExplorer {
     pub(crate) fn run_dotnet(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.command_target(cx) else { return };
         let config = self.config(cx);
-        let mut args = cli::command_line(command, &[("projectPath", &target.to_string_lossy())], &config.custom_commands);
+        // The configuration and framework chosen in the title bar.
+        let build = ActiveBuild::get(cx);
+        let platform = build.msbuild_platform().map(|platform| format!("-p:Platform={platform}")).unwrap_or_default();
+        let framework = build.framework_for(&forge_languages::target_frameworks(&target)).unwrap_or_default();
+        let project_path = target.to_string_lossy();
+        let params = [
+            ("projectPath", project_path.as_ref()),
+            ("configuration", build.configuration.as_deref().unwrap_or_default()),
+            ("platformProperty", platform.as_str()),
+            ("framework", framework.as_str()),
+        ];
+        let mut args = cli::command_line(command, &params, &config.custom_commands);
         let cwd = target.parent().map(Path::to_path_buf).unwrap_or_default();
         // Builds also log their errors and warnings for the Problems panel (when the
         // command is still `dotnet`, which takes MSBuild's arguments).

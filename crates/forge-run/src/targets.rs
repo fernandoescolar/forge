@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use forge_languages::active_build::ActiveBuild;
 use task::TaskTemplate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +57,8 @@ pub struct RunTarget {
     pub manifest: PathBuf,
     /// Where the commands run.
     pub dir: PathBuf,
-    /// For multi-targeted .NET apps, the framework `dotnet run` needs to be told.
-    pub framework: Option<String>,
+    /// A .NET project's target frameworks; with several, `dotnet run` needs to be told one.
+    pub frameworks: Vec<String>,
     /// What runs: the package manager of a Node script, the interpreter of a Python module.
     pub program: Option<String>,
     /// The `package.json` script, the Python module and its arguments, or the .NET app's
@@ -74,22 +75,37 @@ impl RunTarget {
         }
     }
 
-    /// The command that runs the target (for tests, the one the debugger builds on).
+    /// The command that runs the target (for tests, the one the debugger builds on), in
+    /// the project's default configuration.
     pub fn task(&self) -> TaskTemplate {
+        self.task_with(&ActiveBuild::default())
+    }
+
+    /// The command that runs the target, for .NET in the configuration and framework
+    /// chosen in the title bar.
+    pub fn task_with(&self, build: &ActiveBuild) -> TaskTemplate {
         let quoted = |path: &Path| format!("\"{}\"", path.display());
         let (command, args): (&str, Vec<String>) = match self.kind {
             Kind::DotnetApp | Kind::Aspire => {
                 let switch = if self.is_file_based() { "--file" } else { "--project" };
                 let mut args = vec!["run".into(), switch.into(), quoted(&self.manifest)];
-                if let Some(framework) = &self.framework {
-                    args.extend(["--framework".into(), framework.clone()]);
+                args.extend(build.configuration_args());
+                if let Some(framework) = build.framework_for(&self.frameworks) {
+                    args.extend(["--framework".into(), framework]);
                 }
                 if let Some(profile) = &self.entry {
                     args.extend(["--launch-profile".into(), format!("\"{profile}\"")]);
                 }
                 ("dotnet", args)
             }
-            Kind::DotnetTests => ("dotnet", vec!["test".into(), quoted(&self.manifest)]),
+            Kind::DotnetTests => {
+                let mut args = vec!["test".into(), quoted(&self.manifest)];
+                args.extend(build.configuration_args());
+                if let Some(framework) = build.chosen_framework_in(&self.frameworks) {
+                    args.extend(["--framework".into(), framework]);
+                }
+                ("dotnet", args)
+            }
             Kind::Cargo => ("cargo", vec!["run".into(), "--package".into(), self.name.clone()]),
             Kind::Go => ("go", vec!["run".into(), ".".into()]),
             Kind::Node => (self.program.as_deref().unwrap_or("npm"), vec!["run".into(), self.entry.clone().unwrap_or_default()]),
@@ -116,10 +132,14 @@ impl RunTarget {
     /// `dotnet watch`: runs a .NET app and applies code changes to it while it runs (hot
     /// reload), restarting it when they can't be applied. `None` for other targets.
     pub fn watch_task(&self) -> Option<TaskTemplate> {
+        self.watch_task_with(&ActiveBuild::default())
+    }
+
+    pub fn watch_task_with(&self, build: &ActiveBuild) -> Option<TaskTemplate> {
         if self.kind != Kind::DotnetApp || self.is_file_based() {
             return None;
         }
-        let mut task = self.task();
+        let mut task = self.task_with(build);
         // `dotnet run --project X …` → `dotnet watch run --project X …`.
         task.args.insert(0, "watch".into());
         task.label = format!("Hot reload {}", self.name);
@@ -163,7 +183,7 @@ pub fn discover(root: &Path) -> Vec<RunTarget> {
                 name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| ".".into()),
                 manifest: dir.to_path_buf(),
                 dir: dir.to_path_buf(),
-                framework: None,
+                frameworks: Vec::new(),
                 program: None,
                 entry: None,
             });
@@ -240,19 +260,12 @@ fn dotnet_target(project: &Path) -> Option<RunTarget> {
     } else {
         return None; // a library
     };
-    // With several target frameworks, run the last one listed (usually the newest).
-    let framework = text
-        .split("<TargetFrameworks>")
-        .nth(1)
-        .and_then(|rest| rest.split("</TargetFrameworks>").next())
-        .and_then(|list| list.split(';').map(str::trim).filter(|f| !f.is_empty() && !f.contains('$')).last())
-        .map(String::from);
     Some(RunTarget {
         kind,
         name: project.file_stem()?.to_string_lossy().into_owned(),
         manifest: project.to_path_buf(),
         dir: project.parent()?.to_path_buf(),
-        framework: framework.filter(|_| kind != Kind::DotnetTests),
+        frameworks: forge_languages::target_frameworks(project),
         program: None,
         entry: None,
     })
@@ -282,7 +295,7 @@ fn file_based_targets(file: &Path) -> Vec<RunTarget> {
         name: name.to_string_lossy().into_owned(),
         manifest: file.to_path_buf(),
         dir: dir.to_path_buf(),
-        framework: None,
+        frameworks: Vec::new(),
         program: None,
         entry: None,
     };
@@ -312,7 +325,7 @@ fn cargo_target(dir: &Path, manifest: &Path) -> Option<RunTarget> {
     let toml: toml::Value = toml::from_str(&text).ok()?;
     let name = toml.get("package")?.get("name")?.as_str()?.to_string();
     let has_bin = dir.join("src/main.rs").exists() || toml.get("bin").is_some_and(|bins| bins.as_array().is_some_and(|b| !b.is_empty()));
-    has_bin.then(|| RunTarget { kind: Kind::Cargo, name, manifest: manifest.to_path_buf(), dir: dir.to_path_buf(), framework: None, program: None, entry: None })
+    has_bin.then(|| RunTarget { kind: Kind::Cargo, name, manifest: manifest.to_path_buf(), dir: dir.to_path_buf(), frameworks: Vec::new(), program: None, entry: None })
 }
 
 /// Scripts that npm runs around others, or on install: not something to pick and run.
@@ -341,7 +354,7 @@ fn node_targets(root: &Path, dir: &Path, manifest: &Path) -> Vec<RunTarget> {
             },
             manifest: manifest.to_path_buf(),
             dir: dir.to_path_buf(),
-            framework: None,
+            frameworks: Vec::new(),
             program: Some(program.clone()),
             entry: Some(script.clone()),
         })
@@ -376,7 +389,7 @@ fn python_targets(root: &Path, dir: &Path, files: &[PathBuf]) -> Vec<RunTarget> 
         name,
         manifest,
         dir: dir.to_path_buf(),
-        framework: None,
+        frameworks: Vec::new(),
         program: Some(program.clone()),
         entry: Some(entry),
     };
@@ -535,7 +548,7 @@ mod tests {
 
     #[test]
     fn watches_dotnet_apps() {
-        let app = RunTarget { kind: Kind::DotnetApp, name: "Api".into(), manifest: "/p/Api/Api.csproj".into(), dir: "/p/Api".into(), framework: None, program: None, entry: Some("https".into()) };
+        let app = RunTarget { kind: Kind::DotnetApp, name: "Api".into(), manifest: "/p/Api/Api.csproj".into(), dir: "/p/Api".into(), frameworks: Vec::new(), program: None, entry: Some("https".into()) };
         let watch = app.watch_task().unwrap();
         assert_eq!(watch.args, ["watch", "run", "--project", "\"/p/Api/Api.csproj\"", "--launch-profile", "\"https\""]);
         assert_eq!(watch.env.get("DOTNET_WATCH_RESTART_ON_RUDE_EDIT").map(String::as_str), Some("true"));
@@ -545,12 +558,12 @@ mod tests {
 
     #[test]
     fn builds_run_commands() {
-        let target = RunTarget { kind: Kind::DotnetApp, name: "Api".into(), manifest: "/p/Api/Api.csproj".into(), dir: "/p/Api".into(), framework: None, program: None, entry: None };
+        let target = RunTarget { kind: Kind::DotnetApp, name: "Api".into(), manifest: "/p/Api/Api.csproj".into(), dir: "/p/Api".into(), frameworks: Vec::new(), program: None, entry: None };
         let task = target.task();
         assert_eq!((task.command.as_str(), task.args.clone()), ("dotnet", vec!["run".into(), "--project".into(), "\"/p/Api/Api.csproj\"".into()]));
         assert_eq!(task.cwd.as_deref(), Some("/p/Api"));
         assert_eq!(Kind::Go.debug_adapter(), "Delve");
-        let script = RunTarget { kind: Kind::Node, name: "dev".into(), manifest: "/p/package.json".into(), dir: "/p".into(), framework: None, program: Some("npm".into()), entry: Some("dev".into()) };
+        let script = RunTarget { kind: Kind::Node, name: "dev".into(), manifest: "/p/package.json".into(), dir: "/p".into(), frameworks: Vec::new(), program: Some("npm".into()), entry: Some("dev".into()) };
         assert_eq!(script.id(), "/p/package.json#dev", "scripts of one package have their own ids");
     }
 

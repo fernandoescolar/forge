@@ -452,7 +452,7 @@ mod tests {
             println!("  env {:?}", session.env.iter().filter(|(k, _)| !inherited.contains(k)).collect::<Vec<_>>());
             // What Forge debugs, launched as the .NET debug locator would: the profile it
             // picked, under the request's environment.
-            let task = crate::controller::aspire_project_task(&session, Some("http"));
+            let task = crate::controller::aspire_project_task(&session, Some("http"), &Default::default());
             println!("  {} {}", task.command, task.args.join(" "));
             let mut args: Vec<String> = task.args.iter().map(|a| a.trim_matches('"').to_string()).collect();
             let mut env: Vec<(String, String)> = Vec::new();

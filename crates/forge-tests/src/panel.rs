@@ -8,6 +8,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use editor::Editor;
+use forge_languages::active_build::ActiveBuild;
 use gpui::TaskExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -303,7 +304,7 @@ impl TestPanel {
 
     /// Whether the debugger can run the tests under `key` (not Jest or Vitest).
     fn can_debug(&self, key: &NodeKey) -> bool {
-        self.project_of(key).and_then(|p| runner::debug_plan(&self.projects[p], &Self::scope_of(key))).is_some()
+        self.project_of(key).and_then(|p| runner::debug_plan(&self.projects[p], &Self::scope_of(key), &ActiveBuild::default())).is_some()
     }
 
     /// Runs the tests under `key` in the debugger, stopping at breakpoints.
@@ -320,7 +321,7 @@ impl TestPanel {
     /// Debug button does). False when Forge can't debug those tests (Jest, Vitest).
     pub fn debug_scope(&mut self, manifest: &std::path::Path, scope: Scope, label: gpui::SharedString, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(project) = self.projects.iter().find(|p| p.path == manifest).cloned() else { return false };
-        let Some(plan) = runner::debug_plan(&project, &scope) else { return false };
+        let Some(plan) = runner::debug_plan(&project, &scope, &ActiveBuild::get(cx)) else { return false };
         let Some(workspace) = self.workspace.upgrade() else { return false };
         let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
         let scenario = match plan {
@@ -367,6 +368,7 @@ impl TestPanel {
         self.error = None;
         let live = runner::LiveLog::default();
         let task_live = live.clone();
+        let build = ActiveBuild::get(cx);
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut log = String::new();
             for (project, methods, scope) in jobs {
@@ -390,7 +392,8 @@ impl TestPanel {
                     Some(task) => task.await.map(|env| env.into_iter().collect()).unwrap_or_default(),
                     None => Default::default(),
                 };
-                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env).await }).await;
+                let job_build = build.clone();
+                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_build).await }).await;
                 let keep_going = this
                     .update(cx, |this, cx| {
                         let keep_going = this.finish_job(methods, output, &mut log);
@@ -1121,7 +1124,7 @@ mod tests {
             (test_project(Kind::Python, "/py/pyproject.toml"), Scope::Methods(vec!["/py/test_a.py::test_b".into()])),
         ];
         for (test_project, scope) in cases {
-            let (template, adapter) = runner::debug_task(&test_project, &scope).unwrap();
+            let (template, adapter) = runner::debug_task(&test_project, &scope, &ActiveBuild::default()).unwrap();
             let scenario = project
                 .read_with(cx, |p, _| p.dap_store())
                 .update(cx, |store, cx| store.debug_scenario_for_build_task(template.clone(), dap::adapters::DebugAdapterName(adapter.into()), "t".into(), cx))

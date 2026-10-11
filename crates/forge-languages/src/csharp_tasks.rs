@@ -15,6 +15,8 @@ use language::{Buffer, ContextLocation, ContextProvider, LanguageToolchainStore}
 use regex::Regex;
 use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
 
+use crate::active_build::ActiveBuild;
+
 const PROJECT: VariableName = VariableName::Custom(Cow::Borrowed("CSHARP_PROJECT"));
 const PROJECT_DIR: VariableName = VariableName::Custom(Cow::Borrowed("CSHARP_PROJECT_DIR"));
 const TEST_NAME: VariableName = VariableName::Custom(Cow::Borrowed("CSHARP_TEST_NAME"));
@@ -57,17 +59,25 @@ impl ContextProvider for CSharpContextProvider {
         Task::ready(Ok(context))
     }
 
-    fn associated_tasks(&self, _: Option<Entity<Buffer>>, _: &App) -> Task<Option<TaskTemplates>> {
+    fn associated_tasks(&self, buffer: Option<Entity<Buffer>>, cx: &App) -> Task<Option<TaskTemplates>> {
+        // Zed hands task args to the shell unquoted; paths can hold spaces.
+        let mut args = vec![
+            "test".into(),
+            PROJECT.template_value_with_whitespace(),
+            "--filter".into(),
+            TEST_FILTER.template_value_with_whitespace(),
+        ];
+        // The configuration and framework chosen in the title bar.
+        let build = ActiveBuild::get(cx);
+        args.extend(build.configuration_args());
+        let project = buffer.and_then(|buffer| buffer.read(cx).file()?.as_local().map(|file| file.abs_path(cx))).and_then(|file| nearest_project(&file));
+        if let Some(framework) = project.and_then(|project| build.chosen_framework_in(&crate::netcoredbg::target_frameworks(&project))) {
+            args.extend(["--framework".into(), framework]);
+        }
         Task::ready(Some(TaskTemplates(vec![TaskTemplate {
             label: format!("dotnet test {}", TEST_NAME.template_value()),
             command: "dotnet".into(),
-            // Zed hands task args to the shell unquoted; paths can hold spaces.
-            args: vec![
-                "test".into(),
-                PROJECT.template_value_with_whitespace(),
-                "--filter".into(),
-                TEST_FILTER.template_value_with_whitespace(),
-            ],
+            args,
             cwd: Some(PROJECT_DIR.template_value()),
             tags: vec!["csharp-test".into(), "csharp-test-class".into()],
             ..TaskTemplate::default()

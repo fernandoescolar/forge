@@ -15,6 +15,7 @@ dotnet-model = { path = "../dotnet-model" }
 editor = { path = "../../vendor/zed/crates/editor" }
 git = { path = "../../vendor/zed/crates/git" }
 file_icons = { path = "../../vendor/zed/crates/file_icons" }
+forge-languages = { path = "../forge-languages" }
 forge-tests = { path = "../forge-tests" }
 fs = { path = "../../vendor/zed/crates/fs" }
 forge-ui = { path = "../forge-ui" }

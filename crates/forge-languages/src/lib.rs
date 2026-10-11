@@ -11,6 +11,7 @@ use language_core::{LanguageQueries, QueryFile, QueryFileContents};
 use gpui::BorrowAppContext as _;
 use rust_embed::RustEmbed;
 
+pub mod active_build;
 pub mod csharp_discovery;
 mod csharp_metadata;
 pub mod csharp_tasks;
@@ -19,6 +20,8 @@ mod netcoredbg;
 mod omnisharp;
 mod csharp_fix_all;
 mod roslyn;
+
+pub use netcoredbg::target_frameworks;
 
 #[derive(RustEmbed)]
 #[folder = "src/"]

@@ -4,6 +4,7 @@
 use std::{path::Path, pin::pin, sync::atomic::{AtomicBool, Ordering}, time::Duration};
 
 use anyhow::{Context as _, Result};
+use forge_languages::active_build::ActiveBuild;
 use smol::io::{AsyncRead, AsyncReadExt as _};
 use util::command::Stdio;
 
@@ -52,9 +53,10 @@ pub type LiveLog = std::sync::Arc<std::sync::Mutex<String>>;
 /// future kills the process.
 /// `env` is the project's shell environment (so tools on the user's `PATH` are found when
 /// Forge was started from the Dock).
-pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &Env) -> Result<RunOutput> {
+/// .NET tests build in `build`'s configuration and framework (the title bar's).
+pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &Env, build: &ActiveBuild) -> Result<RunOutput> {
     match &project.kind {
-        Kind::Dotnet => run_dotnet(&project.path, scope, live, env).await,
+        Kind::Dotnet => run_dotnet(&project.path, scope, live, env, build).await,
         Kind::Go => crate::go::run(project, scope, live, env).await,
         Kind::Rust { .. } => crate::rust::run(project, scope, live, env).await,
         Kind::Node(_) => crate::node::run(project, scope, live, env).await,
@@ -70,10 +72,10 @@ pub enum DebugPlan {
 }
 
 /// How to debug `scope` of `project`, if Forge can.
-pub fn debug_plan(project: &TestProject, scope: &Scope) -> Option<DebugPlan> {
+pub fn debug_plan(project: &TestProject, scope: &Scope, build: &ActiveBuild) -> Option<DebugPlan> {
     match project.kind {
         Kind::Node(_) => crate::node::debug_scenario(project, scope).map(DebugPlan::Scenario),
-        _ => debug_task(project, scope).map(|(task, adapter)| DebugPlan::Build(task, adapter)),
+        _ => debug_task(project, scope, build).map(|(task, adapter)| DebugPlan::Build(task, adapter)),
     }
 }
 
@@ -81,11 +83,12 @@ pub fn debug_plan(project: &TestProject, scope: &Scope) -> Option<DebugPlan> {
 /// it; `None` for Jest and Vitest, which get a ready session instead (`debug_plan`). Debug
 /// locators turn these into sessions: Forge's for `dotnet test`, Zed's for `go test`,
 /// `cargo test` and pytest.
-pub fn debug_task(project: &TestProject, scope: &Scope) -> Option<(task::TaskTemplate, &'static str)> {
+pub fn debug_task(project: &TestProject, scope: &Scope, build: &ActiveBuild) -> Option<(task::TaskTemplate, &'static str)> {
     let quoted = |text: &str| format!("\"{text}\"");
     let (command, args, adapter) = match &project.kind {
         Kind::Dotnet => {
             let mut args = vec!["test".to_string(), quoted(&project.path.to_string_lossy())];
+            args.extend(dotnet_build_args(&project.path, build));
             if let Some(filter) = scope.filter() {
                 args.extend(["--filter".to_string(), quoted(&filter)]);
             }
@@ -135,13 +138,24 @@ pub fn command(program: &str, env: &Env) -> util::command::Command {
     command
 }
 
+/// `-c`, the platform and `--framework` for `dotnet test` of `project`: the framework only
+/// when the project targets the chosen one (otherwise every framework runs, as usual).
+fn dotnet_build_args(project: &Path, build: &ActiveBuild) -> Vec<String> {
+    let mut args = build.configuration_args();
+    if let Some(framework) = build.chosen_framework_in(&forge_languages::target_frameworks(project)) {
+        args.extend(["--framework".to_string(), framework]);
+    }
+    args
+}
+
 /// Builds and runs `dotnet test` for `scope`, reading the TRX files it writes.
-async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env) -> Result<RunOutput> {
+async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env, build: &ActiveBuild) -> Result<RunOutput> {
     let results_dir = tempfile::Builder::new().prefix("forge-tests-").tempdir()?;
     let mut command = command("dotnet", env);
     command
         .arg("test")
         .arg(project)
+        .args(dotnet_build_args(project, build))
         .args(["--logger", "trx", "--results-directory"])
         .arg(results_dir.path())
         // Plain output: the terminal logger's live view is noise in a captured log.
@@ -277,16 +291,20 @@ mod tests {
     fn builds_debug_tasks() {
         use crate::discovery::{Kind, TestProject};
         let project = |kind: Kind, path: &str| TestProject { name: "p".into(), path: path.into(), kind, classes: vec![] };
-        let (dotnet, adapter) = debug_task(&project(Kind::Dotnet, "/s/T.csproj"), &Scope::Methods(vec!["Ns.A.B".into()])).unwrap();
+        let default = ActiveBuild::default();
+        let (dotnet, adapter) = debug_task(&project(Kind::Dotnet, "/s/T.csproj"), &Scope::Methods(vec!["Ns.A.B".into()]), &default).unwrap();
         assert_eq!((dotnet.command.as_str(), adapter), ("dotnet", "netcoredbg"));
         assert_eq!(dotnet.args, ["test", "\"/s/T.csproj\"", "--filter", "\"FullyQualifiedName=Ns.A.B\""]);
-        let (rust, adapter) = debug_task(&project(Kind::Rust { package: "core".into() }, "/r/Cargo.toml"), &Scope::Project).unwrap();
+        let release = ActiveBuild { configuration: Some("Release".into()), ..Default::default() };
+        let (dotnet, _) = debug_task(&project(Kind::Dotnet, "/s/T.csproj"), &Scope::Project, &release).unwrap();
+        assert_eq!(dotnet.args, ["test", "\"/s/T.csproj\"", "-c", "Release"]);
+        let (rust, adapter) = debug_task(&project(Kind::Rust { package: "core".into() }, "/r/Cargo.toml"), &Scope::Project, &default).unwrap();
         assert_eq!((rust.command.as_str(), adapter, rust.args[0].as_str()), ("cargo", "CodeLLDB", "test"));
-        let (python, adapter) = debug_task(&project(Kind::Python, "/nonexistent/py/pyproject.toml"), &Scope::Methods(vec!["/nonexistent/py/tests/test_a.py::test_b".into()])).unwrap();
+        let (python, adapter) = debug_task(&project(Kind::Python, "/nonexistent/py/pyproject.toml"), &Scope::Methods(vec!["/nonexistent/py/tests/test_a.py::test_b".into()]), &default).unwrap();
         assert_eq!((python.command.as_str(), adapter), ("python3", "Debugpy"));
         assert_eq!(python.args, ["-m", "pytest", "tests/test_a.py::test_b"]);
         assert_eq!(python.cwd.as_deref(), Some("/nonexistent/py"));
-        assert!(debug_task(&project(Kind::Node(crate::discovery::NodeRunner::Jest), "/n/package.json"), &Scope::Project).is_none(), "Node tests get a ready session instead");
+        assert!(debug_task(&project(Kind::Node(crate::discovery::NodeRunner::Jest), "/n/package.json"), &Scope::Project, &default).is_none(), "Node tests get a ready session instead");
     }
 
     #[test]
@@ -308,13 +326,13 @@ mod tests {
             return;
         };
         let project = std::path::PathBuf::from(project);
-        let all = futures::executor::block_on(run_dotnet(&project, &Scope::Project, Default::default(), &Env::default())).unwrap();
+        let all = futures::executor::block_on(run_dotnet(&project, &Scope::Project, Default::default(), &Env::default(), &ActiveBuild::default())).unwrap();
         let outcome = |name: &str| all.results.iter().find(|r| r.display_name.ends_with(name)).map(|r| r.outcome);
         assert_eq!(outcome(".Adds"), Some(crate::trx::Outcome::Passed));
         assert_eq!(outcome(".Fails"), Some(crate::trx::Outcome::Failed));
         assert_eq!(all.results.len(), 5, "{}", all.log);
 
-        let one = futures::executor::block_on(run_dotnet(&project, &Scope::Methods(vec!["Demo.Tests.MathTests.Doubles".into()]), Default::default(), &Env::default())).unwrap();
+        let one = futures::executor::block_on(run_dotnet(&project, &Scope::Methods(vec!["Demo.Tests.MathTests.Doubles".into()]), Default::default(), &Env::default(), &ActiveBuild::default())).unwrap();
         assert_eq!(one.results.len(), 2, "both theory rows, nothing else: {}", one.log);
     }
 }
