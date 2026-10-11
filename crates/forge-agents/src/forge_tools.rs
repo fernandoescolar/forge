@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn selects_tests_by_file_folder_and_name() {
         use forge_tests::discovery::{Kind, TestClass, TestMethod, TestProject};
-        let method = |fqn: &str, file: &str| TestMethod { fqn: fqn.into(), name: fqn.rsplit('.').next().unwrap().into(), file: file.into(), row: 1 };
+        let method = |fqn: &str, file: &str| TestMethod { fqn: fqn.into(), name: fqn.rsplit('.').next().unwrap().into(), file: file.into(), row: 1, cases: Vec::new() };
         let project = TestProject {
             name: "app".into(),
             path: "/p/Cargo.toml".into(),

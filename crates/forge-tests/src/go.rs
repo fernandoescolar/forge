@@ -43,7 +43,7 @@ fn load_module(go_mod: &Path) -> Option<TestProject> {
                 row: NO_ROW,
                 tests: Vec::new(),
             });
-            class.tests.push(TestMethod { fqn: format!("{import}.{name}"), name, file: file.clone(), row: row as u32 });
+            class.tests.push(TestMethod { fqn: format!("{import}.{name}"), name, file: file.clone(), row: row as u32, cases: Vec::new() });
         }
     }
     let name = module.rsplit('/').next().unwrap_or(&module).to_string();
@@ -63,6 +63,7 @@ pub(crate) fn args(scope: &Scope, module: &str) -> Vec<String> {
     match scope {
         Scope::Project => vec!["./...".into()],
         Scope::Class(import) => vec![package_arg(import, module)],
+        Scope::Case { method, .. } => args(&Scope::Methods(vec![method.clone()]), module),
         Scope::Methods(fqns) => {
             let mut packages: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for fqn in fqns {

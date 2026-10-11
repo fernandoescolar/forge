@@ -2,6 +2,7 @@
 //! Rust, Jest, Vitest and pytest), runs them with each one's tool, and shows results per test in
 //! a dock panel.
 
+pub mod cases;
 pub mod cobertura;
 pub mod coverage_view;
 pub mod discovery;

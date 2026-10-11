@@ -56,7 +56,7 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
                 row: NO_ROW,
                 tests: Vec::new(),
             });
-            class.tests.push(TestMethod { fqn: format!("{package}|{target}|{path}"), name: test.name, file: file.clone(), row: test.row });
+            class.tests.push(TestMethod { fqn: format!("{package}|{target}|{path}"), name: test.name, file: file.clone(), row: test.row, cases: Vec::new() });
         }
     };
     let src = dir.join("src");
@@ -249,9 +249,12 @@ fn split_id(id: &str) -> Option<(&str, &str)> {
 
 /// The `cargo test` arguments for `scope`.
 pub(crate) fn args(package: &str, scope: &Scope) -> Vec<String> {
+    if let Scope::Case { method, .. } = scope {
+        return args(package, &Scope::Methods(vec![method.clone()]));
+    }
     let mut args: Vec<String> = vec!["test".into(), "-p".into(), package.into(), "--no-fail-fast".into()];
     match scope {
-        Scope::Project => {}
+        Scope::Project | Scope::Case { .. } => {}
         Scope::Class(id) => {
             let Some((target, module)) = split_id(id) else { return args };
             if !target.is_empty() {

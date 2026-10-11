@@ -20,12 +20,16 @@ pub enum Scope {
     Class(String),
     /// `Namespace.Class.Method` each
     Methods(Vec<String>),
+    /// One data row of a .NET test: its method, and the `--filter` that selects the row
+    /// (`cases::CaseRow::filter`).
+    Case { method: String, filter: String },
 }
 
 impl Scope {
     /// The `dotnet test --filter` expression. No backslashes: MSBuild turns them into `/`.
     pub fn filter(&self) -> Option<String> {
         match self {
+            Scope::Case { filter, .. } => Some(filter.clone()),
             Scope::Project => None,
             // The trailing dot keeps `FooTests` from also running `FooTestsExtra`.
             Scope::Class(class) => Some(format!("FullyQualifiedName~{class}.")),
@@ -120,6 +124,7 @@ pub fn debug_task(project: &TestProject, scope: &Scope, build: &ActiveBuild) -> 
                 Scope::Project => vec![],
                 Scope::Class(id) => vec![id.clone()],
                 Scope::Methods(ids) => ids.clone(),
+                Scope::Case { method, .. } => vec![method.clone()],
             };
             let relative = ids.iter().map(|id| id.strip_prefix(&dir).map(|r| r.trim_start_matches('/').to_string()).unwrap_or_else(|| id.clone()));
             let args = ["-m".to_string(), "pytest".to_string()].into_iter().chain(relative).collect();

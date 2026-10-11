@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub use forge_languages::csharp_discovery::DataCase;
 use forge_languages::csharp_discovery::csharp_tests;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +75,8 @@ pub struct TestMethod {
     pub name: String,
     pub file: PathBuf,
     pub row: u32,
+    /// The data rows written in its attributes (.NET), each run as a case of its own.
+    pub cases: Vec<DataCase>,
 }
 
 pub(crate) const SKIPPED_DIRS: &[&str] = &["bin", "obj", ".git", ".vs", ".idea", "node_modules", "target", "TestResults", "vendor", "dist", "build", "coverage", "venv", "__pycache__", "site-packages"];
@@ -156,6 +159,7 @@ fn load_project(project: &Path) -> TestProject {
                 name: test.method.clone(),
                 file: file.clone(),
                 row: test.row,
+                cases: test.cases.clone(),
             });
         }
     }

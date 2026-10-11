@@ -49,7 +49,7 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
         let id_path = canonical(&file);
         let tests: Vec<TestMethod> = file_tests(&source)
             .into_iter()
-            .map(|(titles, row)| TestMethod { fqn: format!("{id_path} > {}", titles.join(" > ")), name: titles.join(" › "), file: file.clone(), row })
+            .map(|(titles, row)| TestMethod { fqn: format!("{id_path} > {}", titles.join(" > ")), name: titles.join(" › "), file: file.clone(), row, cases: Vec::new() })
             .collect();
         if tests.is_empty() {
             continue;
@@ -151,6 +151,7 @@ fn selection(scope: &Scope) -> (Vec<String>, Option<String>) {
     match scope {
         Scope::Project => (vec![], None),
         Scope::Class(file) => (vec![file.clone()], None),
+        Scope::Case { method, .. } => selection(&Scope::Methods(vec![method.clone()])),
         Scope::Methods(ids) => {
             let mut files: Vec<String> = ids.iter().map(|id| split_id(id).0.to_string()).collect();
             files.sort();
