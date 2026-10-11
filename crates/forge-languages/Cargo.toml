@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Languages Forge ships built in on top of Zed's: C# with OmniSharp"
+description = "Languages Forge ships built in on top of Zed's: C# with Roslyn or OmniSharp"
 
 [dependencies]
 forge-ui = { path = "../forge-ui" }
@@ -20,6 +20,7 @@ language = { path = "../../vendor/zed/crates/language" }
 language_core = { path = "../../vendor/zed/crates/language_core" }
 log = "0.4"
 lsp = { path = "../../vendor/zed/crates/lsp" }
+paths = { path = "../../vendor/zed/crates/paths" }
 project = { path = "../../vendor/zed/crates/project" }
 serde.workspace = true
 serde_json.workspace = true

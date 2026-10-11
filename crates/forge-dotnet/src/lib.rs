@@ -12,6 +12,7 @@ pub mod model;
 pub mod nuget_view;
 pub mod project_files;
 mod restore;
+mod roslyn_session;
 
 pub use explorer::SolutionExplorer;
 

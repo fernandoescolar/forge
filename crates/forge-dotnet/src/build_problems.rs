@@ -1,7 +1,7 @@
 //! Errors and warnings from `dotnet build` (and restore, pack, publish) in the Problems
 //! panel and the editor, like a language server's.
 //!
-//! OmniSharp only reports what it can see in the files it analyses: not NuGet or MSBuild
+//! The language server only reports what it can see in the files it analyses: not NuGet or MSBuild
 //! errors, not projects it failed to load. So the explorer's builds also write their
 //! errors and warnings to a log file (an extra MSBuild file logger, which leaves the
 //! terminal output as it was), and once the build ends they are published for a language

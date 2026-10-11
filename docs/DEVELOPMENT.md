@@ -62,7 +62,7 @@ crates/
   forge-agents/          agent threads (tab, anchored, follow, worktrees) + Zed-project file adapter
   forge-run/             run targets and the run / debug / hot reload controls
   forge-tests/           Tests panel: discovery, runners and debugging for every test kind
-  forge-languages/       C# (OmniSharp, netcoredbg), MSBuild, .sln and .http languages; launch profiles
+  forge-languages/       C# (Roslyn or OmniSharp, netcoredbg), MSBuild, .sln and .http languages; launch profiles
   forge-dotnet/          Solution Explorer, NuGet manager, project file editing, user secrets, EF
   dotnet-model/          .sln/.slnx, MSBuild evaluation and edits, NuGet V3 (no UI)
   forge-git/             Git: Zed's git UI, history graph, merge editor, git init, background fetch

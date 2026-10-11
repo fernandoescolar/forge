@@ -22,6 +22,7 @@ use project::{PathChange, Project};
 
 use crate::config::{self, DotnetConfig};
 use crate::language_server_sync::AssetsWatchers;
+use crate::roslyn_session::{ROSLYN, RoslynSession};
 
 pub enum ModelEvent {
     /// The solution, its projects or the tree changed.
@@ -63,6 +64,8 @@ pub struct DotnetModel {
     load_task: Option<Task<()>>,
     /// Tells OmniSharp about restores (see `language_server_sync`).
     assets_watchers: AssetsWatchers,
+    /// Tells Roslyn which solution to load.
+    roslyn: RoslynSession,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -89,6 +92,10 @@ impl DotnetModel {
                     this.schedule(cx);
                 }
             }
+            project::Event::LanguageServerAdded(_, name, _) if name.0.as_ref() == ROSLYN => {
+                let solution = this.solution.clone();
+                this.roslyn.open(&project, solution.as_deref(), cx);
+            }
             _ => {}
         });
         let mut model = Self {
@@ -105,6 +112,7 @@ impl DotnetModel {
             pending: Pending { full: true, ..Default::default() },
             load_task: None,
             assets_watchers: AssetsWatchers::default(),
+            roslyn: RoslynSession::default(),
             _subscriptions: vec![subscription],
         };
         model.schedule(cx);
@@ -254,6 +262,8 @@ impl DotnetModel {
         self.error = result.error;
         self.loading = !self.pending.is_empty();
         self.generation += 1;
+        let (project, solution) = (self.project.clone(), self.solution.clone());
+        self.roslyn.open(&project, solution.as_deref(), cx);
         cx.emit(ModelEvent::Changed);
         cx.notify();
     }

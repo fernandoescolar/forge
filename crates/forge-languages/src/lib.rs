@@ -18,6 +18,7 @@ pub mod launch_settings;
 mod netcoredbg;
 mod omnisharp;
 mod csharp_fix_all;
+mod roslyn;
 
 #[derive(RustEmbed)]
 #[folder = "src/"]
@@ -40,12 +41,8 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
         ("sln", SLN),
         ("http", HTTP),
     ]);
-    register(
-        &languages,
-        "csharp",
-        vec![Arc::new(omnisharp::OmniSharpLspAdapter)],
-        Some(Arc::new(csharp_tasks::CSharpContextProvider)),
-    );
+    let csharp_server: Arc<dyn LspAdapter> = if roslyn::use_roslyn() { Arc::new(roslyn::RoslynLspAdapter) } else { Arc::new(omnisharp::OmniSharpLspAdapter) };
+    register(&languages, "csharp", vec![csharp_server], Some(Arc::new(csharp_tasks::CSharpContextProvider)));
     // Project files, .props/.targets and .slnx; package completions and version hints
     // come from forge-dotnet.
     register(&languages, "msbuild", vec![], None);

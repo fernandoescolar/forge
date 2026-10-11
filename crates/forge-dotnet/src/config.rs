@@ -36,7 +36,19 @@ pub struct DotnetConfig {
     /// The file, relative to each project's folder, that "Move usings to …" turns a file's
     /// `using` directives into `global using` directives in.
     pub global_usings_file: String,
+    /// The C# language server, from the next start: Roslyn (needs a .NET 10 runtime),
+    /// OmniSharp, or `auto` (Roslyn when that runtime is installed).
+    pub csharp_language_server: CSharpLanguageServer,
     pub nuget: NuGetConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CSharpLanguageServer {
+    #[default]
+    Auto,
+    Roslyn,
+    OmniSharp,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
@@ -69,6 +81,7 @@ impl Default for DotnetConfig {
             custom_commands: HashMap::new(),
             solution_search_depth: 4,
             global_usings_file: "GlobalUsings.cs".into(),
+            csharp_language_server: CSharpLanguageServer::Auto,
             nuget: NuGetConfig::default(),
         }
     }

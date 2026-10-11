@@ -3704,6 +3704,7 @@ dependencies = [
  "language_core",
  "log",
  "lsp",
+ "paths",
  "project",
  "regex",
  "rust-embed",
