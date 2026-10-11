@@ -491,6 +491,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Commit…", git::Commit),
             MenuItem::action("Write Commit Message with the Agent", forge_agents::commit_message::WriteCommitMessage),
+            MenuItem::action("Sign Off Commits in This Project", forge_git::signoff::ToggleSignOff),
             MenuItem::action("Pull", git::Pull),
             MenuItem::action("Push", git::Push),
             MenuItem::action("Fetch", git::Fetch),

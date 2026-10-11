@@ -7,10 +7,15 @@
 //! `extensions.json`). The Settings tab turns any page into rows with [`rows`], and every
 //! change goes through [`SettingsRegistry::set`], which edits the file in place (comments
 //! and formatting are kept) and emits [`SettingChanged`].
+//!
+//! A page can also let a project set some of its settings ([`SettingsPage::project_keys`]):
+//! they go in the file of the same name in the project's `.forge/` folder
+//! (`.forge/settings.json`, which the editor reads, or `.forge/git.json`), and win over the
+//! user's.
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use serde_json::{Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Where a page's values are stored.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -19,6 +24,8 @@ pub enum SettingsFile {
     User,
     /// A JSON file in Forge's config folder, by name (`dotnet.json`).
     Config(String),
+    /// A JSON file in a project's `.forge/` folder (`root`: the project's folder).
+    Project { root: PathBuf, name: String },
 }
 
 impl SettingsFile {
@@ -26,6 +33,7 @@ impl SettingsFile {
         match self {
             SettingsFile::User => paths::settings_file().clone(),
             SettingsFile::Config(name) => paths::config_dir().join(name),
+            SettingsFile::Project { root, name } => root.join(paths::local_settings_folder_name()).join(name),
         }
     }
 
@@ -33,7 +41,22 @@ impl SettingsFile {
         match self {
             SettingsFile::User => "settings.json".into(),
             SettingsFile::Config(name) => name.clone(),
+            SettingsFile::Project { name, .. } => format!("{}/{name}", paths::local_settings_folder_name()),
         }
+    }
+
+    /// The project's file for this one: `settings.json` → `.forge/settings.json`,
+    /// `git.json` → `.forge/git.json`.
+    pub fn in_project(&self, root: &Path) -> SettingsFile {
+        let name = match self {
+            SettingsFile::User => "settings.json".to_string(),
+            SettingsFile::Config(name) | SettingsFile::Project { name, .. } => name.clone(),
+        };
+        SettingsFile::Project { root: root.to_path_buf(), name }
+    }
+
+    pub fn is_project(&self) -> bool {
+        matches!(self, SettingsFile::Project { .. })
     }
 
     /// The file's values (an empty object when it is missing or invalid).
@@ -85,6 +108,43 @@ pub struct SettingsPage {
     pub order: i32,
     /// Buttons in the page's header: (label, action name), e.g. a dedicated editor.
     pub actions: Vec<(String, String)>,
+    /// The top-level settings a project may set in its own file ([`SettingsFile::in_project`]);
+    /// `None`: only the user's.
+    pub project_keys: Option<Vec<String>>,
+}
+
+impl SettingsPage {
+    /// The page as a project at `root` sees it: only the settings it may set, stored in its
+    /// file, with the user's values (`user`) standing in for those it doesn't set. `None`
+    /// when a project can't set any.
+    pub fn in_project(&self, root: &Path, user: &Value) -> Option<SettingsPage> {
+        let allowed = self.project_keys.as_ref().filter(|keys| !keys.is_empty())?;
+        let keys = match &self.keys {
+            Some(keys) => keys.iter().filter(|k| allowed.contains(k)).cloned().collect(),
+            None => allowed.clone(),
+        };
+        let mut defaults = self.defaults.clone();
+        merge(&mut defaults, user);
+        Some(SettingsPage { file: self.file.in_project(root), keys: Some(keys), defaults, ..self.clone() })
+    }
+}
+
+/// `overrides` on top of `base`, object by object.
+fn merge(base: &mut Value, overrides: &Value) {
+    match (base, overrides) {
+        (Value::Object(base), Value::Object(overrides)) => {
+            for (key, value) in overrides {
+                match base.get_mut(key) {
+                    Some(existing) => merge(existing, value),
+                    None => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, overrides) if !overrides.is_null() => *base = overrides.clone(),
+        _ => {}
+    }
 }
 
 /// What kind of control edits a setting.
@@ -342,7 +402,23 @@ mod tests {
     use serde_json::json;
 
     fn page(schema: Value) -> SettingsPage {
-        SettingsPage { id: "t".into(), title: "T".into(), file: SettingsFile::Config("t.json".into()), schema, keys: None, defaults: json!({}), order: 0, actions: vec![] }
+        SettingsPage { id: "t".into(), title: "T".into(), file: SettingsFile::Config("t.json".into()), schema, keys: None, defaults: json!({}), order: 0, actions: vec![], project_keys: None }
+    }
+
+    #[test]
+    fn pages_as_a_project_sees_them() {
+        let schema = json!({ "properties": { "tab_size": { "type": "integer" }, "theme": { "type": "string" }, "format_on_save": { "type": "boolean" } } });
+        let mut user_only = page(schema.clone());
+        user_only.file = SettingsFile::User;
+        assert!(user_only.in_project(Path::new("/p"), &json!({})).is_none(), "nothing a project may set");
+
+        let editor = SettingsPage { keys: Some(vec!["theme".into(), "format_on_save".into(), "tab_size".into()]), project_keys: Some(vec!["tab_size".into(), "format_on_save".into()]), defaults: json!({ "tab_size": 4, "format_on_save": true }), ..user_only };
+        let project = editor.in_project(Path::new("/p"), &json!({ "tab_size": 2 })).unwrap();
+        assert_eq!(project.file, SettingsFile::Project { root: "/p".into(), name: "settings.json".into() });
+        assert_eq!(project.file.path(), Path::new("/p/.forge/settings.json"));
+        assert_eq!(project.keys, Some(vec!["format_on_save".into(), "tab_size".into()]), "the page's order, only what a project may set");
+        assert_eq!(project.defaults, json!({ "tab_size": 2, "format_on_save": true }), "the user's values stand in");
+        assert_eq!(SettingsFile::Config("git.json".into()).in_project(Path::new("/p")).display_name(), ".forge/git.json");
     }
 
     #[test]

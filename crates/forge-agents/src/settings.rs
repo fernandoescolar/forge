@@ -111,6 +111,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
         defaults,
         order: 10,
         actions: vec![("Manage Agents…".into(), "forge_agent::OpenAgentSettings".into())],
+        project_keys: None,
     }
 }
 
@@ -222,8 +223,8 @@ pub fn presets() -> Vec<AgentSpec> {
     let npx = |id: &str, package: &str| AgentSpec { id: id.into(), command: "npx".into(), args: vec!["-y".into(), package.into()], env: vec![], cwd: None };
     vec![
         npx("claude", "@agentclientprotocol/claude-agent-acp"),
-        npx("codex", "@zed-industries/codex-acp"),
-        AgentSpec { id: "gemini".into(), command: "gemini".into(), args: vec!["--experimental-acp".into()], env: vec![], cwd: None },
+        npx("codex", "@agentclientprotocol/codex-acp"),
+        AgentSpec { id: "gemini".into(), command: "gemini".into(), args: vec!["--acp".into()], env: vec![], cwd: None },
         AgentSpec { id: "copilot".into(), command: "npx".into(), args: ["-y", "@github/copilot", "--acp", "--stdio"].map(String::from).to_vec(), env: vec![], cwd: None },
     ]
 }

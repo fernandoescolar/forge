@@ -236,6 +236,7 @@ impl ExtensionHost {
             defaults: Value::Object(defaults),
             order: 100,
             actions: vec![],
+            project_keys: None,
         };
         let registry = SettingsRegistry::global(cx);
         registry.update(cx, |registry, cx| registry.register(page, cx));

@@ -142,6 +142,7 @@ pub fn register_settings(cx: &mut App) {
         defaults: serde_json::to_value(DotnetConfig::default()).unwrap_or_default(),
         order: 20,
         actions: vec![],
+        project_keys: None,
     };
     let registry = SettingsRegistry::global(cx);
     registry.update(cx, |registry, cx| registry.register(page, cx));
