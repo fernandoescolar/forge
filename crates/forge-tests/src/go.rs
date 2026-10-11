@@ -84,7 +84,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     let mut command = runner::command("go", env);
     command.args(["test", "-json", "-count=1"]).args(args(scope, &module)).current_dir(project.dir());
     let output = runner::execute(command, live, Some(readable)).await.context("failed to start `go test`; is Go installed?")?;
-    Ok(RunOutput { results: parse(&output.stdout), log: output.log, success: output.success })
+    Ok(RunOutput { results: parse(&output.stdout), log: output.log, success: output.success, coverage: None })
 }
 
 /// The human part of a `go test -json` line.

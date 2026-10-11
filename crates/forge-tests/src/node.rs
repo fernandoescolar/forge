@@ -186,7 +186,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     command.env("FORCE_COLOR", "0").env("CI", "1").current_dir(project.dir());
     let output = runner::execute(command, live, None).await.context("failed to start the tests with npx; is Node.js installed?")?;
     let results = std::fs::read_to_string(&report_file).ok().map(|json| parse(&json)).unwrap_or_default();
-    Ok(RunOutput { results, log: output.log, success: output.success })
+    Ok(RunOutput { results, log: output.log, success: output.success, coverage: None })
 }
 
 /// The test runner's own entry point (`jest/bin/jest.js`, `vitest/vitest.mjs`), from the

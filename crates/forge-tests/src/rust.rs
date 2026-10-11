@@ -283,7 +283,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     let mut command = runner::command("cargo", env);
     command.args(args(package, scope)).env("CARGO_TERM_COLOR", "never").current_dir(project.dir());
     let output = runner::execute(command, live, None).await.context("failed to start `cargo test`; is Rust installed?")?;
-    Ok(RunOutput { results: parse(package, &output.stdout, &output.stderr), log: output.log, success: output.success })
+    Ok(RunOutput { results: parse(package, &output.stdout, &output.stderr), log: output.log, success: output.success, coverage: None })
 }
 
 static RESULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^test (\S+) \.\.\. (ok|FAILED|ignored)").unwrap());

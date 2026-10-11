@@ -8,6 +8,7 @@ use forge_languages::active_build::ActiveBuild;
 use smol::io::{AsyncRead, AsyncReadExt as _};
 use util::command::Stdio;
 
+use crate::cobertura::Coverage;
 use crate::discovery::{Kind, TestProject};
 use crate::trx::{self, CaseResult};
 
@@ -44,6 +45,19 @@ pub struct RunOutput {
     /// Everything `dotnet test` printed, for build errors and test output.
     pub log: String,
     pub success: bool,
+    /// What the run covered, when coverage was asked for (.NET).
+    pub coverage: Option<Coverage>,
+}
+
+/// How to run .NET tests.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunOptions {
+    /// The configuration and framework (the title bar's).
+    pub build: ActiveBuild,
+    /// Collect code coverage.
+    pub coverage: bool,
+    /// A `.runsettings` file (`dotnet test --settings`).
+    pub settings: Option<std::path::PathBuf>,
 }
 
 /// What the test command has printed so far, shared with the panel while it runs.
@@ -53,10 +67,10 @@ pub type LiveLog = std::sync::Arc<std::sync::Mutex<String>>;
 /// future kills the process.
 /// `env` is the project's shell environment (so tools on the user's `PATH` are found when
 /// Forge was started from the Dock).
-/// .NET tests build in `build`'s configuration and framework (the title bar's).
-pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &Env, build: &ActiveBuild) -> Result<RunOutput> {
+/// `options` apply to .NET tests.
+pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &Env, options: &RunOptions) -> Result<RunOutput> {
     match &project.kind {
-        Kind::Dotnet => run_dotnet(&project.path, scope, live, env, build).await,
+        Kind::Dotnet => run_dotnet(&project.path, scope, live, env, options).await,
         Kind::Go => crate::go::run(project, scope, live, env).await,
         Kind::Rust { .. } => crate::rust::run(project, scope, live, env).await,
         Kind::Node(_) => crate::node::run(project, scope, live, env).await,
@@ -148,14 +162,39 @@ fn dotnet_build_args(project: &Path, build: &ActiveBuild) -> Vec<String> {
     args
 }
 
-/// Builds and runs `dotnet test` for `scope`, reading the TRX files it writes.
-async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env, build: &ActiveBuild) -> Result<RunOutput> {
+/// The coverage collector for `dotnet test --collect`: coverlet's when the project
+/// references `coverlet.collector` (the test templates do), else Microsoft's, which comes
+/// with `Microsoft.NET.Test.Sdk`. Both write Cobertura.
+fn coverage_collector(project: &Path) -> &'static str {
+    let text = std::fs::read_to_string(project).unwrap_or_default().to_ascii_lowercase();
+    if text.contains("\"coverlet.collector\"") {
+        "XPlat Code Coverage;Format=cobertura"
+    } else {
+        "Code Coverage;Format=cobertura"
+    }
+}
+
+/// The `dotnet test` arguments for `options`, after the project.
+fn dotnet_test_args(project: &Path, options: &RunOptions) -> Vec<String> {
+    let mut args = dotnet_build_args(project, &options.build);
+    if let Some(settings) = &options.settings {
+        args.extend(["--settings".to_string(), settings.to_string_lossy().into_owned()]);
+    }
+    if options.coverage {
+        args.extend(["--collect".to_string(), coverage_collector(project).to_string()]);
+    }
+    args
+}
+
+/// Builds and runs `dotnet test` for `scope`, reading the TRX files and coverage reports it
+/// writes.
+async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env, options: &RunOptions) -> Result<RunOutput> {
     let results_dir = tempfile::Builder::new().prefix("forge-tests-").tempdir()?;
     let mut command = command("dotnet", env);
     command
         .arg("test")
         .arg(project)
-        .args(dotnet_build_args(project, build))
+        .args(dotnet_test_args(project, options))
         .args(["--logger", "trx", "--results-directory"])
         .arg(results_dir.path())
         // Plain output: the terminal logger's live view is noise in a captured log.
@@ -176,7 +215,39 @@ async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env, bui
         let xml = std::fs::read_to_string(entry.path())?;
         results.extend(trx::parse(&xml, trx::framework_from_file_name(&name).as_deref())?);
     }
-    Ok(RunOutput { results, log: output.log, success: output.success })
+    let coverage = options.coverage.then(|| read_coverage(results_dir.path(), project));
+    Ok(RunOutput { results, log: output.log, success: output.success, coverage })
+}
+
+/// The coverage reports under `dir` (each collector writes into a folder of its own),
+/// merged, without the test project's own files.
+fn read_coverage(dir: &Path, project: &Path) -> Coverage {
+    let mut coverage = Coverage::default();
+    let base = project.parent().unwrap_or(dir);
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.to_string_lossy().ends_with(".cobertura.xml") {
+                match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|xml| crate::cobertura::parse(&xml, base)) {
+                    Ok(report) => coverage.merge(report),
+                    Err(error) => log::warn!("{}: {error:#}", path.display()),
+                }
+            }
+        }
+    }
+    // Editors know files by their real path (`/private/tmp`, not `/tmp`, on macOS).
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let mut canonical = Coverage::default();
+    for (file, lines) in std::mem::take(&mut coverage.files) {
+        let file = file.canonicalize().unwrap_or(file);
+        if !file.starts_with(&canonical_base) && !file.starts_with(base) {
+            canonical.merge(Coverage { files: [(file, lines)].into_iter().collect() });
+        }
+    }
+    canonical
 }
 
 /// What a test command printed and how it ended.
@@ -308,6 +379,19 @@ mod tests {
     }
 
     #[test]
+    fn coverage_and_runsettings_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_coverlet = dir.path().join("A.Tests.csproj");
+        std::fs::write(&with_coverlet, r#"<Project><ItemGroup><PackageReference Include="coverlet.collector" Version="6.0.4" /></ItemGroup></Project>"#).unwrap();
+        let without = dir.path().join("B.Tests.csproj");
+        std::fs::write(&without, r#"<Project><ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" /></ItemGroup></Project>"#).unwrap();
+        let options = RunOptions { coverage: true, settings: Some("/s/ci.runsettings".into()), ..Default::default() };
+        assert_eq!(dotnet_test_args(&with_coverlet, &options), ["--settings", "/s/ci.runsettings", "--collect", "XPlat Code Coverage;Format=cobertura"]);
+        assert_eq!(dotnet_test_args(&without, &options)[3], "Code Coverage;Format=cobertura");
+        assert!(dotnet_test_args(&without, &RunOptions::default()).is_empty());
+    }
+
+    #[test]
     fn builds_filters() {
         assert_eq!(Scope::Project.filter(), None);
         assert_eq!(Scope::Class("Ns.FooTests".into()).filter().as_deref(), Some("FullyQualifiedName~Ns.FooTests."));
@@ -326,13 +410,13 @@ mod tests {
             return;
         };
         let project = std::path::PathBuf::from(project);
-        let all = futures::executor::block_on(run_dotnet(&project, &Scope::Project, Default::default(), &Env::default(), &ActiveBuild::default())).unwrap();
+        let all = futures::executor::block_on(run_dotnet(&project, &Scope::Project, Default::default(), &Env::default(), &RunOptions::default())).unwrap();
         let outcome = |name: &str| all.results.iter().find(|r| r.display_name.ends_with(name)).map(|r| r.outcome);
         assert_eq!(outcome(".Adds"), Some(crate::trx::Outcome::Passed));
         assert_eq!(outcome(".Fails"), Some(crate::trx::Outcome::Failed));
         assert_eq!(all.results.len(), 5, "{}", all.log);
 
-        let one = futures::executor::block_on(run_dotnet(&project, &Scope::Methods(vec!["Demo.Tests.MathTests.Doubles".into()]), Default::default(), &Env::default(), &ActiveBuild::default())).unwrap();
+        let one = futures::executor::block_on(run_dotnet(&project, &Scope::Methods(vec!["Demo.Tests.MathTests.Doubles".into()]), Default::default(), &Env::default(), &RunOptions::default())).unwrap();
         assert_eq!(one.results.len(), 2, "both theory rows, nothing else: {}", one.log);
     }
 }

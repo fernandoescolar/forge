@@ -120,6 +120,11 @@ pub(crate) fn find_where(dir: &Path, wanted: impl Fn(&Path) -> bool, stop_at: Op
     found
 }
 
+/// The `.runsettings` files under `root`, for `dotnet test --settings`.
+pub fn runsettings_files(root: &Path) -> Vec<PathBuf> {
+    find_where(root, |path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("runsettings")), None)
+}
+
 pub fn is_test_project(project: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(project) else {
         return false;

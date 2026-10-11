@@ -28,11 +28,12 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use crate::cobertura::Coverage;
 use crate::discovery::{self, TestProject};
 use crate::runner::{self, Scope};
 use crate::trx::{CaseResult, Outcome};
 
-actions!(forge_tests, [ToggleFocus, RunAllTests, RunFailedTests, RefreshTests]);
+actions!(forge_tests, [ToggleFocus, RunAllTests, RunAllTestsWithCoverage, ClearCoverage, RunFailedTests, RefreshTests]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -42,6 +43,16 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &RunAllTests, window, cx| {
             if let Some(panel) = workspace.focus_panel::<TestPanel>(window, cx) {
                 panel.update(cx, |panel, cx| panel.run_all(window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &RunAllTestsWithCoverage, window, cx| {
+            if let Some(panel) = workspace.focus_panel::<TestPanel>(window, cx) {
+                panel.update(cx, |panel, cx| panel.run_all_with_coverage(window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &ClearCoverage, _, cx| {
+            if let Some(panel) = workspace.panel::<TestPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.clear_coverage(cx));
             }
         });
         workspace.register_action(|workspace, _: &RunFailedTests, window, cx| {
@@ -95,6 +106,11 @@ impl Status {
     }
 }
 
+/// Where the `.runsettings` choice of a workspace is kept.
+fn settings_key(roots: &[PathBuf]) -> String {
+    format!("forge-tests-runsettings:{}", roots.iter().map(|r| r.to_string_lossy()).collect::<Vec<_>>().join("|"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum NodeKey {
     Project(PathBuf),
@@ -136,6 +152,11 @@ pub struct TestPanel {
     details_scroll: ScrollHandle,
     /// Files this panel last colored in the gutter, so stale entries can be cleared.
     published_files: HashSet<PathBuf>,
+    /// What the last run with coverage covered.
+    coverage: Option<Coverage>,
+    /// The `.runsettings` files in the workspace, and the one .NET tests run with.
+    settings_files: Vec<PathBuf>,
+    settings: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -173,6 +194,9 @@ impl TestPanel {
             list_scroll: ScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
             published_files: HashSet::new(),
+            coverage: None,
+            settings_files: Vec::new(),
+            settings: None,
             _subscriptions: vec![subscription],
         };
         panel.discover(window, cx);
@@ -188,12 +212,23 @@ impl TestPanel {
         let roots = self.roots(cx);
         self.discovering = true;
         cx.notify();
+        let key = settings_key(&roots);
+        let saved = db::kvp::KeyValueStore::global(cx).read_kvp(&key).ok().flatten().map(PathBuf::from);
         self.discovery_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            let projects = cx
-                .background_spawn(async move { roots.iter().flat_map(|root| discovery::discover(root)).collect::<Vec<_>>() })
+            let (projects, settings_files) = cx
+                .background_spawn(async move {
+                    let projects = roots.iter().flat_map(|root| discovery::discover(root)).collect::<Vec<_>>();
+                    let settings = roots.iter().flat_map(|root| discovery::runsettings_files(root)).collect::<Vec<_>>();
+                    (projects, settings)
+                })
                 .await;
             this.update(cx, |this, cx| {
+                // The file chosen before, while it is still there.
+                if this.settings.is_none() {
+                    this.settings = saved.filter(|path| settings_files.contains(path));
+                }
+                this.settings_files = settings_files;
                 // Freshly found classes start collapsed when there are many of them.
                 let class_count: usize = projects.iter().map(|p| p.classes.len()).sum();
                 if this.projects.is_empty() && class_count > 12 {
@@ -227,6 +262,16 @@ impl TestPanel {
         files.extend(self.published_files.drain());
         self.published_files = statuses.iter().map(|(file, _, _)| file.clone()).collect();
         crate::gutter::publish(files, statuses, self.workspace.upgrade().as_ref(), cx);
+    }
+
+    /// Runs .NET tests with `settings` (a `.runsettings` file), or without one, from now on.
+    pub fn select_settings(&mut self, settings: Option<PathBuf>, cx: &mut Context<Self>) {
+        let key = settings_key(&self.roots(cx));
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let value = settings.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        cx.background_spawn(async move { kvp.write_kvp(key, value).await.ok() }).detach();
+        self.settings = settings;
+        cx.notify();
     }
 
     fn method_status(&self, fqn: &str) -> Status {
@@ -357,8 +402,29 @@ impl TestPanel {
 
     /// Runs each `(project, scope)` in turn; one run at a time.
     fn start(&mut self, jobs: Vec<(usize, Scope)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_with(jobs, false, window, cx);
+    }
+
+    /// Runs every test and collects code coverage, shown in the editors' gutters.
+    pub fn run_all_with_coverage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let jobs = (0..self.projects.len()).filter(|&p| self.projects[p].kind == discovery::Kind::Dotnet).map(|p| (p, Scope::Project)).collect();
+        self.start_with(jobs, true, window, cx);
+    }
+
+    /// Forgets the coverage of the last run and takes it off the gutters.
+    pub fn clear_coverage(&mut self, cx: &mut Context<Self>) {
+        self.coverage = None;
+        crate::coverage_view::show(None, self.workspace.upgrade().as_ref(), cx);
+        cx.notify();
+    }
+
+    /// Runs each `(project, scope)` in turn, with coverage when asked (for .NET tests).
+    fn start_with(&mut self, jobs: Vec<(usize, Scope)>, coverage: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.run.is_some() || jobs.is_empty() {
             return;
+        }
+        if coverage {
+            self.coverage = Some(Coverage::default());
         }
         let jobs: Vec<_> = jobs
             .into_iter()
@@ -368,7 +434,7 @@ impl TestPanel {
         self.error = None;
         let live = runner::LiveLog::default();
         let task_live = live.clone();
-        let build = ActiveBuild::get(cx);
+        let options = runner::RunOptions { build: ActiveBuild::get(cx), coverage, settings: self.settings.clone() };
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut log = String::new();
             for (project, methods, scope) in jobs {
@@ -392,8 +458,8 @@ impl TestPanel {
                     Some(task) => task.await.map(|env| env.into_iter().collect()).unwrap_or_default(),
                     None => Default::default(),
                 };
-                let job_build = build.clone();
-                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_build).await }).await;
+                let job_options = options.clone();
+                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_options).await }).await;
                 let keep_going = this
                     .update(cx, |this, cx| {
                         let keep_going = this.finish_job(methods, output, &mut log);
@@ -410,6 +476,9 @@ impl TestPanel {
                 this.run = None;
                 this.last_log = Some(log);
                 this.publish_gutter(cx);
+                if coverage {
+                    crate::coverage_view::show(this.coverage.clone().map(Arc::new), this.workspace.upgrade().as_ref(), cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -444,6 +513,9 @@ impl TestPanel {
             }
         };
         log.push_str(&output.log);
+        if let (Some(total), Some(coverage)) = (&mut self.coverage, output.coverage) {
+            total.merge(coverage);
+        }
         if output.results.is_empty() && !output.success {
             self.error = Some("The tests didn't run (a build error?); see the output".into());
             self.show_log = true;
@@ -857,12 +929,51 @@ impl SharedGroup {
     }
 }
 
+impl TestPanel {
+    /// The `.runsettings` the .NET tests run with, when the workspace has some.
+    fn render_settings_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.settings_files.is_empty() {
+            return None;
+        }
+        let name = |path: &PathBuf| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let label = self.settings.as_ref().map(name).unwrap_or_else(|| "No runsettings".into());
+        let (files, current, panel) = (self.settings_files.clone(), self.settings.clone(), cx.entity().downgrade());
+        Some(
+            ui::PopoverMenu::new("runsettings-menu")
+                .trigger(
+                    Button::new("runsettings", label)
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text("The .runsettings file .NET tests run with")),
+                )
+                .menu(move |window, cx| {
+                    let (files, current, panel) = (files.clone(), current.clone(), panel.clone());
+                    Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        let options = std::iter::once(None).chain(files.into_iter().map(Some));
+                        for option in options {
+                            let label = option.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| "None".into());
+                            let checked = option == current;
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(label, checked, ui::IconPosition::Start, None, move |_, cx| {
+                                panel.update(cx, |panel, cx| panel.select_settings(option.clone(), cx)).ok();
+                            });
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for TestPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
         let running = self.run.is_some();
         let (passed, failed, not_run) = self.summary();
         let has_failed = failed > 0;
+        let coverage_percent = self.coverage.as_ref().filter(|_| !running).and_then(|c| c.percent(None));
 
         let header = h_flex()
             .justify_between()
@@ -879,17 +990,37 @@ impl Render for TestPanel {
                         row.child(Label::new(format!("{passed} passed")).size(LabelSize::XSmall).color(Color::Success))
                             .when(has_failed, |row| row.child(Label::new(format!("{failed} failed")).size(LabelSize::XSmall).color(Color::Error)))
                             .when(not_run > 0, |row| row.child(Label::new(format!("{not_run} not run")).size(LabelSize::XSmall).color(Color::Muted)))
+                    })
+                    .when_some(coverage_percent, |row, percent| {
+                        row.child(
+                            Button::new("coverage-clear", format!("{percent:.0}% covered"))
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .label_size(LabelSize::XSmall)
+                                .tooltip(Tooltip::text("Lines run by the last run with coverage; click to take it off the editors"))
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_coverage(cx))),
+                        )
                     }),
             )
             .child(
                 h_flex()
                     .gap_0p5()
+                    .children(self.render_settings_picker(cx))
                     .child(
                         IconButton::new("run-all", IconName::PlayFilled)
                             .icon_color(Color::Success)
                             .disabled(running || self.projects.is_empty())
                             .tooltip(Tooltip::text("Run all tests"))
                             .on_click(cx.listener(|this, _, window, cx| this.run_all(window, cx))),
+                    )
+                    .child(
+                        Button::new("run-coverage", "Coverage")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(running || !self.projects.iter().any(|p| p.kind == discovery::Kind::Dotnet))
+                            .tooltip(Tooltip::text("Run all .NET tests with code coverage, shown in the editors' gutters"))
+                            .on_click(cx.listener(|this, _, window, cx| this.run_all_with_coverage(window, cx))),
                     )
                     .child(
                         IconButton::new("run-failed", IconName::Rerun)
@@ -1152,7 +1283,7 @@ mod tests {
         panel.update(&mut cx, |p, _| {
             let methods = p.methods_in(0, &Scope::Project);
             let mut log = String::new();
-            p.finish_job(methods, Ok(runner::RunOutput { results, log: "build log".into(), success: false }), &mut log);
+            p.finish_job(methods, Ok(runner::RunOutput { results, log: "build log".into(), success: false, coverage: None }), &mut log);
             p.selected = Some(NodeKey::Method("Demo.Tests.MathTests.Doubles".into()));
         });
         panel.read_with(&cx, |p, _| {

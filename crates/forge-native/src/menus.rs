@@ -471,6 +471,8 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Clear All Breakpoints", debugger_ui::ClearAllBreakpoints),
             MenuItem::separator(),
             MenuItem::action("Run All Tests", forge_tests::panel::RunAllTests),
+            MenuItem::action("Run All Tests with Coverage", forge_tests::panel::RunAllTestsWithCoverage),
+            MenuItem::action("Clear Coverage", forge_tests::panel::ClearCoverage),
             MenuItem::action("Run Failed Tests", forge_tests::panel::RunFailedTests),
             MenuItem::action("Find Tests Again", forge_tests::panel::RefreshTests),
             MenuItem::separator(),

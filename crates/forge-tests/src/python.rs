@@ -171,7 +171,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     let results = std::fs::read_to_string(&report).map(|lines| parse(&lines, &canonical(dir))).unwrap_or_default();
     // Exit code 5: nothing was collected, which is not a failure of the tests.
     let success = output.success || (results.is_empty() && output.log.contains("no tests ran"));
-    Ok(RunOutput { results, log: output.log, success })
+    Ok(RunOutput { results, log: output.log, success, coverage: None })
 }
 
 /// Per-test results from the plugin's report, whose node ids are relative to `dir`.

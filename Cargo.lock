@@ -3862,6 +3862,7 @@ version = "0.0.1-beta"
 dependencies = [
  "anyhow",
  "dap",
+ "db",
  "editor",
  "forge-languages",
  "forge-ui",

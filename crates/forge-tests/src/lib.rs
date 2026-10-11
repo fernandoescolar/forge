@@ -2,6 +2,8 @@
 //! Rust, Jest, Vitest and pytest), runs them with each one's tool, and shows results per test in
 //! a dock panel.
 
+pub mod cobertura;
+pub mod coverage_view;
 pub mod discovery;
 mod go;
 mod gutter;
@@ -17,4 +19,5 @@ pub use panel::TestPanel;
 pub fn init(cx: &mut gpui::App) {
     panel::init(cx);
     gutter::init(cx);
+    coverage_view::init(cx);
 }
