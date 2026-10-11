@@ -2,6 +2,7 @@
 //! NuGet package manager, and package names, versions and update hints while editing
 //! project files. The .NET knowledge itself lives in `dotnet-model`.
 
+mod build_problems;
 pub mod config;
 pub mod explorer;
 mod fetch;

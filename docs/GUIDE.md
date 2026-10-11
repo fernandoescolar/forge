@@ -161,6 +161,8 @@ Terminal › *New Terminal* opens a terminal in the bottom dock, in the project'
 
 The **Solution Explorer** shows `.sln`/`.slnx` solutions as Visual Studio does: solution folders, projects, dependencies and nested files. Creating, renaming, moving, copying and deleting files keeps the project files up to date. Build, test, run, watch, pack and publish from the context menu. Apps with launch profiles (`Properties/launchSettings.json`) get a run target per profile in the title bar.
 
+**Build errors in Problems.** When a build, rebuild, restore, pack or publish from the Solution Explorer ends, its errors and warnings show in the Problems panel and in the editor, next to OmniSharp's. That includes what OmniSharp can't see, such as NuGet and MSBuild errors (on the project file) and errors in projects it didn't load. Each build replaces what the previous one reported, and Clean clears it. A problem OmniSharp already shows on the same line isn't listed twice. They are marked *dotnet build*.
+
 **Hot reload.** With a .NET app selected in the title bar, the flame button runs it with `dotnet watch`: code changes apply to the running app as you save, and it restarts when a change can't be applied. Stop ends it.
 
 **User secrets and Entity Framework.** A project's context menu has *Manage User Secrets*, which opens its `secrets.json` (and sets up user secrets the first time). Projects that use Entity Framework Core also have *Add Migration…*, *Update Database*, *Remove Last Migration* and *List Migrations*. They run `dotnet ef` in a terminal, with the app that references the project as the startup project, and offer to install `dotnet-ef` when it is missing.
