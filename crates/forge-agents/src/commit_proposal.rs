@@ -1,6 +1,7 @@
 //! Commits the agent proposes (`propose_commit`, or a `git commit` it tried to run): a card
 //! in the thread with the message and the files. The user commits them from there, takes
 //! them to the Git panel to edit the message first, or declines; the agent hears which.
+//! The card signs the commit off when the project does (`forge_git::signoff`).
 //!
 //! Git runs in the thread's folder (its worktree, when it has one) with the user's own
 //! `git`, so hooks and signing behave as in a terminal; Zed's Git panel picks the commit
@@ -103,23 +104,41 @@ pub(crate) fn resolve_files(root: &Path, files: &[String]) -> Result<Vec<PathBuf
     Ok(files)
 }
 
-/// Makes the index hold exactly `files` as they are on disk (new, changed or deleted).
-pub(crate) fn stage_only(root: &Path, files: &[PathBuf]) -> Result<()> {
-    // Nothing to reset before the first commit.
-    if head(root).is_some() {
-        git(root, &["reset", "-q"])?;
-    }
+fn paths(files: &[PathBuf]) -> Vec<String> {
+    files.iter().map(|f| f.to_string_lossy().into_owned()).collect()
+}
+
+/// Stages `files` as they are on disk (new, changed or deleted).
+fn stage(root: &Path, files: &[PathBuf]) -> Result<()> {
+    let paths = paths(files);
     let mut args = vec!["add", "-A", "--"];
-    let paths: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
     args.extend(paths.iter().map(String::as_str));
     git(root, &args)?;
     Ok(())
 }
 
-/// Commits `files` with `message`; returns the new commit's SHA and its final message.
-pub(crate) fn commit(root: &Path, files: &[PathBuf], message: &str) -> Result<(String, String)> {
-    stage_only(root, files)?;
-    let mut child = ide_api::std_command("git").arg("-C").arg(root).args(["commit", "-q", "-F", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("cannot run git; is it installed?")?;
+/// Makes the index hold exactly `files` as they are on disk, for the Git panel to commit
+/// them (the user sees what else was staged come off there).
+pub(crate) fn stage_only(root: &Path, files: &[PathBuf]) -> Result<()> {
+    // Nothing to reset before the first commit.
+    if head(root).is_some() {
+        git(root, &["reset", "-q"])?;
+    }
+    stage(root, files)
+}
+
+/// Commits `files` with `message`, signed off as the user when `signoff`; returns the new
+/// commit's SHA and its final message. Whatever else the user had staged stays staged.
+pub(crate) fn commit(root: &Path, files: &[PathBuf], message: &str, signoff: bool) -> Result<(String, String)> {
+    // Staged first so new and deleted files are known to `--only`.
+    stage(root, files)?;
+    let mut command = ide_api::std_command("git");
+    command.arg("-C").arg(root).args(["commit", "-q", "-F", "-"]);
+    if signoff {
+        command.arg("--signoff");
+    }
+    command.args(["--only", "--"]).args(paths(files));
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("cannot run git; is it installed?")?;
     {
         use std::io::Write as _;
         child.stdin.take().context("no stdin")?.write_all(message.as_bytes())?;
@@ -157,16 +176,38 @@ mod tests {
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         // The first commit: nothing to reset yet.
-        let (first, _) = commit(root, &[root.join("a.txt")], "Add a").unwrap();
+        let (first, _) = commit(root, &[root.join("a.txt")], "Add a", false).unwrap();
         assert_eq!(git(root, &["show", "--name-only", "--format=", &first]).unwrap().trim(), "a.txt");
 
-        // Already staged files that weren't proposed stay out.
+        // Already staged files that weren't proposed stay out, and stay staged.
         std::fs::write(root.join("a.txt"), "a2\n").unwrap();
         git(root, &["add", "b.txt"]).unwrap();
-        let (sha, message) = commit(root, &[root.join("a.txt")], "Change a\n\nWith a body.").unwrap();
+        let (sha, message) = commit(root, &[root.join("a.txt")], "Change a\n\nWith a body.", false).unwrap();
         assert_eq!(message, "Change a\n\nWith a body.");
         assert_eq!(git(root, &["show", "--name-only", "--format=", &sha]).unwrap().trim(), "a.txt");
-        assert_eq!(git(root, &["status", "--porcelain"]).unwrap().trim(), "?? b.txt");
+        assert_eq!(git(root, &["status", "--porcelain"]).unwrap().trim(), "A  b.txt");
+    }
+
+    #[test]
+    fn staging_for_the_panel_holds_only_the_proposed_files() {
+        let dir = repo();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        commit(root, &[root.join("a.txt")], "Add a", false).unwrap();
+        std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(root, &["add", "b.txt"]).unwrap();
+        stage_only(root, &[root.join("a.txt")]).unwrap();
+        assert_eq!(git(root, &["diff", "--cached", "--name-only"]).unwrap().trim(), "a.txt");
+    }
+
+    #[test]
+    fn signs_off_as_the_user() {
+        let dir = repo();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let (_, message) = commit(root, &[root.join("a.txt")], "Add a", true).unwrap();
+        assert_eq!(message, "Add a\n\nSigned-off-by: t <t@t>");
     }
 
     #[test]
@@ -174,7 +215,7 @@ mod tests {
         let dir = repo();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        commit(&root, &[root.join("a.txt")], "Add a").unwrap();
+        commit(&root, &[root.join("a.txt")], "Add a", false).unwrap();
         assert!(resolve_files(&root, &[]).is_err(), "nothing to commit");
 
         std::fs::remove_file(root.join("a.txt")).unwrap();
@@ -186,14 +227,14 @@ mod tests {
         assert_eq!(resolve_files(&root, &["src/x.rs".into()]).unwrap(), vec![root.join("src/x.rs")]);
 
         // Deletions commit too.
-        let (sha, _) = commit(&root, &files, "Replace a").unwrap();
+        let (sha, _) = commit(&root, &files, "Replace a", false).unwrap();
         assert_eq!(git(&root, &["show", "--name-status", "--format=", &sha]).unwrap().trim(), "D\ta.txt\nA\tsrc/new file.rs");
     }
 
     #[test]
     fn reports_failures() {
         let dir = repo();
-        let err = commit(dir.path(), &[dir.path().join("missing.txt")], "Nope").unwrap_err();
+        let err = commit(dir.path(), &[dir.path().join("missing.txt")], "Nope", false).unwrap_err();
         assert!(format!("{err:#}").contains("missing.txt"), "{err:#}");
     }
 }

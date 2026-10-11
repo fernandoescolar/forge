@@ -164,7 +164,10 @@ pub fn parse(text: &str) -> Result<AgentsConfig> {
 }
 
 /// npm packages that were renamed upstream; old names stop receiving fixes.
-const RENAMED_PACKAGES: &[(&str, &str)] = &[("@zed-industries/claude-code-acp", "@agentclientprotocol/claude-agent-acp")];
+const RENAMED_PACKAGES: &[(&str, &str)] = &[
+    ("@zed-industries/claude-code-acp", "@agentclientprotocol/claude-agent-acp"),
+    ("@zed-industries/codex-acp", "@agentclientprotocol/codex-acp"),
+];
 
 fn migrate(agents: &mut [AgentSpec]) {
     for agent in agents {
@@ -205,6 +208,8 @@ mod tests {
     fn default_agents_parse() {
         let config = super::parse(super::DEFAULT_AGENTS).unwrap();
         assert!(config.agents.iter().any(|a| a.id == "claude"));
+        // The shipped file needs no migration (it would warn on every launch).
+        assert!(!super::RENAMED_PACKAGES.iter().any(|(old, _)| super::DEFAULT_AGENTS.contains(old)));
         assert!(config.review_writes);
         assert!(!super::parse(r#"{"agents": [], "review_writes": false}"#).unwrap().review_writes);
         let with_mcp = super::parse(r#"{"agents": [], "mcp_servers": [{"name": "gh", "command": "gh-mcp", "env": {"TOKEN": "t"}}]}"#).unwrap();

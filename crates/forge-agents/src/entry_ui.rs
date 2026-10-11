@@ -133,9 +133,10 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                         .items_start()
                         .child(if waiting { Icon::new(IconName::Warning).size(IconSize::Small).color(Color::Warning) } else { Icon::new(icon).size(IconSize::Small).color(color) })
                         .child(wrapping(Label::new(title.clone()).size(LabelSize::Small)))
-                        .when_some(command.clone(), |el, c| el.child(div().flex_none().max_w(px(320.)).child(Label::new(c).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx).truncate())))
                         .when_some((!kind.is_empty()).then(|| kind.clone()), |el, k| el.child(div().flex_none().child(Label::new(k).size(LabelSize::XSmall).color(Color::Muted)))),
                 )
+                // The command on its own line under what it is for, whole.
+                .when_some(command.clone(), |el, c| el.child(div().pl_6().child(wrapping(Label::new(c).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx)))))
                 .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx)))
                 .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
                 .children(diffs.iter().chain(permission_diffs).map(|d| render_diff(thread, handle, d, cx)))
@@ -229,7 +230,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                 .child(status)
                 .into_any_element()
         }
-        Entry::Commit { message, files, origin, state, .. } => render_commit(thread, handle, ix, message, files, *origin, state, cx),
+        Entry::Commit { message, files, signoff, signer, origin, state, .. } => render_commit(thread, handle, ix, message, files, (*signoff, signer.as_deref()), *origin, state, cx),
         Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
         Entry::ExtensionTool { tool, args, state, .. } => render_extension_tool(handle, ix, tool, args, state, cx),
@@ -326,9 +327,10 @@ pub(crate) fn render_permission_answer(handle: &WeakEntity<Thread>, request_id: 
     row.into_any_element()
 }
 
-/// A commit the agent proposes: its message and files, and how the user makes it.
+/// A commit the agent proposes: its message and files, whether it is signed off (and as
+/// whom), and how the user makes it.
 #[allow(clippy::too_many_arguments)]
-fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, message: &str, files: &[PathBuf], origin: crate::commit_proposal::Origin, state: &crate::commit_proposal::CommitState, cx: &App) -> AnyElement {
+fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, message: &str, files: &[PathBuf], (signoff, signer): (bool, Option<&str>), origin: crate::commit_proposal::Origin, state: &crate::commit_proposal::CommitState, cx: &App) -> AnyElement {
     use crate::commit_proposal::{CommitState, Origin, short};
     let colors = cx.theme().colors().clone();
     let root = thread.root().clone();
@@ -382,6 +384,20 @@ fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, messag
         _ if message.trim().is_empty() => "(no message: write one in the Git panel)".to_string(),
         _ => message.to_string(),
     };
+    // In the Git panel, its own Signoff toggle decides.
+    let signoff_row = matches!(state, CommitState::Waiting | CommitState::Failed(_)).then(|| {
+        ui::Checkbox::new(("commit-signoff", ix), ui::ToggleState::from(signoff))
+            .label(match signer {
+                Some(signer) => format!("Sign off (Signed-off-by: {signer})"),
+                None => "Sign off (Signed-off-by: you)".to_string(),
+            })
+            .on_click({
+                let handle = handle.clone();
+                move |_, _, cx| {
+                    handle.update(cx, |t, cx| t.toggle_commit_signoff(ix, cx)).ok();
+                }
+            })
+    });
     v_flex()
         .gap_1()
         .p_2()
@@ -392,6 +408,7 @@ fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, messag
         .child(h_flex().gap_2().child(Icon::new(IconName::GitCommit).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted })).child(wrapping(Label::new(headline).size(LabelSize::Small))))
         .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(Label::new(shown_message).size(LabelSize::Small).buffer_font(cx)))
         .child(v_flex().gap_0p5().children(file_rows))
+        .children(signoff_row)
         .when_some(if let CommitState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
             el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(format!("The commit failed: {e}")).size(LabelSize::Small).color(Color::Error))))
         })
@@ -778,7 +795,7 @@ pub(crate) fn render_diff(thread: &Thread, handle: &WeakEntity<Thread>, diff: &D
     let open_path = PathBuf::from(&diff.edit.path);
     let path = std::path::Path::new(&diff.edit.path);
     let shown = path.strip_prefix(thread.root()).unwrap_or(path).to_string_lossy().into_owned();
-    let (added, removed) = diff.edit.stats();
+    let (added, removed) = diff.stats;
     v_flex()
         .mt_1()
         .rounded_md()

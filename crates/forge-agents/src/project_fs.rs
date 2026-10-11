@@ -139,7 +139,7 @@ async fn read(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, pa
         })
         .map_err(|_| IdeError::Unavailable("project closed".into()))?;
     match open {
-        None if outside_ok => fs.load(path).await.map_err(|e| IdeError::Io(format!("{e:#}"))),
+        None if outside_ok || crate::forge_tools::in_temp(path) => fs.load(path).await.map_err(|e| IdeError::Io(format!("{e:#}"))),
         None => Err(IdeError::InvalidInput(format!("{} is outside the project", path.display()))),
         Some(Some(text)) => Ok(text),
         Some(None) => fs.load(path).await.map_err(|e| IdeError::Io(format!("{e:#}"))),
@@ -156,6 +156,14 @@ async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, p
         .map_err(|_| IdeError::Unavailable("project closed".into()))?
     {
         Some(target) => target,
+        // Scratch files (`/tmp`): straight to disk, not reviewed nor listed as the thread's
+        // changes to the project.
+        None if crate::forge_tools::in_temp(path) => {
+            if let Some(parent) = path.parent() {
+                fs.create_dir(parent).await.map_err(|e| IdeError::Io(format!("{e:#}")))?;
+            }
+            return apply(project, fs, path, None, text, cx).await;
+        }
         // Outside the project: written straight to disk, when allowed.
         None if permissions.may_touch_outside() => None,
         None => return Err(IdeError::InvalidInput(format!("{} is outside the project", path.display()))),
@@ -302,7 +310,13 @@ mod tests {
         assert_eq!(fs.load(Path::new("/root/open.txt")).await.unwrap(), "from agent");
         adapter.write_file(Path::new("closed.txt"), "new".into()).await.unwrap();
         assert_eq!(fs.load(Path::new("/root/closed.txt")).await.unwrap(), "new");
-        assert!(adapter.write_file(Path::new("/tmp/outside.txt"), "x".into()).await.is_err());
+        assert!(adapter.write_file(Path::new("/etc/outside.txt"), "x".into()).await.is_err());
+
+        // Scratch files in /tmp are the agent's to make, read and change.
+        adapter.write_file(Path::new("/tmp/forge-scratch/notes.txt"), "scratch".into()).await.unwrap();
+        assert_eq!(fs.load(Path::new("/tmp/forge-scratch/notes.txt")).await.unwrap(), "scratch");
+        assert_eq!(adapter.read_file(Path::new("/tmp/forge-scratch/notes.txt")).await.unwrap(), "scratch");
+        assert!(adapter.read_file(Path::new("/tmp/../etc/passwd")).await.is_err(), "`..` leaves /tmp");
     }
 
     /// The first write to a file reports the problems it had just before, also when it isn't

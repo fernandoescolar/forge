@@ -353,7 +353,7 @@ mod tests {
     use serde_json::json;
 
     fn pages() -> Vec<SettingsPage> {
-        let page = |id: &str, title: &str, file: SettingsFile, schema: Value, defaults: Value| SettingsPage { id: id.into(), title: title.into(), file, schema, keys: None, defaults, order: 0, actions: vec![] };
+        let page = |id: &str, title: &str, file: SettingsFile, schema: Value, defaults: Value| SettingsPage { id: id.into(), title: title.into(), file, schema, keys: None, defaults, order: 0, actions: vec![], project_keys: None };
         vec![
             page(
                 "editor",

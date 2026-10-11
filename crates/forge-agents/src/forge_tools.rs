@@ -23,16 +23,91 @@ pub(crate) struct Ide {
     pub workspace: WeakEntity<Workspace>,
     /// The thread's folder: relative paths start there, and paths are shown from it.
     pub root: PathBuf,
+    /// The workspace's folders (`root` first): paths outside them are refused…
+    pub roots: Vec<PathBuf>,
+    /// …unless the user lets agents touch files outside the workspace.
+    pub outside_ok: bool,
 }
 
 impl Ide {
-    pub fn resolve(&self, path: &str) -> PathBuf {
-        self.root.join(path)
+    /// `path` (relative to `root`, or absolute) as an absolute path, refused when it leaves
+    /// the workspace and the user doesn't allow that.
+    pub fn resolve(&self, path: &str) -> Result<PathBuf, String> {
+        let abs = normalize(&self.root.join(path));
+        if self.outside_ok || within(&abs, &self.roots) || in_temp(&abs) {
+            Ok(abs)
+        } else {
+            Err(format!("{path} is outside the project: ask the user if you need it (they can let agents reach files outside the workspace in Settings › Agents). For scratch files, use /tmp."))
+        }
     }
 
     pub fn show(&self, path: &Path) -> String {
         path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
     }
+}
+
+/// `path` without `.` and `..` (without touching the disk): `/p/a/../b` is `/p/b`.
+pub(crate) fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `path` (absolute, normalized) is in one of `roots`.
+pub(crate) fn within(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(normalize(root)))
+}
+
+/// The system's folders for temporary files, as they really are: the user's (`$TMPDIR`;
+/// `%TEMP%` on Windows) and `/tmp` (which on macOS is `/private/tmp`).
+fn temp_dirs() -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut dirs = vec![std::env::temp_dir()];
+        if cfg!(unix) {
+            dirs.push(PathBuf::from("/tmp"));
+        }
+        let mut dirs: Vec<PathBuf> = dirs.iter().filter_map(|d| std::fs::canonicalize(d).ok()).filter(|d| d.parent().is_some()).collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    })
+}
+
+/// Where `path` (absolute) really is: the deepest part of it that exists with its links
+/// followed (on Windows also long names and the `\\?\` form), and the rest.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let path = normalize(path);
+    path.ancestors().find_map(|a| Some(std::fs::canonicalize(a).ok()?.join(path.strip_prefix(a).ok()?)))
+}
+
+/// `path` is `dir` or below it; on Windows (`windows`) whatever the case.
+fn under(path: &Path, dir: &Path, windows: bool) -> bool {
+    if windows {
+        let (path, dir) = (path.to_string_lossy().to_lowercase(), dir.to_string_lossy().to_lowercase());
+        let dir = dir.trim_end_matches(['\\', '/']);
+        path == dir || path.starts_with(&format!("{dir}\\"))
+    } else {
+        path.starts_with(dir)
+    }
+}
+
+/// `path` (absolute) is in a folder for temporary files, where agents work as in the
+/// project: scratch files, scripts they write and run. Judged by where it really is, so a
+/// link in there that leads elsewhere doesn't count.
+pub(crate) fn in_temp(path: &Path) -> bool {
+    real_path(path).is_some_and(|real| temp_dirs().iter().any(|dir| under(&real, dir, cfg!(windows))))
 }
 
 pub(crate) fn str_arg(args: &Value, key: &str) -> Option<String> {
@@ -54,7 +129,7 @@ pub(crate) fn column_of(line: &str, symbol: &str) -> Option<usize> {
     })
 }
 
-async fn open(ide: &Ide, path: &Path, cx: &mut AsyncWindowContext) -> Result<Entity<Buffer>, String> {
+pub(crate) async fn open(ide: &Ide, path: &Path, cx: &mut AsyncWindowContext) -> Result<Entity<Buffer>, String> {
     let task = ide.project.update(cx, |p, cx| p.open_local_buffer(path, cx)).map_err(|_| "The project is closed.".to_string())?;
     task.await.map_err(|e| format!("Can't open {}: {e:#}", ide.show(path)))
 }
@@ -64,7 +139,7 @@ pub(crate) async fn symbol_at(ide: &Ide, args: &Value, cx: &mut AsyncWindowConte
     let path = str_arg(args, "path").ok_or("`path` is missing.")?;
     let line = line_arg(args, "line").ok_or("`line` (1-based) is missing.")?;
     let symbol = str_arg(args, "symbol").ok_or("`symbol` is missing.")?;
-    let buffer = open(ide, &ide.resolve(&path), cx).await?;
+    let buffer = open(ide, &ide.resolve(&path)?, cx).await?;
     let text = cx.update(|_, cx| {
         let snapshot = buffer.read(cx).snapshot();
         let row = line - 1;
@@ -125,7 +200,7 @@ pub(crate) async fn diagnostics(ide: Ide, args: Value, changed: &[PathBuf], cx: 
         Some("warning") => !error,
         _ => true,
     };
-    let within = str_arg(&args, "path").map(|p| ide.resolve(&p));
+    let within = str_arg(&args, "path").map(|p| ide.resolve(&p)).transpose()?;
     let mut files: Vec<PathBuf> = if only_changed {
         changed.to_vec()
     } else if within.as_ref().is_some_and(|p| p.is_file()) {
@@ -175,7 +250,7 @@ pub(crate) async fn diagnostics(ide: Ide, args: Value, changed: &[PathBuf], cx: 
 /// the agent first changed it (by message, as lines move).
 pub(crate) async fn check_file(ide: Ide, args: Value, changed: &[PathBuf], baseline: &std::collections::HashMap<PathBuf, Vec<crate::verify::Problem>>, cx: &mut AsyncWindowContext) -> ToolReply {
     let files: Vec<PathBuf> = match str_arg(&args, "path") {
-        Some(path) => vec![ide.resolve(&path)],
+        Some(path) => vec![ide.resolve(&path)?],
         None => changed.to_vec(),
     };
     if files.is_empty() {
@@ -220,7 +295,7 @@ pub(crate) async fn check_file(ide: Ide, args: Value, changed: &[PathBuf], basel
 /// Opens `path` in the editor at `line` (to `end_line`), selected, for the user to look at.
 pub(crate) async fn show_file(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
-    let abs = ide.resolve(&path);
+    let abs = ide.resolve(&path)?;
     let start = line_arg(&args, "line").unwrap_or(1);
     let end = line_arg(&args, "end_line").unwrap_or(start).max(start);
     let open = ide
@@ -302,7 +377,7 @@ async fn lines_at(ide: &Ide, args: &Value, cx: &mut AsyncWindowContext) -> Resul
     let path = str_arg(args, "path").ok_or("`path` is missing.")?;
     let line = line_arg(args, "line").ok_or("`line` (1-based) is missing.")?;
     let end = line_arg(args, "end_line").unwrap_or(line).max(line);
-    let buffer = open(ide, &ide.resolve(&path), cx).await?;
+    let buffer = open(ide, &ide.resolve(&path)?, cx).await?;
     let range = cx
         .update(|_, cx| {
             let snapshot = buffer.read(cx).snapshot();
@@ -365,7 +440,7 @@ pub(crate) async fn edit_plan(name: &str, ide: &Ide, args: &Value, cx: &mut Asyn
         }
         "format_file" => {
             let path = str_arg(args, "path").ok_or("`path` is missing.")?;
-            let abs = ide.resolve(&path);
+            let abs = ide.resolve(&path)?;
             open(ide, &abs, cx).await?;
             Ok(EditPlan { kind: EditKind::Format, args: args.clone(), places: None, files: vec![abs] })
         }
@@ -464,7 +539,7 @@ pub(crate) async fn type_definition(ide: Ide, args: Value, cx: &mut AsyncWindowC
 /// A file's outline: its classes, functions, methods… nested, with their lines.
 pub(crate) async fn document_symbols(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
-    let buffer = open(&ide, &ide.resolve(&path), cx).await?;
+    let buffer = open(&ide, &ide.resolve(&path)?, cx).await?;
     let task = ide.project.update(cx, |p, cx| p.document_symbols(&buffer, cx)).map_err(|_| closed())?;
     let symbols = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?;
     if symbols.is_empty() {
@@ -640,7 +715,7 @@ pub(crate) fn select_tests(projects: &[forge_tests::discovery::TestProject], pat
 /// reports how they went: counts, and each failure with its place and message.
 pub(crate) async fn run_tests(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     use forge_tests::{TestPanel, runner::Scope, trx::Outcome};
-    let path = str_arg(&args, "path").map(|p| ide.resolve(&p));
+    let path = str_arg(&args, "path").map(|p| ide.resolve(&p)).transpose()?;
     let name = str_arg(&args, "name");
     let panel = ide
         .workspace
@@ -812,7 +887,7 @@ const BODY_BYTES: usize = 8_000;
 pub(crate) async fn http_request(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let receiver = match str_arg(&args, "path") {
         Some(path) => {
-            let file = ide.resolve(&path);
+            let file = ide.resolve(&path)?;
             let line = line_arg(&args, "line").ok_or("`line` (1-based) of the request in the .http file is missing.")?;
             ide.workspace.update_in(cx, |ws, window, cx| forge_http::send_request_at(ws, &file, line - 1, window, cx)).map_err(|_| "The window is closed.".to_string())?
         }
@@ -939,6 +1014,42 @@ mod tests {
         assert_eq!(column_of("fn parse_args() {}", "parse_args"), Some(3));
         assert_eq!(column_of("subtotal", "total"), None);
         assert_eq!(column_of("    self.total()", "total"), Some(9));
+    }
+
+    #[test]
+    fn windows_paths_compare_whatever_the_case() {
+        let temp = Path::new(r"\\?\C:\Users\Ana\AppData\Local\Temp");
+        assert!(under(Path::new(r"\\?\c:\users\ana\appdata\local\temp\x.ps1"), temp, true));
+        assert!(under(Path::new(r"\\?\C:\Users\Ana\AppData\Local\Temp"), temp, true));
+        assert!(!under(Path::new(r"\\?\C:\Users\Ana\AppData\Local\Temporary\x"), temp, true), "a sibling with the same start");
+        assert!(!under(Path::new(r"\\?\C:\Windows\x"), temp, true));
+        assert!(!under(Path::new("/TMP/x"), Path::new("/tmp"), false), "elsewhere, case counts");
+    }
+
+    #[test]
+    fn keeps_paths_in_the_workspace() {
+        let ide = |outside_ok| Ide { project: WeakEntity::new_invalid(), workspace: WeakEntity::new_invalid(), root: "/p/app".into(), roots: vec!["/p/app".into(), "/p/lib".into()], outside_ok };
+        assert_eq!(normalize(Path::new("/p/app/./src/../x.rs")), PathBuf::from("/p/app/x.rs"));
+        assert_eq!(ide(false).resolve("src/a.rs"), Ok(PathBuf::from("/p/app/src/a.rs")));
+        assert_eq!(ide(false).resolve("../lib/b.rs"), Ok(PathBuf::from("/p/lib/b.rs")), "another folder of the workspace");
+        assert!(ide(false).resolve("../../etc/passwd").is_err());
+        assert!(ide(false).resolve("/etc/passwd").is_err());
+        assert!(ide(false).resolve("/p/app/../secret").is_err());
+        assert_eq!(ide(true).resolve("/etc/passwd"), Ok(PathBuf::from("/etc/passwd")), "when the user allows it");
+
+        // Scratch files: the folders for temporary files are the agent's too…
+        let scratch = std::env::temp_dir().join("forge-scratch.sh");
+        assert_eq!(ide(false).resolve(&scratch.to_string_lossy()), Ok(normalize(&scratch)));
+        #[cfg(unix)]
+        {
+            assert!(ide(false).resolve("/tmp/notes.md").is_ok());
+            assert!(ide(false).resolve("/tmp/../etc/passwd").is_err());
+            // …but not where a link in there leads.
+            let dir = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink("/etc", dir.path().join("etc")).unwrap();
+            assert!(ide(false).resolve(&dir.path().join("etc/passwd").to_string_lossy()).is_err());
+            assert!(ide(false).resolve(&dir.path().join("new.txt").to_string_lossy()).is_ok());
+        }
     }
 
     #[test]

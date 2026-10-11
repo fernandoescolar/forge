@@ -127,6 +127,14 @@ impl Peer {
         }
     }
 
+    /// Closes the writing side (the peer reads end of file, which tells a child process
+    /// to exit); later writes go nowhere. Replies still arrive until the peer closes too.
+    pub async fn close_writer(&self) {
+        let mut w = self.writer.lock().await;
+        let _ = w.flush().await;
+        *w = Box::new(tokio::io::sink());
+    }
+
     pub async fn notify(&self, method: &str, params: Value) -> IdeResult<()> {
         self.write(&json!({"jsonrpc":"2.0","method":method,"params":params})).await
     }

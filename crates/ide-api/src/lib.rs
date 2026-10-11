@@ -62,6 +62,9 @@ pub enum AgentEvent {
     /// The agent asked the user to approve a tool call (`session/request_permission`).
     /// Answer it with [`AgentService::respond_permission`].
     PermissionRequested { agent_id: String, request_id: String, params: Value },
+    /// The agent stopped waiting for a permission request without an answer (its turn was
+    /// cancelled, or nobody answered in time): its card can close.
+    PermissionClosed { agent_id: String, request_id: String, reason: String },
     /// The agent created a terminal (`terminal/create`); tool calls reference it by id.
     TerminalCreated { agent_id: String, terminal_id: String },
     Stderr { agent_id: String, line: String },

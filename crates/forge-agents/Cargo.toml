@@ -10,6 +10,7 @@ description = "Native ACP agent panel for Forge"
 ignore = "0.4.22"
 askpass = { path = "../../vendor/zed/crates/askpass" }
 base64 = "0.22"
+forge-git = { path = "../forge-git" }
 forge-http = { path = "../forge-http" }
 forge-run = { path = "../forge-run" }
 forge-tests = { path = "../forge-tests" }
@@ -25,6 +26,7 @@ editor = { path = "../../vendor/zed/crates/editor" }
 file_icons = { path = "../../vendor/zed/crates/file_icons" }
 fs = { path = "../../vendor/zed/crates/fs" }
 futures = "0.3"
+regex = "1"
 git = { path = "../../vendor/zed/crates/git" }
 git_ui = { path = "../../vendor/zed/crates/git_ui" }
 git_ui_core = { path = "../../vendor/zed/crates/git_ui_core" }

@@ -1,17 +1,22 @@
 //! The conversation as turns: your message, then the agent's part (its answer, thoughts and
-//! a compact list of what it did), then a summary of the files that turn changed. Long
+//! a compact list of what it did). The files changed so far are listed once, above the
+//! input, with undoing the last turn (`render_changes`). Long
 //! tool output stays folded unless it matters now (running, failed, waiting for you).
+//!
+//! Each message, answer, thought and tool call is a row of its own, so the list paints only
+//! what is on screen: a turn of hundreds of tool calls costs a repaint no more than a short
+//! one (a row per turn made every keystroke repaint the whole turn).
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px};
 use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
-use ui::{Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, CommonAnimationExt as _, Icon, IconButton, IconName, IconSize, Label, LabelCommon as _, LabelSize, Tooltip, h_flex, v_flex};
+use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize, Label, LabelCommon as _, LabelSize, h_flex, v_flex};
 
 use super::ThreadView;
-use crate::diff::{DiffView, Edit};
+use crate::diff::DiffView;
 use crate::entry_ui::{render_diff, render_entry, render_permission_answer};
 use crate::thread::{Entry, Status};
 
@@ -34,49 +39,91 @@ pub(crate) fn spinner(id: impl Into<gpui::ElementId>, size: IconSize, color: Col
     Icon::new(IconName::LoadCircle).size(size).color(color).with_keyed_rotate_animation(id, 1).into_any_element()
 }
 
-/// Where each turn starts: entries before the first message, then one range per message.
-fn turns(entries: &[Entry]) -> (std::ops::Range<usize>, Vec<std::ops::Range<usize>>) {
-    let starts: Vec<usize> = entries.iter().enumerate().filter(|(_, e)| matches!(e, Entry::User(..))).map(|(ix, _)| ix).collect();
-    let preamble = 0..starts.first().copied().unwrap_or(entries.len());
-    let turns = starts.iter().enumerate().map(|(i, start)| *start..starts.get(i + 1).copied().unwrap_or(entries.len())).collect();
-    (preamble, turns)
-}
-
-/// A row of the conversation list: an entry before the first message, or a turn (its
-/// entries, and whether it is the latest).
-#[derive(Clone)]
-enum Row {
+/// A row of the conversation list.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Row {
+    /// An entry before the first message.
+    Preamble(usize),
+    /// Your message, starting a turn.
+    User(usize),
+    /// The agent's name over its part of the turn that `user` starts (`last`: the latest turn).
+    Agent { user: usize, last: bool },
+    /// A tool call, in a run of consecutive ones drawn as one box.
+    Tool { ix: usize, first: bool, last: bool },
+    /// A thought; `latest`: the last entry of the latest turn (open while the agent thinks).
+    Thought { ix: usize, latest: bool },
+    /// Anything else the agent's part shows (answers, cards).
     Entry(usize),
-    Turn(std::ops::Range<usize>, bool),
 }
 
-fn rows(entries: &[Entry]) -> Vec<Row> {
-    let (preamble, turns) = turns(entries);
-    let last = turns.len().saturating_sub(1);
-    preamble.map(Row::Entry).chain(turns.into_iter().enumerate().map(|(n, turn)| Row::Turn(turn, n == last))).collect()
-}
-
-/// How many rows the conversation list has.
-pub(super) fn row_count(entries: &[Entry]) -> usize {
-    let (preamble, turns) = turns(entries);
-    preamble.len() + turns.len()
+/// The conversation's rows, and the permission request (entry) shown in each tool call's
+/// row, by tool call id. `busy`: the agent is working on the latest turn.
+pub(super) fn rows(entries: &[Entry], busy: bool) -> (Vec<Row>, HashMap<String, usize>) {
+    let tool_ids: HashSet<&str> = entries.iter().filter_map(|e| if let Entry::Tool { id, .. } = e { Some(id.as_str()) } else { None }).collect();
+    let mut permissions = HashMap::new();
+    for (ix, entry) in entries.iter().enumerate() {
+        if let Entry::Permission { tool_call_id: Some(tid), .. } = entry {
+            permissions.entry(tid.clone()).or_insert(ix);
+        }
+    }
+    let starts: Vec<usize> = entries.iter().enumerate().filter(|(_, e)| matches!(e, Entry::User(..))).map(|(ix, _)| ix).collect();
+    let mut rows: Vec<Row> = (0..starts.first().copied().unwrap_or(entries.len())).map(Row::Preamble).collect();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(entries.len());
+        let last = n + 1 == starts.len();
+        let mut parts: Vec<Row> = Vec::new();
+        for ix in start + 1..end {
+            match &entries[ix] {
+                Entry::Tool { .. } => parts.push(Row::Tool { ix, first: !matches!(parts.last(), Some(Row::Tool { .. })), last: false }),
+                // Shown in its tool call's row.
+                Entry::Permission { tool_call_id: Some(tid), .. } if tool_ids.contains(tid.as_str()) => {}
+                Entry::Thought(_) => parts.push(Row::Thought { ix, latest: last && ix + 1 == end }),
+                _ => parts.push(Row::Entry(ix)),
+            }
+        }
+        // A run of tool calls ends where something else starts, or with the turn.
+        for i in 0..parts.len() {
+            let next_is_tool = matches!(parts.get(i + 1), Some(Row::Tool { .. }));
+            if let Row::Tool { last: run_ends, .. } = &mut parts[i] {
+                *run_ends = !next_is_tool;
+            }
+        }
+        rows.push(Row::User(start));
+        if !parts.is_empty() || (last && busy) {
+            rows.push(Row::Agent { user: start, last });
+        }
+        rows.extend(parts);
+    }
+    (rows, permissions)
 }
 
 impl ThreadView {
     /// One row of the conversation, in the centred column. The list only asks for the
     /// rows on screen, so a long conversation costs no more to repaint than a short one.
     pub(super) fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let rows = rows(&self.thread.read(cx).entries);
-        let count = rows.len();
-        let element = match rows.get(ix).cloned() {
-            Some(Row::Entry(entry)) => {
-                let md = self.user_markdown(entry, cx);
+        let count = self.rows.len();
+        let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
+        let element = match &row {
+            Row::Preamble(entry) | Row::User(entry) => {
+                let md = self.user_markdown(*entry, cx);
                 let thread = self.thread.read(cx);
-                render_entry(thread, &self.thread.downgrade(), entry, &thread.entries[entry], md.as_ref(), window, cx)
+                render_entry(thread, &self.thread.downgrade(), *entry, &thread.entries[*entry], md.as_ref(), window, cx)
             }
-            Some(Row::Turn(turn, is_last)) => self.render_turn(turn, is_last, window, cx),
-            None => return div().into_any_element(),
+            Row::Agent { user, last } => self.render_agent_header(*user, *last, cx),
+            Row::Tool { ix, first, last } => self.render_tool(*ix, *first, *last, cx),
+            Row::Thought { ix, latest } => {
+                let Some(Entry::Thought(md)) = self.thread.read(cx).entries.get(*ix) else { return div().into_any_element() };
+                let live = *latest && self.thread.read(cx).status() == Status::Busy;
+                self.render_thought(*ix, md.clone(), live, window, cx)
+            }
+            Row::Entry(entry) => {
+                let thread = self.thread.read(cx);
+                render_entry(thread, &self.thread.downgrade(), *entry, &thread.entries[*entry], None, window, cx)
+            }
         };
+        // Room between turns, so each message and its answer read as one; the agent's part
+        // sits a little in from the message.
+        let in_agent_part = matches!(row, Row::Tool { .. } | Row::Thought { .. } | Row::Entry(_));
         h_flex()
             .w_full()
             .justify_center()
@@ -88,67 +135,27 @@ impl ThreadView {
                     .w_full()
                     .min_w_0()
                     .max_w(px(880.))
-                    .when(ix == 0, |el| el.pt_6())
-                    // Room between turns, so each message and its answer read as one.
-                    .map(|el| if ix + 1 == count { el.pb_6() } else { el.pb_8() })
+                    .map(|el| match &row {
+                        _ if ix == 0 => el.pt_6(),
+                        Row::Preamble(_) | Row::User(_) => el.pt_8(),
+                        Row::Agent { .. } => el.pt_3(),
+                        Row::Tool { first: false, .. } => el,
+                        _ => el.pt_2(),
+                    })
+                    .when(in_agent_part, |el| el.pl_1())
+                    .when(ix + 1 == count, |el| el.pb_6())
                     .child(element),
             )
             .into_any_element()
     }
 
-    fn render_turn(&mut self, turn: std::ops::Range<usize>, is_last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let user_md = self.user_markdown(turn.start, cx);
+    /// The agent's name, with what it is doing (and for how long) while it works, or how
+    /// long it worked.
+    fn render_agent_header(&mut self, user_ix: usize, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let thread = self.thread.read(cx);
-        let handle = self.thread.downgrade();
-        let user_ix = turn.start;
-        let working = is_last && thread.status() == Status::Busy;
+        let working = last && thread.status() == Status::Busy;
         // Not a clone of the checkpoint: it holds whole files.
         let timing = thread.turn_at(user_ix).map(|c| (c.started, c.duration));
-        let has_summary = thread.turn_at(user_ix).is_some_and(|c| c.duration.is_some() && !c.turn_files.is_empty());
-        let follow_terminal = self.follow_terminal(cx);
-        let user = render_entry(thread, &handle, user_ix, &thread.entries[user_ix], user_md.as_ref(), window, cx);
-
-        // The agent's part: answers and thoughts as they come, tool calls grouped.
-        enum Part {
-            Tools(Vec<usize>),
-            Thought(usize, gpui::Entity<markdown::Markdown>, bool),
-            Entry(usize),
-        }
-        let mut parts: Vec<Part> = Vec::new();
-        let last_ix = turn.end.saturating_sub(1);
-        for ix in turn.start + 1..turn.end {
-            let entry = &thread.entries[ix];
-            if matches!(entry, Entry::Tool { .. }) {
-                match parts.last_mut() {
-                    Some(Part::Tools(tools)) => tools.push(ix),
-                    _ => parts.push(Part::Tools(vec![ix])),
-                }
-                continue;
-            }
-            if let Entry::Permission { tool_call_id: Some(tid), .. } = entry {
-                // Shown in its tool call's row.
-                if thread.entries.iter().any(|e| matches!(e, Entry::Tool { id, .. } if id == tid)) {
-                    continue;
-                }
-            }
-            parts.push(match entry {
-                Entry::Thought(md) => Part::Thought(ix, md.clone(), working && ix == last_ix),
-                _ => Part::Entry(ix),
-            });
-        }
-        let mut items: Vec<AnyElement> = Vec::new();
-        for part in parts {
-            items.push(match part {
-                Part::Tools(ixs) => self.render_activity(ixs, follow_terminal.as_deref(), window, cx),
-                Part::Thought(ix, md, live) => self.render_thought(ix, md, live, window, cx),
-                Part::Entry(ix) => {
-                    let thread = self.thread.read(cx);
-                    render_entry(thread, &handle, ix, &thread.entries[ix], None, window, cx)
-                }
-            });
-        }
-
-        let thread = self.thread.read(cx);
         let state: AnyElement = if working {
             let (activity, waiting) = thread.activity().unwrap_or(("Working".into(), false));
             let elapsed = timing.map(|(started, _)| duration(started.elapsed())).unwrap_or_default();
@@ -165,20 +172,13 @@ impl ThreadView {
                 None => div().into_any_element(),
             }
         };
-        let agent_header = h_flex()
+        h_flex()
             .gap_2()
+            .pl_1()
             .min_w_0()
             .child(Icon::from_path("icons/forge_agents.svg").size(IconSize::Small).color(Color::Accent))
             .child(Label::new(thread.agent_label()).size(LabelSize::Small).color(Color::Default))
-            .child(div().flex_1().min_w_0().child(state));
-        let summary = has_summary.then(|| self.render_turn_changes(user_ix, window, cx));
-        let has_agent_part = !items.is_empty() || working;
-
-        v_flex()
-            .gap_3()
-            .child(user)
-            .when(has_agent_part, |el| el.child(v_flex().gap_2().pl_1().child(agent_header).children(items)))
-            .children(summary)
+            .child(div().flex_1().min_w_0().child(state))
             .into_any_element()
     }
 
@@ -187,7 +187,7 @@ impl ThreadView {
     fn render_thought(&mut self, ix: usize, md: gpui::Entity<markdown::Markdown>, live: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("thought-{ix}");
         let open = live != self.toggled.contains(&key);
-        let source = md.read(cx).source().to_string();
+        let source = md.read(cx).source();
         let first = source.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().trim_start_matches('#').trim().to_string();
         let colors = cx.theme().colors().clone();
         v_flex()
@@ -220,203 +220,88 @@ impl ThreadView {
         (self.follow_visible() && !self.follow_paused).then(|| self.thread.read(cx).running_terminal().map(|(id, _)| id)).flatten()
     }
 
-    /// Consecutive tool calls as one list: a line each, unfolding to their output, diffs
-    /// and questions.
-    fn render_activity(&mut self, ixs: Vec<usize>, follow_terminal: Option<&str>, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// A tool call: a line, unfolding to its output, diffs and question. Consecutive ones
+    /// read as one list in a box (`first` and `last` close it).
+    fn render_tool(&mut self, ix: usize, first: bool, last: bool, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(test)]
+        {
+            self.rendered_tools += 1;
+        }
+        let follow_terminal = self.follow_terminal(cx);
         let thread = self.thread.read(cx);
         let handle = self.thread.downgrade();
         let colors = cx.theme().colors().clone();
-        let mut rows = v_flex().py_0p5();
-        let count = ixs.len();
-        for (n, ix) in ixs.into_iter().enumerate() {
-            let Entry::Tool { id, title, kind, status, detail, terminal, diffs, command } = &thread.entries[ix] else { continue };
-            let permission = thread.entries.iter().find_map(|e| match e {
-                Entry::Permission { request_id, tool_call_id: Some(tid), options, resolved, diffs, .. } if tid == id => Some((request_id.clone(), options, resolved.clone(), diffs)),
-                _ => None,
-            });
-            let waiting = permission.as_ref().is_some_and(|(_, _, resolved, _)| resolved.is_none());
-            let running = is_running(status);
-            let failed = status == "failed";
-            let terminal_view = terminal.as_ref().and_then(|t| thread.terminal_view(t));
-            let in_follow = follow_terminal == Some(id.as_str());
-            let permission_diffs: Vec<&DiffView> = match &permission {
-                Some((_, _, _, pdiffs)) if diffs.is_empty() => pdiffs.iter().collect(),
-                _ => Vec::new(),
-            };
-            let has_body = detail.is_some() || terminal_view.is_some() || !diffs.is_empty() || !permission_diffs.is_empty() || permission.is_some();
-            let key = format!("tool-{id}");
-            // Open by default when it needs you or is worth watching.
-            let default_open = waiting || failed || (running && terminal_view.is_some());
-            let open = has_body && (default_open != self.toggled.contains(&key));
-            let (added, removed) = diffs.iter().chain(permission_diffs.iter().copied()).map(|d| d.edit.stats()).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
-            let status_icon = if waiting {
-                Icon::new(IconName::Warning).size(IconSize::Small).color(Color::Warning).into_any_element()
-            } else if running {
-                spinner(SharedString::from(format!("tool-spinner-{id}")), IconSize::Small, Color::Accent)
-            } else if failed {
-                Icon::new(IconName::XCircle).size(IconSize::Small).color(Color::Error).into_any_element()
-            } else {
-                Icon::new(tool_icon(kind)).size(IconSize::Small).color(Color::Muted).into_any_element()
-            };
-            let toggle_key = key.clone();
-            let row = h_flex()
-                .id(SharedString::from(key.clone()))
-                .gap_2()
-                .px_2()
-                .py_1()
-                .min_w_0()
-                .rounded_sm()
-                .when(has_body, |el| el.cursor_pointer().hover(|el| el.bg(colors.element_hover)))
-                .child(div().w_3().flex_none().when(has_body, |el| el.child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall).color(Color::Muted))))
-                .child(div().flex_none().child(status_icon))
-                .child(div().min_w_0().max_w(gpui::relative(0.6)).child(Label::new(title.clone()).size(LabelSize::Small).color(if running || waiting { Color::Default } else { Color::Muted }).truncate()))
-                // The command line next to the agent's description of it.
-                .child(div().flex_1().min_w_0().when_some(command.clone(), |el, c| el.child(Label::new(c).size(LabelSize::Small).color(Color::Muted).buffer_font(cx).truncate())))
-                .when(added + removed > 0, |el| {
-                    el.child(div().flex_none().child(Label::new(format!("+{added}")).size(LabelSize::Small).color(Color::Created)))
-                        .child(div().flex_none().child(Label::new(format!("−{removed}")).size(LabelSize::Small).color(Color::Deleted)))
-                })
-                .when(in_follow, |el| el.child(div().flex_none().child(Label::new("in the follow pane →").size(LabelSize::Small).color(Color::Muted))))
-                .when(has_body, |el| el.on_click(cx.listener(move |this, _, _, cx| this.toggle(&toggle_key, cx))));
-            let body = open.then(|| {
-                v_flex()
-                    .gap_1()
-                    .pl(px(36.))
-                    .pr_2()
-                    .pb_2()
-                    .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::Small).color(Color::Muted).buffer_font(cx)))
-                    .when_some(terminal_view.filter(|_| !in_follow), |el, view| el.child(div().rounded_sm().overflow_hidden().border_1().border_color(colors.border_variant).child(view)))
-                    .children(diffs.iter().chain(permission_diffs.iter().copied()).map(|d| render_diff(thread, &handle, d, cx)))
-                    .when_some(permission.clone(), |el, (request_id, options, resolved, _)| el.child(render_permission_answer(&handle, &request_id, &options, resolved.as_deref())))
-            });
-            rows = rows.child(v_flex().when(n > 0, |el| el.border_t_1().border_color(colors.border_variant)).child(row).children(body));
-        }
-        let _ = count;
-        v_flex().rounded_md().border_1().border_color(colors.border_variant).bg(colors.surface_background).child(rows).into_any_element()
-    }
-
-    /// The files a finished turn changed: a line each with its counts, unfolding to its
-    /// diff (from before the turn to after it); the whole turn opens in the review tab
-    /// (Keep / Undo on each change), and the turn or any of its files can be rolled back.
-    fn render_turn_changes(&mut self, user_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let thread = self.thread.read(cx);
-        let Some(turn) = thread.turn_at(user_ix) else { return div().into_any_element() };
-        let root = thread.root().clone();
-        let languages = thread.languages().clone();
-        let colors = cx.theme().colors().clone();
-        let (added, removed) = turn.turn_stats();
-        let count = turn.turn_files.len();
-        let all_undone = turn.turn_files.keys().all(|p| turn.undone.contains(p));
-        let review_paths: Vec<PathBuf> = turn.turn_files.keys().filter(|p| !turn.undone.contains(*p)).cloned().collect();
-        let header = h_flex()
-            .flex_wrap()
+        let Some(Entry::Tool { id, title, kind, status, detail, terminal, diffs, command }) = thread.entries.get(ix) else { return div().into_any_element() };
+        let permission = self.tool_permissions.get(id).and_then(|&p| match thread.entries.get(p) {
+            Some(Entry::Permission { request_id, options, resolved, diffs, .. }) => Some((request_id.clone(), options, resolved.clone(), diffs)),
+            _ => None,
+        });
+        let waiting = permission.as_ref().is_some_and(|(_, _, resolved, _)| resolved.is_none());
+        let running = is_running(status);
+        let failed = status == "failed";
+        let terminal_view = terminal.as_ref().and_then(|t| thread.terminal_view(t));
+        let in_follow = follow_terminal.as_deref() == Some(id.as_str());
+        let permission_diffs: Vec<&DiffView> = match &permission {
+            Some((_, _, _, pdiffs)) if diffs.is_empty() => pdiffs.iter().collect(),
+            _ => Vec::new(),
+        };
+        let has_body = detail.is_some() || terminal_view.is_some() || !diffs.is_empty() || !permission_diffs.is_empty() || permission.is_some();
+        let key = format!("tool-{id}");
+        // Open by default when it needs you or is worth watching.
+        let default_open = waiting || failed || (running && terminal_view.is_some());
+        let open = has_body && (default_open != self.toggled.contains(&key));
+        let (added, removed) = diffs.iter().chain(permission_diffs.iter().copied()).map(|d| d.stats).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
+        let status_icon = if waiting {
+            Icon::new(IconName::Warning).size(IconSize::Small).color(Color::Warning).into_any_element()
+        } else if running {
+            spinner(SharedString::from(format!("tool-spinner-{id}")), IconSize::Small, Color::Accent)
+        } else if failed {
+            Icon::new(IconName::XCircle).size(IconSize::Small).color(Color::Error).into_any_element()
+        } else {
+            Icon::new(tool_icon(kind)).size(IconSize::Small).color(Color::Muted).into_any_element()
+        };
+        let toggle_key = key.clone();
+        let line = h_flex()
+            .id(SharedString::from(key))
             .gap_2()
-            .px_3()
-            .py_1p5()
-            .child(Icon::new(IconName::FileDiff).size(IconSize::Small).color(if all_undone { Color::Muted } else { Color::Accent }))
-            .child(Label::new(format!("{count} file{} changed in this turn", if count == 1 { "" } else { "s" })).size(LabelSize::Small))
-            .child(Label::new(format!("+{added}")).size(LabelSize::Small).color(Color::Created))
-            .child(Label::new(format!("−{removed}")).size(LabelSize::Small).color(Color::Deleted))
-            .child(div().flex_1())
-            .map(|el| {
-                if all_undone {
-                    return el.child(Label::new("Undone").size(LabelSize::Small).color(Color::Muted));
-                }
-                el.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new(("turn-review", user_ix), "Review")
-                                .style(ButtonStyle::Subtle)
-                                .size(ButtonSize::Compact)
-                                .start_icon(Icon::new(IconName::Diff).size(IconSize::XSmall))
-                                .tooltip(Tooltip::text("This turn's files in the review tab beside the thread: keep or undo each change"))
-                                .on_click(cx.listener(move |this, _, window, cx| this.open_turn_review(user_ix, review_paths.clone(), window, cx))),
-                        )
-                        .child(
-                            Button::new(("turn-undo", user_ix), "Undo turn")
-                                .style(ButtonStyle::Subtle)
-                                .size(ButtonSize::Compact)
-                                .start_icon(Icon::new(IconName::Undo).size(IconSize::XSmall))
-                                .tooltip(Tooltip::text("Put this turn's files back as they were before it"))
-                                .on_click(cx.listener(move |this, _, window, cx| this.undo_turn(user_ix, None, window, cx))),
-                        ),
-                )
-            });
-        let mut list = v_flex();
-        for (n, (path, (before, after))) in turn.turn_files.iter().enumerate() {
-            let shown = path.strip_prefix(&root).unwrap_or(path);
-            let name = shown.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-            let dir = shown.parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty());
-            let (a, r) = crate::diff::line_stats(before.as_deref().unwrap_or_default(), after);
-            let undone = turn.undone.contains(path);
-            let key = (user_ix, path.clone());
-            let open = self.turn_diffs.contains_key(&key);
-            let icon = file_icons::FileIcons::get_icon(path, cx).map(Icon::from_path).unwrap_or_else(|| Icon::new(IconName::File));
-            let (toggle_key, toggle_languages) = (key.clone(), languages.clone());
-            let (open_path, undo_path) = (path.clone(), path.clone());
-            let name_color = if undone { Color::Muted } else if before.is_none() { Color::Created } else { Color::Default };
-            list = list.child(
-                v_flex()
-                    .border_t_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        h_flex()
-                            .id(("turn-file", user_ix * 1000 + n))
-                            .gap_2()
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(colors.element_hover))
-                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall).color(Color::Muted))
-                            .child(icon.size(IconSize::Small).color(Color::Muted))
-                            .child(Label::new(name).size(LabelSize::Small).color(name_color).when(undone, |l| l.strikethrough()))
-                            .children(dir.map(|d| div().min_w_0().flex_1().child(Label::new(d).size(LabelSize::Small).color(Color::Muted).truncate())))
-                            .when(before.is_none() && !undone, |el| el.child(Label::new("new").size(LabelSize::Small).color(Color::Created)))
-                            .when(undone, |el| el.child(Label::new("undone").size(LabelSize::Small).color(Color::Muted)))
-                            .child(Label::new(format!("+{a}")).size(LabelSize::Small).color(Color::Created))
-                            .child(Label::new(format!("−{r}")).size(LabelSize::Small).color(Color::Deleted))
-                            .child(
-                                IconButton::new(("turn-file-open", user_ix * 1000 + n), IconName::ArrowUpRight)
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text("Open the file"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.open_file(open_path.clone(), window, cx);
-                                    })),
-                            )
-                            .when(!undone, |el| {
-                                el.child(
-                                    IconButton::new(("turn-file-undo", user_ix * 1000 + n), IconName::Undo)
-                                        .icon_size(IconSize::XSmall)
-                                        .tooltip(Tooltip::text(if before.is_none() { "Undo: delete the file this turn created" } else { "Undo: back to before this turn" }))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.undo_turn(user_ix, Some(undo_path.clone()), window, cx);
-                                        })),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.turn_diffs.remove(&toggle_key).is_none() {
-                                    let (ix, path) = &toggle_key;
-                                    let edit = this.thread.read(cx).turn_at(*ix).and_then(|t| t.turn_files.get(path)).map(|(before, after)| Edit {
-                                        path: path.to_string_lossy().into_owned(),
-                                        old_text: before.clone(),
-                                        new_text: after.clone(),
-                                    });
-                                    if let Some(edit) = edit {
-                                        let view = DiffView::new(edit, toggle_languages.clone(), window, cx);
-                                        this.turn_diffs.insert(toggle_key.clone(), view);
-                                    }
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .when_some(self.turn_diffs.get(&key), |el, view| el.child(div().px_3().pb_2().child(render_diff(thread, &self.thread.downgrade(), view, cx)))),
-            );
-        }
-        let _ = window;
-        v_flex().rounded_md().border_1().border_color(colors.border).bg(colors.surface_background).child(header).child(list).into_any_element()
+            .px_2()
+            .py_1()
+            .min_w_0()
+            .rounded_sm()
+            .when(has_body, |el| el.cursor_pointer().hover(|el| el.bg(colors.element_hover)))
+            .child(div().w_3().flex_none().when(has_body, |el| el.child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall).color(Color::Muted))))
+            .child(div().flex_none().child(status_icon))
+            .child(div().min_w_0().max_w(gpui::relative(0.6)).child(Label::new(title.clone()).size(LabelSize::Small).color(if running || waiting { Color::Default } else { Color::Muted }).truncate()))
+            // The command line next to the agent's description of it.
+            .child(div().flex_1().min_w_0().when_some(command.clone(), |el, c| el.child(Label::new(c).size(LabelSize::Small).color(Color::Muted).buffer_font(cx).truncate())))
+            .when(added + removed > 0, |el| {
+                el.child(div().flex_none().child(Label::new(format!("+{added}")).size(LabelSize::Small).color(Color::Created)))
+                    .child(div().flex_none().child(Label::new(format!("−{removed}")).size(LabelSize::Small).color(Color::Deleted)))
+            })
+            .when(in_follow, |el| el.child(div().flex_none().child(Label::new("in the follow pane →").size(LabelSize::Small).color(Color::Muted))))
+            .when(has_body, |el| el.on_click(cx.listener(move |this, _, _, cx| this.toggle(&toggle_key, cx))));
+        let body = open.then(|| {
+            v_flex()
+                .gap_1()
+                .pl(px(36.))
+                .pr_2()
+                .pb_2()
+                .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::Small).color(Color::Muted).buffer_font(cx)))
+                .when_some(terminal_view.filter(|_| !in_follow), |el, view| el.child(div().rounded_sm().overflow_hidden().border_1().border_color(colors.border_variant).child(view)))
+                .children(diffs.iter().chain(permission_diffs.iter().copied()).map(|d| render_diff(thread, &handle, d, cx)))
+                .when_some(permission.clone(), |el, (request_id, options, resolved, _)| el.child(render_permission_answer(&handle, &request_id, &options, resolved.as_deref())))
+        });
+        // The box around the run: its top edge on the first, a line between the others.
+        v_flex()
+            .border_x_1()
+            .border_t_1()
+            .border_color(colors.border_variant)
+            .bg(colors.surface_background)
+            .when(first, |el| el.rounded_t_md().pt_0p5())
+            .when(last, |el| el.border_b_1().rounded_b_md().pb_0p5())
+            .child(line)
+            .children(body)
+            .into_any_element()
     }
 }
 
@@ -444,5 +329,46 @@ mod tests {
         assert_eq!(duration(std::time::Duration::from_secs(9)), "9s");
         assert_eq!(duration(std::time::Duration::from_secs(65)), "1m 05s");
         assert_eq!(duration(std::time::Duration::from_secs(3720)), "1h 02m");
+    }
+
+    fn tool(id: &str) -> Entry {
+        Entry::Tool { id: id.into(), title: id.into(), kind: "read".into(), status: "completed".into(), detail: None, terminal: None, diffs: vec![], command: None }
+    }
+
+    fn permission(tool: &str) -> Entry {
+        Entry::Permission { request_id: format!("r-{tool}"), tool_call_id: Some(tool.into()), title: String::new(), options: vec![], resolved: None, diffs: vec![] }
+    }
+
+    #[test]
+    fn a_row_for_each_message_tool_call_and_answer() {
+        let entries = vec![
+            Entry::System("connected".into(), Color::Muted),
+            Entry::User("hi".into(), vec![]),
+            tool("a"),
+            permission("a"),
+            tool("b"),
+            Entry::System("an answer".into(), Color::Muted),
+            tool("c"),
+            Entry::User("again".into(), vec![]),
+        ];
+        let (rows, permissions) = rows(&entries, false);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Preamble(0),
+                Row::User(1),
+                Row::Agent { user: 1, last: false },
+                // The permission request shows in its tool call's row, not in the run.
+                Row::Tool { ix: 2, first: true, last: false },
+                Row::Tool { ix: 4, first: false, last: true },
+                Row::Entry(5),
+                Row::Tool { ix: 6, first: true, last: true },
+                // Nothing from the agent yet, and it isn't working: no header.
+                Row::User(7),
+            ]
+        );
+        assert_eq!(permissions.get("a"), Some(&3));
+        // Working on the latest turn: its header shows, with what it is doing.
+        assert_eq!(super::rows(&entries, true).0.last(), Some(&Row::Agent { user: 7, last: true }));
     }
 }

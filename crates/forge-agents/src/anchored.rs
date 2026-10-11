@@ -488,7 +488,7 @@ impl Render for AnchoredCard {
         let is_waiting = t.entries.iter().any(|e| matches!(e, Entry::Permission { resolved: None, .. } | Entry::Review { reply: Some(_), .. }));
         // The files the agent changed: keep or undo them from here too.
         let changes_row = (!t.changes.is_empty()).then(|| {
-            let (added, removed) = t.changes.iter().map(|c| c.stats()).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
+            let (added, removed) = t.changes.iter().map(|c| t.change_stats(c)).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
             let count = t.changes.len();
             let (keep, undo) = (handle.clone(), handle.clone());
             h_flex()

@@ -278,8 +278,14 @@ pub struct ThreadView {
     input: Entity<Editor>,
     /// What the active-file chip showed last: repaint only when it changes.
     active_shown: Option<(std::path::PathBuf, Option<std::ops::Range<u32>>)>,
-    /// The conversation, a row per turn (see `turns::render_row`).
+    /// The conversation: a row per message, answer and tool call (see `turns::render_row`),
+    /// worked out when the thread changes rather than on every repaint.
     list: ListState,
+    rows: Vec<turns::Row>,
+    /// The permission request each tool call's row shows (its entry), by tool call id.
+    tool_permissions: HashMap<String, usize>,
+    /// The entries and status `rows` was worked out from.
+    rows_from: (usize, bool),
     focus_handle: FocusHandle,
     include_active: bool,
     /// Images pasted or dropped in the composer, sent with the next message.
@@ -296,12 +302,13 @@ pub struct ThreadView {
     changes_open: bool,
     /// Tool calls and thoughts the user folded or unfolded against their default.
     toggled: HashSet<String>,
-    /// Turn file diffs unfolded in the conversation, by message and file.
-    turn_diffs: HashMap<(usize, std::path::PathBuf), crate::diff::DiffView>,
     /// The user's messages as Markdown (by entry, with the text they were made from).
     user_markdown: HashMap<usize, (String, Entity<markdown::Markdown>)>,
     /// Repaints the working time while the agent works.
     _ticker: Option<Task<()>>,
+    /// Tool calls rendered, for tests to see what a repaint costs.
+    #[cfg(test)]
+    rendered_tools: usize,
     _thread_subscription: Subscription,
     _subscriptions: Vec<Subscription>,
 }
@@ -370,6 +377,9 @@ impl ThreadView {
                 list.set_follow_mode(FollowMode::Tail);
                 list
             },
+            rows: Vec::new(),
+            tool_permissions: HashMap::new(),
+            rows_from: (0, false),
             focus_handle: cx.focus_handle(),
             include_active: true,
             images: Vec::new(),
@@ -380,8 +390,9 @@ impl ThreadView {
             follow_hidden: false,
             changes_open: true,
             toggled: HashSet::new(),
-            turn_diffs: HashMap::new(),
             _ticker: None,
+            #[cfg(test)]
+            rendered_tools: 0,
             _thread_subscription: thread_subscription,
             _subscriptions: subscriptions,
         }
@@ -390,10 +401,11 @@ impl ThreadView {
     fn subscribe_thread(thread: &Entity<Thread>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe_in(thread, window, |this, thread, event, window, cx| match event {
             ThreadEvent::Updated => {
+                // Also when no entry came: the agent stopped or started working.
+                this.sync_list(cx);
                 let count = thread.read(cx).entries.len();
                 if count != this.seen_entries {
                     this.seen_entries = count;
-                    this.sync_list(cx);
                     this.list.scroll_to_end();
                 }
                 this.sync_follow(window, cx);
@@ -447,21 +459,6 @@ impl ThreadView {
 
     fn follow_visible(&self) -> bool {
         self.follow.is_some() && !self.follow_hidden
-    }
-
-    /// Opens `path` beside the thread.
-    fn open_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else { return };
-        workspace.update(cx, |ws, cx| ws.open_abs_path(path, workspace::OpenOptions::default(), window, cx).detach_and_log_err(cx));
-    }
-
-    /// A tab beside the thread with `paths` against how they were before the turn that
-    /// started at the message `user_ix`.
-    fn open_turn_review(&mut self, user_ix: usize, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(turn) = self.thread.read(cx).turn_at(user_ix).cloned() else { return };
-        let baselines: Vec<(std::path::PathBuf, String)> = paths.into_iter().filter_map(|p| turn.turn_files.get(&p).map(|(before, _)| (p.clone(), before.clone().unwrap_or_default()))).collect();
-        let title = format!("Changes · turn {}", self.thread.read(cx).checkpoints.iter().position(|c| c.entry == user_ix).map(|n| n + 1).unwrap_or(1));
-        self.open_diffs(baselines, None, title, window, cx);
     }
 
     /// Rolls back the turn that started at the message `user_ix` (only `path` if given),
@@ -574,7 +571,8 @@ impl ThreadView {
     /// kept or undone; or all at once.
     fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Not the files' contents: this runs on every repaint, keystrokes included.
-        let changes: Vec<(std::path::PathBuf, bool, (usize, usize))> = self.thread.read(cx).changes.iter().map(|c| (c.path.clone(), c.original.is_none(), c.stats())).collect();
+        let thread = self.thread.read(cx);
+        let changes: Vec<(std::path::PathBuf, bool, (usize, usize))> = thread.changes.iter().map(|c| (c.path.clone(), c.original.is_none(), thread.change_stats(c))).collect();
         if changes.is_empty() {
             return None;
         }
@@ -582,6 +580,8 @@ impl ThreadView {
         let root = self.thread.read(cx).root().clone();
         let (added, removed) = changes.iter().map(|(_, _, stats)| *stats).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
         let count = changes.len();
+        // The last finished turn that changed files not undone yet.
+        let last_turn = self.thread.read(cx).checkpoints.iter().rev().find(|c| c.duration.is_some() && c.turn_files.keys().any(|p| !c.undone.contains(p))).map(|c| c.entry);
         let header = h_flex()
             .id("changes-header")
             .flex_wrap()
@@ -613,6 +613,16 @@ impl ThreadView {
                     .tooltip(Tooltip::text("Accept every change: they stop being listed here"))
                     .on_click(cx.listener(|this, _, _, cx| this.thread.update(cx, |t, cx| t.keep_changes(None, cx)))),
             )
+            .when_some(last_turn, |el, user_ix| {
+                el.child(
+                    Button::new("changes-undo-turn", "Undo turn")
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .start_icon(Icon::new(IconName::Undo).size(IconSize::XSmall))
+                        .tooltip(Tooltip::text("Put the files the last turn changed back as they were before it"))
+                        .on_click(cx.listener(move |this, _, window, cx| this.undo_turn(user_ix, None, window, cx))),
+                )
+            })
             .child(
                 Button::new("changes-undo-all", "Undo all")
                     .style(ButtonStyle::Subtle)
@@ -1524,21 +1534,40 @@ fn render_usage(usage: &crate::thread::Usage, cx: &App) -> Option<AnyElement> {
 }
 
 impl ThreadView {
-    /// Tells the list how many rows the conversation has now; the latest turn (which
-    /// grows as the agent works) is measured again.
+    /// Works the rows out again from the thread, and tells the list which changed (from
+    /// the first that did: rows only change at the end, as the agent works). Rows on screen
+    /// are measured on every repaint, so an answer that grows needs nothing here.
     fn sync_list(&mut self, cx: &App) {
-        let rows = turns::row_count(&self.thread.read(cx).entries);
+        let thread = self.thread.read(cx);
+        let busy = thread.status() == Status::Busy;
+        let (rows, tool_permissions) = turns::rows(&thread.entries, busy);
+        self.rows_from = (thread.entries.len(), busy);
+        self.tool_permissions = tool_permissions;
         let old = self.list.item_count();
-        if rows > old && old > 0 {
-            self.list.splice(old - 1..old, rows - old + 1);
-        } else if rows != old {
-            self.list.reset(rows);
+        if old == 0 || old != self.rows.len() {
+            self.list.reset(rows.len());
+        } else {
+            let same = self.rows.iter().zip(&rows).take_while(|(a, b)| a == b).count();
+            if same < old || rows.len() != old {
+                self.list.splice(same..old, rows.len() - same);
+            }
+            // The latest turn's rows change size as tool calls finish, also off screen
+            // (where the list keeps the heights it measured): measured again when seen.
+            let turn = rows.iter().rposition(|r| matches!(r, turns::Row::User(_))).unwrap_or(0);
+            if turn < same {
+                self.list.remeasure_items(turn..same);
+            }
         }
+        self.rows = rows;
     }
 
     /// The conversation, or what to ask when it hasn't started.
     fn render_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.sync_list(cx);
+        // Changes that came without an event (a restored conversation).
+        let thread = self.thread.read(cx);
+        if self.rows_from != (thread.entries.len(), thread.status() == Status::Busy) {
+            self.sync_list(cx);
+        }
         if self.list.item_count() == 0 {
             return v_flex()
                 .flex_1()
@@ -1557,7 +1586,8 @@ impl ThreadView {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(list(self.list.clone(), cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx))).flex_1().min_h_0().w_full())
+            // `Auto`: its height is the column's, not its rows' (which would render them twice a frame).
+            .child(list(self.list.clone(), cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx))).with_sizing_behavior(gpui::ListSizingBehavior::Auto).flex_1().min_h_0().w_full())
             .vertical_scrollbar_for(&list_state, window, cx)
             .into_any_element()
     }
@@ -1648,6 +1678,51 @@ mod tests {
     fn draw(view: &Entity<ThreadView>, cx: &mut VisualTestContext) {
         let view = view.clone();
         cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), move |_, _| div().size_full().child(view));
+    }
+
+    /// Typing in a long thread repaints the rows on screen, not every tool call of the turn
+    /// (a turn of hundreds made each keystroke slow).
+    #[gpui::test]
+    async fn typing_in_a_long_thread_repaints_only_what_shows(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "a.txt": "a\n" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let thread = workspace.update_in(cx, |ws, window, cx| {
+            let thread = cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx));
+            add_thread(ws, thread.clone(), window, cx);
+            thread
+        });
+        let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        thread.update(cx, |t, cx| {
+            t.entries.push(Entry::User("look around".into(), vec![]));
+            for n in 0..2000 {
+                let tool = Entry::Tool { id: format!("t{n}"), title: format!("Read src/file{n}.rs"), kind: "read".into(), status: "completed".into(), detail: Some("fn main() {}".into()), terminal: None, diffs: vec![], command: None };
+                t.entries.push(tool);
+            }
+            t.changed(cx);
+        });
+        cx.run_until_parked();
+        draw(&view, cx);
+        view.update(cx, |v, _| v.rendered_tools = 0);
+        view.update_in(cx, |v, window, cx| v.input.update(cx, |e, cx| e.set_text("h", window, cx)));
+        draw(&view, cx);
+        let rendered = view.read_with(cx, |v, _| v.rendered_tools);
+        // About a screenful (it was the whole turn, several times over).
+        assert!(rendered > 0 && rendered < 200, "one keystroke repainted {rendered} of the turn's 2000 tool calls");
     }
 
     /// [`diff_rows`] once both are non-zero (diffs are computed in the background, later on a
@@ -1857,13 +1932,33 @@ mod tests {
         let (added, deleted) = changed_rows(&editor, &view, cx).await;
         assert!(added > 0 && deleted > 0, "the pane shows the agent's change: {added} added, {deleted} deleted");
 
-        // A snippet's diff doesn't say what the file was: not recorded.
+        // Claude Code's Edit: a diff of the snippet only. The file is what is on disk, and
+        // what it was comes from undoing the snippet.
         update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Edit a.rs", "kind": "edit", "status": "pending",
             "content": [{ "type": "diff", "path": "/root/a.rs", "oldText": "fn c() {}", "newText": "fn d() {}" }] }), cx);
         fs.save("/root/a.rs".as_ref(), &"fn a() {}\nfn d() {}\n".into(), Default::default()).await.unwrap();
         update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed" }), cx);
-        let current = thread.read_with(cx, |t, _| t.changes[0].current.clone());
-        assert_eq!(current, after, "a snippet's diff isn't taken for the whole file");
+        let changes = thread.read_with(cx, |t, _| t.changes.iter().map(|c| (c.original.clone(), c.current.clone())).collect::<Vec<_>>());
+        assert_eq!(changes, [(Some(before.to_string()), "fn a() {}\nfn d() {}\n".to_string())], "still one change, from the file before the first edit");
+
+        // A file only ever changed by snippets.
+        fs.insert_file("/root/b.rs", b"use x;\nfn b() {}\nfn b2() {}\n".to_vec()).await;
+        update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t3", "title": "Edit b.rs", "kind": "edit", "status": "pending",
+            "content": [{ "type": "diff", "path": "/root/b.rs", "oldText": "fn b() {}", "newText": "fn b() { todo!() }" }] }), cx);
+        fs.save("/root/b.rs".as_ref(), &"use x;\nfn b() { todo!() }\nfn b2() {}\n".into(), Default::default()).await.unwrap();
+        update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "completed" }), cx);
+        let b = thread.read_with(cx, |t, _| t.changes.iter().find(|c| c.path.ends_with("b.rs")).map(|c| (c.original.clone(), c.current.clone())));
+        assert_eq!(b, Some((Some("use x;\nfn b() {}\nfn b2() {}\n".into()), "use x;\nfn b() { todo!() }\nfn b2() {}\n".into())), "an Edit counts as a change");
+    }
+
+    #[test]
+    fn undoes_snippet_edits_to_find_the_file_before() {
+        use crate::thread::file_before;
+        let now = "a\nB\nc\nD\n";
+        assert_eq!(file_before(now, &[(Some("b".into()), "B".into()), (Some("d".into()), "D".into())]), Some(Some("a\nb\nc\nd\n".into())));
+        assert_eq!(file_before("x x\n", &[(Some("y".into()), "x".into())]), Some(Some("y y\n".into())), "replace_all");
+        assert_eq!(file_before("new\n", &[(None, "new\n".into())]), Some(None), "a new file");
+        assert_eq!(file_before("a\n", &[(Some("b".into()), "zzz".into())]), None, "the snippet isn't there");
     }
 
     /// Tools extensions offer (`forge.agents.registerTool`) reach agents through Forge's MCP
@@ -2138,19 +2233,13 @@ mod tests {
         assert_eq!(outcome, Some("Applied with your edits"));
         draw(&view, cx);
 
-        // The turn remembers what it changed and how long it took; its summary unfolds a
-        // file's diff in the conversation.
-        let (user_ix, files, took, activity) = thread.read_with(cx, |t, _| {
+        // The turn remembers what it changed and how long it took, so it can be undone.
+        let (files, took, activity) = thread.read_with(cx, |t, _| {
             let turn = t.checkpoints.last().unwrap();
-            (turn.entry, turn.turn_files.clone(), turn.duration, t.activity())
+            (turn.turn_files.clone(), turn.duration, t.activity())
         });
         assert_eq!(files.into_iter().collect::<Vec<_>>(), [(std::path::PathBuf::from("/root/a.txt"), (Some("old\n".to_string()), "new, tweaked\n".to_string()))]);
         assert!(took.is_some() && activity.is_none());
-        view.update_in(cx, |v, window, cx| {
-            let edit = crate::diff::Edit { path: "/root/a.txt".into(), old_text: Some("old\n".into()), new_text: "new, tweaked\n".into() };
-            let languages = v.thread.read(cx).languages().clone();
-            v.turn_diffs.insert((user_ix, "/root/a.txt".into()), crate::diff::DiffView::new(edit, languages, window, cx));
-        });
         draw(&view, cx);
     }
 
@@ -2846,6 +2935,54 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, cx| v.input.read(cx).text(cx)), "and then this");
     }
 
+    /// A thread with the mock agent, busy with a write that waits for permission.
+    async fn thread_waiting_for_permission(tmp: &std::path::Path, cx: &mut TestAppContext) -> (Entity<Thread>, VisualTestContext) {
+        let mut agent = mock_auth_agent(&tmp.join("unused"));
+        agent.env.retain(|(key, _)| key != "MOCK_REQUIRE_AUTH");
+        agent.cwd = Some(tmp.to_path_buf());
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
+        let (thread, _view, mut cx) = thread_tab(config, tmp.join("history"), cx).await;
+        thread.update_in(&mut cx, |t, window, cx| t.ask("write out.txt hi".into(), window, cx));
+        wait_for(&mut cx, &thread, "the permission request", |t| t.status() == Status::Busy && t.entries.iter().any(|e| matches!(e, Entry::Permission { resolved: None, .. }))).await;
+        (thread, cx)
+    }
+
+    /// Stopping the turn closes the Forge tool cards still waiting for the user, and their
+    /// calls hear that the turn was cancelled.
+    #[gpui::test]
+    async fn cancelling_closes_the_cards_waiting_for_the_user(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let (thread, mut cx) = thread_waiting_for_permission(tmp.path(), cx).await;
+        let cx = &mut cx;
+        let (reply, answer) = futures::channel::oneshot::channel();
+        let request = crate::forge_mcp::ToolRequest { name: "ask_user".into(), args: json!({ "question": "Which one?", "options": ["a", "b"] }), reply };
+        thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+        assert!(thread.read_with(cx, |t, _| t.entries.iter().any(|e| matches!(e, Entry::Question { answer: None, reply: Some(_), .. }))), "the question waits for the user");
+
+        thread.update(cx, |t, cx| t.cancel(cx));
+        let closed = thread.read_with(cx, |t, _| t.entries.iter().find_map(|e| match e {
+            Entry::Question { answer, reply, .. } => Some((answer.clone(), reply.is_none())),
+            _ => None,
+        }));
+        assert_eq!(closed, Some((Some(String::new()), true)), "the card closed");
+        assert_eq!(answer.await.unwrap(), Err("The user cancelled the turn before answering.".to_string()));
+        wait_for(cx, &thread, "the turn to end", |t| t.status() == Status::Ready).await;
+    }
+
+    /// A permission request whose turn is cancelled closes too: the agent stopped waiting.
+    #[gpui::test]
+    async fn cancelling_resolves_the_permission_request(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let (thread, mut cx) = thread_waiting_for_permission(tmp.path(), cx).await;
+        let cx = &mut cx;
+        thread.update(cx, |t, cx| t.cancel(cx));
+        wait_for(cx, &thread, "the permission card to close", |t| t.entries.iter().any(|e| matches!(e, Entry::Permission { resolved: Some(r), .. } if r == "Cancelled"))).await;
+        wait_for(cx, &thread, "the turn to end", |t| t.status() == Status::Ready).await;
+        assert_eq!(thread.read_with(cx, |t, _| t.pending_reviews()), 0, "nothing left to answer");
+    }
+
     /// After a turn that wrote files, the thread lists their problems once the language
     /// servers have reported, and tells whether they are new.
     #[gpui::test]
@@ -3025,6 +3162,7 @@ mod tests {
                 defaults: json!({ "font_size": 13 }),
                 order: 50,
                 actions: vec![],
+                project_keys: None,
             };
             registry.update(cx, |r, cx| r.register(page, cx));
             cx.bind_keys([gpui::KeyBinding::new("ctrl-alt-shift-t", NewThread, None)]);
@@ -3219,6 +3357,53 @@ mod tests {
         wait_for(cx, &thread, "the command to end", |t| matches!(&t.entries[card], Entry::Command { exit: Some(_), .. })).await;
         let text = answer.await.unwrap().unwrap();
         assert!(text.starts_with("Exit code 0.") && text.contains("first") && text.contains("second"), "{text}");
+    }
+
+    /// Forge's read-only tools: `search` with Forge's project search (unsaved edits
+    /// included), `read_file` for the end of a file, and `run_command` passing on only the
+    /// part of the output asked for.
+    #[gpui::test]
+    async fn agents_read_and_search_through_forge(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            init(cx);
+        });
+        params.fs.as_fake().insert_tree("/root", json!({ "src": { "a.rs": "fn parse() {}\nfn other() {}\n", "b.rs": "// parse here too\n" }, "notes.txt": "one\ntwo\nthree\n" })).await;
+        let project = Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: vec![], agents: vec![], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() } };
+        let history = tmp.path().join("history");
+        cx.update(|_, cx| crate::settings::set_in_memory(config.clone(), history.clone(), cx));
+        let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), history, window, cx)));
+        cx.run_until_parked();
+        let call = |name: &str, args: serde_json::Value, cx: &mut VisualTestContext| {
+            let (reply, answer) = futures::channel::oneshot::channel();
+            let request = crate::forge_mcp::ToolRequest { name: name.into(), args, reply };
+            thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+            answer
+        };
+
+        let found = call("search", json!({ "query": "parse", "include": "*.rs" }), cx).await.unwrap().unwrap();
+        assert!(found.starts_with("2 matches in 2 files"), "{found}");
+        assert!(found.contains("src/a.rs:1: fn parse() {}") && found.contains("src/b.rs:1: // parse here too"), "{found}");
+        let none = call("search", json!({ "query": "parse", "include": "*.txt" }), cx).await.unwrap().unwrap();
+        assert_eq!(none, "No matches for `parse`.");
+
+        let end = call("read_file", json!({ "path": "notes.txt", "tail": 2 }), cx).await.unwrap().unwrap();
+        assert_eq!(end, "notes.txt: lines 2-3 of 3\n2  two\n3  three");
+
+        let answer = call("run_command", json!({ "command": "echo first; echo second", "tail": 1 }), cx);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::Command { .. })).expect("a card"));
+        thread.update_in(cx, |t, window, cx| t.answer_command(card, true, window, cx));
+        let text = answer.await.unwrap().unwrap();
+        assert!(text.starts_with("Exit code 0.") && text.ends_with("second") && !text.contains("first"), "{text}");
     }
 
     /// Two threads changing the same file: both say so, once.

@@ -27,7 +27,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-type PermissionWaiters = DashMap<(String, String), oneshot::Sender<PermissionOutcome>>;
+/// Agents can take a while to answer `initialize` and `session/new` the first time: `npx`
+/// downloads the adapter before it speaks.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long a stopped agent gets to exit on its own before it is killed.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Pending permission requests by (agent, request): the session they belong to, and the
+/// answer's way back.
+type PermissionWaiters = DashMap<(String, String), (Option<String>, oneshot::Sender<PermissionOutcome>)>;
 
 struct AgentProcess {
     peer: Arc<Peer>,
@@ -110,12 +118,17 @@ impl AcpHandler {
         let request_id = Uuid::new_v4().to_string();
         let key = (self.agent_id.clone(), request_id.clone());
         let (tx, rx) = oneshot::channel();
-        self.permissions.insert(key.clone(), tx);
-        let _ = self.events.send(IdeEvent::Agent(AgentEvent::PermissionRequested { agent_id: self.agent_id.clone(), request_id, params }));
+        let session = params.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        self.permissions.insert(key.clone(), (session, tx));
+        let _ = self.events.send(IdeEvent::Agent(AgentEvent::PermissionRequested { agent_id: self.agent_id.clone(), request_id: request_id.clone(), params }));
         let outcome = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
             Ok(Ok(outcome)) => outcome,
-            _ => {
+            // Cancelled with the turn (`cancel` said so already), or the agent stopped.
+            Ok(Err(_)) => PermissionOutcome::Cancelled,
+            Err(_) => {
                 self.permissions.remove(&key);
+                let reason = format!("No answer in {} minutes", PERMISSION_TIMEOUT.as_secs() / 60);
+                let _ = self.events.send(IdeEvent::Agent(AgentEvent::PermissionClosed { agent_id: self.agent_id.clone(), request_id, reason }));
                 PermissionOutcome::Cancelled
             }
         };
@@ -157,13 +170,15 @@ pub struct AcpRuntime {
     /// The host can run an agent's login command in an interactive terminal.
     terminal_auth: bool,
     display_terminals: bool,
+    /// `_meta` sent with `session/new` and `session/load` (agent-specific options).
+    session_meta: Option<Value>,
     agents: Arc<DashMap<String, Arc<AgentProcess>>>,
     permissions: Arc<PermissionWaiters>,
 }
 
 impl AcpRuntime {
     pub fn new(events: EventBus, workspace: Arc<dyn WorkspaceEngine>) -> Self {
-        Self { events, workspace, terminals: None, terminal_auth: false, display_terminals: false, agents: Default::default(), permissions: Default::default() }
+        Self { events, workspace, terminals: None, terminal_auth: false, display_terminals: false, session_meta: None, agents: Default::default(), permissions: Default::default() }
     }
 
     /// Lets agents run commands (`terminal/*`); advertised in `initialize` only when set.
@@ -185,6 +200,21 @@ impl AcpRuntime {
     pub fn with_display_terminals(mut self) -> Self {
         self.display_terminals = true;
         self
+    }
+
+    /// `_meta` for every `session/new` and `session/load`: options agents read there
+    /// (Claude Code's adapter takes `claudeCode.options`); others ignore it.
+    pub fn with_session_meta(mut self, meta: Value) -> Self {
+        self.session_meta = Some(meta);
+        self
+    }
+
+    /// `params` with the session `_meta`, when there is one.
+    fn with_meta(&self, mut params: Value) -> Value {
+        if let Some(meta) = &self.session_meta {
+            params["_meta"] = meta.clone();
+        }
+        params
     }
 
     fn agent(&self, agent_id: &str) -> IdeResult<Arc<AgentProcess>> {
@@ -261,8 +291,13 @@ impl AgentService for AcpRuntime {
 
     async fn stop(&self, agent_id: &str) -> IdeResult<()> {
         let agent = self.agent(agent_id)?;
-        if let Err(e) = agent.child.lock().await.start_kill() {
-            warn!(agent = %agent_id, "kill failed: {e}");
+        // Closing its stdin lets the agent end its sessions and exit; killed if it doesn't.
+        agent.peer.close_writer().await;
+        let mut child = agent.child.lock().await;
+        if tokio::time::timeout(STOP_GRACE, child.wait()).await.is_err() {
+            if let Err(e) = child.start_kill() {
+                warn!(agent = %agent_id, "kill failed: {e}");
+            }
         }
         Ok(())
     }
@@ -278,8 +313,7 @@ impl AgentService for AcpRuntime {
     }
 
     async fn initialize(&self, agent_id: &str, protocol_version: u32) -> IdeResult<Value> {
-        self.rpc(
-            agent_id,
+        self.agent(agent_id)?.peer.request_with_timeout(
             "initialize",
             json!({
                 "protocolVersion": protocol_version,
@@ -291,18 +325,19 @@ impl AgentService for AcpRuntime {
                 },
                 "clientInfo": {"name": "Forge IDE", "version": env!("CARGO_PKG_VERSION")},
             }),
+            SETUP_TIMEOUT,
         )
         .await
     }
 
     async fn new_session(&self, agent_id: &str, cwd: &Path, mcp_servers: &[Value]) -> IdeResult<Value> {
-        self.rpc(agent_id, "session/new", json!({"cwd": cwd.to_string_lossy(), "mcpServers": mcp_servers})).await
+        self.agent(agent_id)?.peer.request_with_timeout("session/new", self.with_meta(json!({"cwd": cwd.to_string_lossy(), "mcpServers": mcp_servers})), SETUP_TIMEOUT).await
     }
 
     async fn load_session(&self, agent_id: &str, session_id: &str, cwd: &Path, mcp_servers: &[Value]) -> IdeResult<Value> {
         self.agent(agent_id)?
             .peer
-            .request_with_timeout("session/load", json!({"sessionId": session_id, "cwd": cwd.to_string_lossy(), "mcpServers": mcp_servers}), PROMPT_TIMEOUT)
+            .request_with_timeout("session/load", self.with_meta(json!({"sessionId": session_id, "cwd": cwd.to_string_lossy(), "mcpServers": mcp_servers})), PROMPT_TIMEOUT)
             .await
     }
 
@@ -315,18 +350,25 @@ impl AgentService for AcpRuntime {
     }
 
     async fn cancel(&self, agent_id: &str, session_id: &str) -> IdeResult<()> {
-        // Per ACP, pending permission requests must resolve as cancelled when the turn is cancelled.
-        let keys: Vec<_> = self.permissions.iter().filter(|e| e.key().0 == agent_id).map(|e| e.key().clone()).collect();
+        // Per ACP, pending permission requests must resolve as cancelled when the turn is
+        // cancelled: this session's (requests without a session are the agent's only one).
+        let keys: Vec<_> = self
+            .permissions
+            .iter()
+            .filter(|e| e.key().0 == agent_id && e.value().0.as_deref().is_none_or(|s| s == session_id))
+            .map(|e| e.key().clone())
+            .collect();
         for key in keys {
-            if let Some((_, tx)) = self.permissions.remove(&key) {
+            if let Some(((agent_id, request_id), (_, tx))) = self.permissions.remove(&key) {
                 let _ = tx.send(PermissionOutcome::Cancelled);
+                let _ = self.events.send(IdeEvent::Agent(AgentEvent::PermissionClosed { agent_id, request_id, reason: "Cancelled".into() }));
             }
         }
         self.agent(agent_id)?.peer.notify("session/cancel", json!({"sessionId": session_id})).await
     }
 
     async fn respond_permission(&self, agent_id: &str, request_id: &str, outcome: PermissionOutcome) -> IdeResult<()> {
-        let (_, tx) = self
+        let (_, (_, tx)) = self
             .permissions
             .remove(&(agent_id.to_string(), request_id.to_string()))
             .ok_or_else(|| IdeError::NotFound(format!("permission request {request_id}")))?;
@@ -500,9 +542,23 @@ mod tests {
             let (acp, session) = (acp.clone(), session.clone());
             async move { acp.prompt("mock", &session, "write out.txt hi").await }
         });
-        next_agent_event(&mut rx, |e| matches!(e, AgentEvent::PermissionRequested { .. })).await;
+        let AgentEvent::PermissionRequested { request_id, .. } = next_agent_event(&mut rx, |e| matches!(e, AgentEvent::PermissionRequested { .. })).await else { unreachable!() };
+        // Another session's cancel leaves it waiting.
+        acp.cancel("mock", "another-session").await.unwrap();
+        assert_eq!(acp.permissions.len(), 1);
         acp.cancel("mock", &session).await.unwrap();
+        let AgentEvent::PermissionClosed { request_id: closed, reason, .. } = next_agent_event(&mut rx, |e| matches!(e, AgentEvent::PermissionClosed { .. })).await else { unreachable!() };
+        assert_eq!((closed, reason.as_str()), (request_id, "Cancelled"));
         assert_eq!(pending.await.unwrap().unwrap()["stopReason"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn stop_lets_the_agent_exit_on_its_own() {
+        let Setup { dir: _dir, acp, mut rx, .. } = setup().await;
+        acp.stop("mock").await.unwrap();
+        // It saw its input end and exited cleanly, instead of being killed.
+        let AgentEvent::Exited { code, .. } = next_agent_event(&mut rx, |e| matches!(e, AgentEvent::Exited { .. })).await else { unreachable!() };
+        assert_eq!(code, Some(0));
     }
 
     #[tokio::test]
@@ -595,6 +651,22 @@ mod tests {
         let servers = vec![json!({"name": "fs", "command": "mcp-fs", "args": ["--root", "/p"], "env": [{"name": "TOKEN", "value": "x"}]})];
         let session = acp.new_session("mock", ws.root(), &servers).await.unwrap();
         assert_eq!(session["echoMcpServers"], json!(servers));
+    }
+
+    #[tokio::test]
+    async fn session_meta_is_passed_to_new_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = json!({"claudeCode": {"options": {"disallowedTools": ["Bash(sed:*)"]}}});
+        for with_meta in [false, true] {
+            let (events, _rx) = tokio::sync::broadcast::channel(16);
+            let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
+            let acp = AcpRuntime::new(events, ws);
+            let acp = if with_meta { acp.with_session_meta(meta.clone()) } else { acp };
+            acp.start(mock_agent()).await.unwrap();
+            acp.initialize("mock", PROTOCOL_VERSION).await.unwrap();
+            let session = acp.new_session("mock", dir.path(), &[]).await.unwrap();
+            assert_eq!(session["echoMeta"], if with_meta { meta.clone() } else { Value::Null });
+        }
     }
 
     #[tokio::test]

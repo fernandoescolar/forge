@@ -90,7 +90,9 @@ Forge remembers the layout: where each panel is, which ones are hidden and open,
 
 ## Settings
 
-**Forge › Settings…** (⌘,) opens the Settings tab: every setting, in sections (Appearance, Editor, Workspace, Files, Languages, Terminal, Git, Debugging, Agents, .NET, and one per extension that has settings), with a search box. Changes save as you make them; a dot marks what differs from the default, and the arrow next to it resets it. Lists and maps open the file at the right place.
+**Forge › Settings…** (⌘,) opens the Settings tab: every setting, in sections (Appearance, Editor, Workspace, Files, Languages, Terminal, Git, Debugging, Agents, .NET, Commits, and one per extension that has settings), with a search box. Changes save as you make them; a dot marks what differs from the default, and the arrow next to it resets it. Lists and maps open the file at the right place.
+
+**Settings for one project.** With a folder open, the switch at the top of the tab goes from *User* (your settings, for every project) to the project's name: then the tab shows only what a project can set (languages and formatting, files, the terminal, commits…) and saves it in the project's `.forge/` folder (`.forge/settings.json`, `.forge/git.json`), where it wins over your settings. Settings the project doesn't set show your values; a dot marks those it sets, and the arrow removes them from the project. Commit the `.forge/` files to share them with whoever works on the project.
 
 The settings are stored in files in `~/Library/Application Support/Forge/config` (on Linux, `~/.local/share/forge/config`), and you can also edit them there:
 
@@ -103,10 +105,11 @@ The settings are stored in files in `~/Library/Application Support/Forge/config`
 | `icon_themes/*.json` | Zed icon theme files, with their icons |
 | `agents.json` | The agents threads can talk to, and MCP servers |
 | `dotnet.json` | Solution Explorer and NuGet options |
+| `git.json` | Commit options: signing off |
 | `extensions.json` | Extension settings |
 | `AGENTS.md` | Your instructions for agents, in every project (see [Agents](#agents)) |
 
-Forge applies a file as soon as you save it. Settings for a single project go in `.forge/settings.json` inside the project, and its tasks and debug scenarios go in `.forge/tasks.json` and `.forge/debug.json`. Forge also reads `.vscode/tasks.json` and `.vscode/launch.json`. The project's `.forge/` folder also holds its instructions for agents (`AGENTS.md`), its customized file templates (`templates/`) and the worktrees of threads that work in one (`worktrees/`, which git ignores).
+Forge applies a file as soon as you save it. Settings for a single project go in `.forge/settings.json` (and `.forge/git.json`) inside the project, and its tasks and debug scenarios go in `.forge/tasks.json` and `.forge/debug.json`. Forge also reads `.vscode/tasks.json` and `.vscode/launch.json`. The project's `.forge/` folder also holds its instructions for agents (`AGENTS.md`), its customized file templates (`templates/`) and the worktrees of threads that work in one (`worktrees/`, which git ignores).
 
 ## Colours and fonts
 
@@ -186,9 +189,9 @@ Agents work in **threads**. A thread is one conversation with an agent that spea
 
 ![A thread that fixed a failing test: the agent's thoughts, reads, edits and test run, the files it changed, and their diff ready to review](images/agents.jpg)
 
-**Reading a thread.** Each turn starts with your message, set apart so it is easy to find when you scroll back, followed by the agent's part: a header with how long it worked (or a timer while it works), its answer, its thoughts folded to their first line, and one compact list of what it did. Reads, searches and finished commands take one line each; click one to see its output or diff. Running commands, failures and anything waiting for you stay open. When a turn changed files, a summary closes it: each file with its added and removed lines and its diff unfolding in place; *Review* opens them in the review tab beside the thread (Keep / Undo on each change), *Undo turn* puts every file of the turn back as it was before it, and the undo button on a file does it for that file alone (if a later turn changed the same files, Forge asks first). Undone files stay listed, struck through. While the agent works, a bar above the input says what it is doing now and for how long, in the warning colour when it waits for you, with *Stop* next to it.
+**Reading a thread.** Each turn starts with your message, set apart so it is easy to find when you scroll back, followed by the agent's part: a header with how long it worked (or a timer while it works), its answer, its thoughts folded to their first line, and one compact list of what it did. Reads, searches and finished commands take one line each; click one to see its output or diff. The agent's plan stays in its turn, updated as it goes, so earlier turns keep the plans they followed. Running commands, failures and anything waiting for you stay open. The files the agent changed are listed once, above the input: each with its added and removed lines, *Review* to see them in the review tab, *Keep* / *Undo* for each file or all of them, and *Undo turn*, which puts the files the last turn changed back as they were before it (pressed again, the turn before; if a later turn changed the same files, Forge asks first). While the agent works, a bar above the input says what it is doing now and for how long, in the warning colour when it waits for you, with *Stop* next to it.
 
-While the agent works, the thread **follows it**: the file it reads or writes opens next to the conversation, and while it runs a command, that command's terminal. If an agent isn't signed in, a sign-in card appears and the login runs in a terminal inside Forge. Permission requests can be answered once, always for that tool, or by the mode you choose for the session. By default (Settings › Agents › *Let the agent decide*), agents that have an auto mode, such as Claude Code and Codex, use it: they run what they judge safe without asking, as in their own apps, and only ask about the rest. Agents read your unsaved edits, and their writes go through the editor. Paths outside the project are refused.
+While the agent works, the thread **follows it**: the file it reads or writes opens next to the conversation, and while it runs a command, that command's terminal. If an agent isn't signed in, a sign-in card appears and the login runs in a terminal inside Forge. Permission requests can be answered once, always for that tool, or by the mode you choose for the session. By default (Settings › Agents › *Let the agent decide*), agents that have an auto mode, such as Claude Code and Codex, use it: they run what they judge safe without asking, as in their own apps, and only ask about the rest. Agents read your unsaved edits. Writes they ask Forge to make go through the editor (and its review); agents that write files with tools of their own, such as Claude Code, have them recorded as changes right after, to review and undo the same way. Files outside the project's folders are refused, to Forge's tools as well, unless Settings › Agents lets agents reach them; commands run outside the project ask first. The folders for temporary files (`/tmp` and your `$TMPDIR`; `%TEMP%` on Windows) count as the project: agents make, read, change and run scratch files there under the same permission mode, and what they write there goes straight to disk, without review and without joining the thread's changes. When you stop a turn, whatever it was waiting for you on (a permission, a question, a proposed commit) closes, and so does a permission request nobody answers in 30 minutes.
 
 **Reviewing changes.** Wherever a file the agent changed is open, the editor shows what changed since before the agent, with **Keep** and **Undo** on each change (⌘⌥Y / ⌘⌥Z at the cursor). Kept changes become part of the file; undone ones go back as they were and the file is saved. **Checkpoints:** each message you send is one. *Restore checkpoint* on a message puts every file the agent wrote after it back as it was. The pencil on a message puts it back in the input to edit and send again.
 
@@ -202,7 +205,7 @@ While the agent works, the thread **follows it**: the file it reads or writes op
 
 **Anywhere in Forge.** The status bar shows what the threads are doing (waiting for you, working, files to review) and jumps to them. When a thread finishes or needs you while Forge is in the background, you get a notification.
 
-**Commits and pushes the agent proposes.** Agents don't commit or push behind your back. Forge gives them tools to propose a commit or a push (agents that take HTTP MCP servers, such as Claude Code), and asks them to use them. The proposal shows up in the thread as a card with the message and the files. *Commit* commits exactly those files. *Edit in Git panel* stages them and puts the message in the Git panel, where you change it and commit as usual. *Decline* says no. The agent waits for your answer and hears the result: the new commit's SHA and message, or that you declined. Forge never answers a `git commit` or `git push` command for you, whatever the permission mode (except *Super user*). When an agent asks to run `git commit`, the request also offers *Commit from Forge instead*, which turns it into the same card.
+**Commits and pushes the agent proposes.** Agents don't commit or push behind your back. Forge gives them tools to propose a commit or a push (agents that take HTTP MCP servers, such as Claude Code), and asks them to use them. The proposal shows up in the thread as a card with the message and the files. *Commit* commits exactly those files; anything else you had staged stays staged. *Edit in Git panel* stages only them and puts the message in the Git panel, where you change it and commit as usual. *Decline* says no. The agent waits for your answer and hears the result: the new commit's SHA and message, or that you declined. Forge never answers a `git commit` or `git push` command for you, whatever the permission mode (except *Super user*). When an agent asks to run `git commit`, the request also offers *Commit from Forge instead*, which turns it into the same card.
 
 A proposed push shows the branch, where it goes and the commits it takes. It goes to the branch's upstream, or creates the branch on `origin` and makes it the upstream; it is never forced. *Push* pushes it the way the Git panel does, and asks for credentials if they are needed. *Decline* says no. A `git push` the agent asks to run offers *Push from Forge instead*.
 
@@ -213,6 +216,7 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 - *Go to definition* and *Find references* ask the language server, and so do *File outline* (a file's types and functions with their lines, read before the whole file), *Go to implementations*, *Go to type definition*, *Call hierarchy* (who calls a function, or what it calls: what a change to it affects) and *Signature help*. *Rename a symbol* uses its rename, like the editor's. When writes are reviewed, the rename shows as a card with the places and files it touches, and waits for *Rename* or *Decline*. The renamed files join the thread's changes.
 - *Run the app* starts a run target as the title bar's Run does, in a terminal you see. The agent reads its output and can stop it.
 - *Run a command* runs a shell command (a build, a script, a test run) in a terminal inside the thread, so you watch its output as it comes rather than when it ends. Unless the permission mode or *Commands that never ask* covers it, the card waits for *Run* or *Don't*. The agent gets the exit code and the output; a command that runs past its time limit (10 minutes unless the agent asks for another) is stopped. Agents whose own shell tool streams its output (through ACP's terminal output) show it live too.
+- *Read a file*, *Search the project* and *Search git history* replace `cat`/`head`/`tail`, `grep`/`rg` and `git log`/`show`/`blame`/`diff`: lines of a file from a line or its last ones, Forge's project search (text or a regex, with globs and context lines, your unsaved edits included and ignored files left out), and the history (commits of a file, the ones that added or removed some text, a commit, a file as it was, who changed some lines, a diff). They only read, so they never ask; like the other tools, they refuse paths outside the project unless agents may reach them. *Run a command* also takes `tail`, `head` or `filter`, so the agent gets that part of the output instead of piping into `tail` or `grep`, while you see all of it.
 - *Code actions* lists the language server's quick fixes and refactors on some lines, and *Apply a code action* applies one. *Format a file* uses the project's formatter. Like a rename, these show as a card when writes are reviewed, and their files join the thread's changes. *Type and docs* (hover) and *Find symbols* (workspace symbols) read the language server too.
 - *Set a breakpoint* (with an optional condition) and *Start debugging* a run target or tests. The agent waits until the program stops and reads the stack and local variables. Then it can *Continue or step*, *Evaluate an expression* and *Stop debugging*. You follow the session in the Debug panel and the stopped line in the editor.
 - *Send an HTTP request* goes through the `.http` support: a request of a `.http` file, or one the agent writes, with your selected environment. The response tab shows it.
@@ -221,6 +225,18 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 - *Show a file* opens a file at a line or a range for you. *Show your changes* opens the thread's review of its changes.
 
 These calls appear in the thread with their names ("Run tests", "Find references") and what they were asked.
+
+**Shell commands Forge has a tool for.** Agents are told, before they act, to read, search and change files and read the history with these tools and their own file tools, not with `grep`, `cat`, `sed`, `find`, `git log`, pipes into `tail` or `grep`, or `>` into a file. When one tries anyway, Forge refuses the command and tells the agent which tool to use. Each agent takes this its own way, and Forge sets it up when it starts one:
+
+| Agent | Told how | Refused how |
+| --- | --- | --- |
+| Claude Code | its system prompt | a hook, with the tool to use |
+| GitHub Copilot CLI | an instructions file, and the `forge` server's instructions kept | a hook (a plugin of Forge's), with the tool to use |
+| Codex | developer instructions | rules in a Codex folder of Forge's (`CODEX_HOME`), with the tool to use |
+| Antigravity | the first message | a hook (a plugin the adapter installs while a session runs), with the tool to use |
+| Gemini CLI | the first message | a policy (it doesn't pass the reason on) |
+
+Codex runs with a folder of Forge's (in Forge's data folder) linked to yours (`~/.codex`, or `CODEX_HOME`): the same sign-in, config, `AGENTS.md` and rules, plus Forge's. Codex outside Forge is unchanged; its session history inside Forge is kept apart. Claude Code's thinking is asked for as summaries, so threads show what it thinks rather than only "Working".
 
 **Extensions' tools.** Extensions can offer agents tools of their own, through the same `forge` server. The Database Explorer does: agents can list your connections, read their schema, and run SQL on them, without credentials of their own. So does Containers: agents see your containers and read their logs, and start, stop or restart them, or bring a Compose project up. A tool that only reads runs when an agent calls it. Any other, such as running a query, shows in the thread with its arguments, and runs only if you *Allow* it (with *Super user*, it runs without asking). Agents see an extension's tools in threads started after it loads.
 
@@ -252,6 +268,14 @@ Create the migration with `make migration NAME=<what it does>`, then …
 
 Skills and prompts in Forge's config folder (`skills/` and `prompts/` next to your `AGENTS.md`) are for every project; a project's own replace them by name.
 
+**Adding an agent.** Any agent that speaks ACP over stdio goes in `agents.json` (or Settings › Agents › *Add*): an `id`, the `command` and its `args`, and optionally `env` and `cwd`. Antigravity speaks it through Forge's adapter: install `agy`, then add
+
+```jsonc
+{ "id": "antigravity", "command": "npx", "args": ["-y", "@forge-ide/agy-acp"] }
+```
+
+Its permission requests come to Forge like any other agent's: the adapter installs a hook (an agy plugin, while its sessions run) that asks before agy edits files or runs commands. If the hook can't be installed, agy's own checks apply and deny what needs a permission.
+
 **MCP servers** listed in `agents.json` are passed to every session:
 
 ```jsonc
@@ -265,6 +289,8 @@ Skills and prompts in Forge's config folder (`skills/` and `prompts/` next to yo
 Git › *Changes* is the Git panel (stage, commit, push), *History* the commit graph.
 
 **Tags.** Git › *Create Tag…* tags the current commit (HEAD); to tag another one, right-click it in the History panel (or in the Git panel's commit list) and choose *Create Tag…*. Give it a name and, optionally, a message, which makes it an annotated tag. Tick *Push it to …* to send it to the branch's remote (`origin` when the branch tracks none) right away; Forge asks for credentials the way it does for a push.
+
+**Signing off commits.** Projects under the Developer Certificate of Origin (DCO) want each commit signed off: a `Signed-off-by: Name <email>` line, the committer from your git config (`git commit --signoff`). It is the *Sign off commits* setting, on the Settings tab's Commits page: yours applies to every project, and a project's own (saved in its `.forge/git.json`, to commit with it) wins. The Git panel's *Signoff* toggle (in the commit button's menu) and Git › *Sign Off Commits in This Project* turn it on or off for the project. When a project that hasn't chosen has a repository that asks for sign-offs (a `.github/dco.yml` or `DCO` file, a contributing guide that mentions them, or most of its recent commits signed off), Forge offers to turn them on. The commits agents propose follow the same setting: the card has a *Sign off* checkbox showing who signs, and changing it changes it for the project. Agents never write the line themselves; Forge removes any they write.
 
 **Merge conflicts.** Each conflict in the editor has *Use ours*, *Use theirs*, *Use both* and *Resolve with Agent*, which asks a thread to settle that conflict. While the project has conflicts, the status bar offers to resolve all of them with the agent (also Git › *Resolve Conflicts with the Agent*). The agent edits the files; you stage and commit.
 

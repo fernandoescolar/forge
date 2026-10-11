@@ -166,7 +166,7 @@ fn tool_paths(tool_call: &Value) -> Vec<PathBuf> {
         }
     }
     if let Some(input) = tool_call.get("rawInput") {
-        for key in ["file_path", "path", "notebook_path", "abs_path"] {
+        for key in ["file_path", "path", "notebook_path", "abs_path", "cwd"] {
             paths.extend(input.get(key).and_then(Value::as_str).map(PathBuf::from));
         }
     }
@@ -315,9 +315,15 @@ fn shell_words(command: &str) -> Vec<String> {
     words
 }
 
-/// Relative paths are the agent's working directory: the workspace.
+/// Relative paths start in the agent's working directory (the first root); `..` counts.
+/// The folders for temporary files count as the workspace.
 fn inside(path: &Path, roots: &[PathBuf]) -> bool {
-    path.is_relative() || roots.iter().any(|root| path.starts_with(root))
+    let path = match roots.first() {
+        Some(root) if path.is_relative() => root.join(path),
+        _ if path.is_relative() => return !path.components().any(|c| c == std::path::Component::ParentDir),
+        _ => path.to_path_buf(),
+    };
+    crate::forge_tools::within(&crate::forge_tools::normalize(&path), roots) || crate::forge_tools::in_temp(&path)
 }
 
 /// `command` starts with one of `allowed` (whole words) and runs nothing else: chained,
@@ -433,6 +439,21 @@ mod tests {
         assert!(matches!(decide(&outside_ok, &edit_outside, &roots(), &nothing_kept()), Decision::Allow(_)));
 
         assert!(matches!(decide(&perms(PermissionMode::SuperUser), &edit_outside, &roots(), &nothing_kept()), Decision::Allow(_)));
+
+        // `..` leaves the workspace, relative or not; so does a command's folder.
+        let climbing = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "../other/a.cs"}]});
+        let dotted = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "/work/app/../other/a.cs"}]});
+        let rm_elsewhere = json!({"kind": "execute", "title": "rm", "rawInput": {"command": "rm -rf bin", "cwd": "/opt"}});
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &climbing, &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &dotted, &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowWorkspace), &rm_elsewhere, &roots(), &nothing_kept()), Decision::Ask);
+
+        // Scratch files in /tmp count as the workspace.
+        let scratch = std::env::temp_dir().join("forge-scratch.py");
+        let write_scratch = json!({"kind": "edit", "title": "Write", "locations": [{"path": scratch}]});
+        let run_scratch = json!({"kind": "execute", "title": "python", "rawInput": {"command": "python3 forge-scratch.py", "cwd": std::env::temp_dir()}});
+        assert!(matches!(decide(&perms(PermissionMode::AllowEdits), &write_scratch, &roots(), &nothing_kept()), Decision::Allow(_)));
+        assert!(matches!(decide(&perms(PermissionMode::AllowWorkspace), &run_scratch, &roots(), &nothing_kept()), Decision::Allow(_)));
     }
 
     #[test]

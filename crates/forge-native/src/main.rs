@@ -57,6 +57,11 @@ fn main() {
         util::shell_env::print_env();
         return;
     }
+    // Claude Code's hook for the commands its agents run (see `forge_agents::shell_guard`).
+    if std::env::args().nth(1).as_deref() == Some(forge_agents::shell_guard::HOOK_ARG) {
+        forge_agents::shell_guard::run_hook();
+        return;
+    }
 
     // Same filtering and stderr output as before; the Output panel also gets a copy.
     forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")));
