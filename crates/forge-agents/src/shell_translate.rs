@@ -8,6 +8,13 @@
 //! substitutions or chaining, and only options the tool has an equivalent for. Anything
 //! else stays refused, with the tool to use instead. The output is the tool's, not the
 //! program's (`cat` comes with line numbers, `grep` with Forge's search format).
+//!
+//! Two more kinds go through Forge though they aren't refused alone: test runs (`cargo test
+//! parser`, `go test ./pkg/...`, `dotnet test`, `pytest a.py::b`) go to `run_tests`, so they
+//! show in the Tests panel; and a command piped only into `grep`, then `head` or `tail`
+//! (`cargo build 2>&1 | tail -20`) goes to `run_command` with those as `filter`, `head` or
+//! `tail`, so the user watches it run. Test runs with options `run_tests` has no equivalent
+//! for (`--features`, `--release`) run as they are.
 
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::net::TcpStream;
@@ -15,7 +22,9 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use crate::shell_guard::{basename, names_file, parse};
+use std::path::Path;
+
+use crate::shell_guard::{Line, basename, names_file, parse};
 
 /// `forge --agent-shell-exec <url> <call>`: runs a translated command.
 pub const EXEC_ARG: &str = "--agent-shell-exec";
@@ -32,14 +41,21 @@ pub(crate) fn translate(command: &str) -> Option<Call> {
         return None;
     }
     let line = parse(command);
+    if line.segments.len() > 1 {
+        return piped(command, &line);
+    }
     let [segment] = line.segments.as_slice() else { return None };
     if !line.nested.is_empty() || segment.piped || !segment.inputs.is_empty() || segment.outputs.iter().any(|o| names_file(o)) {
         return None;
     }
-    let (program, args) = segment.words.split_first()?;
     if segment.words.iter().any(|w| expands(w)) {
         return None;
     }
+    let words = without_rtk(&segment.words);
+    if let Some(call) = test_run(words) {
+        return Some(call);
+    }
+    let (program, args) = words.split_first()?;
     match basename(program) {
         "cat" => cat(args),
         "head" => head_tail(args, false),
@@ -56,6 +72,296 @@ pub(crate) fn translate(command: &str) -> Option<Call> {
         },
         _ => None,
     }
+}
+
+/// The tools that may run for minutes: the shell tool gets its longest timeout for them,
+/// and the call waits as long as it does.
+pub(crate) fn takes_long(tool: &str) -> bool {
+    matches!(tool, "run_tests" | "run_command")
+}
+
+/// `words` without the `rtk` (or `rtk proxy`) before the program.
+fn without_rtk(words: &[String]) -> &[String] {
+    match words {
+        [rtk, proxy, rest @ ..] if basename(rtk) == "rtk" && proxy == "proxy" => rest,
+        [rtk, rest @ ..] if basename(rtk) == "rtk" => rest,
+        _ => words,
+    }
+}
+
+/// `command | grep x | tail -n 20`: the command before the pipe, run with `run_command`
+/// and the programs after it as its `filter` and `head` or `tail` (or, for a test run,
+/// `run_tests`, which sums the results up itself). Only `grep`, then `head` or `tail`.
+fn piped(command: &str, line: &Line) -> Option<Call> {
+    let segments = &line.segments;
+    let first_filter = segments.iter().rposition(|s| !s.piped || !is_output_filter(s))? + 1;
+    let filters = &segments[first_filter..];
+    if filters.is_empty() || filters.iter().any(|s| !s.inputs.is_empty() || s.outputs.iter().any(|o| names_file(o))) {
+        return None;
+    }
+    let mut args = Map::new();
+    for (ix, filter) in filters.iter().enumerate() {
+        let words = without_rtk(&filter.words);
+        let (program, rest) = words.split_first()?;
+        match basename(program) {
+            "grep" if ix == 0 => {
+                args.insert("filter".into(), json!(grep_filter(rest)?));
+            }
+            name @ ("head" | "tail") if ix + 1 == filters.len() => {
+                args.insert(name.into(), json!(line_count(rest)?));
+            }
+            _ => return None,
+        }
+    }
+    let before: String = command.chars().take(filters[0].pipe_at).collect();
+    let before = before.trim();
+    // What runs must pass the guard on its own (`cat a.rs | grep x` stays refused).
+    if before.is_empty() || crate::shell_guard::refusal(before).is_some() {
+        return None;
+    }
+    if let [segment] = &segments[..first_filter] {
+        let plain = line.nested.is_empty() && segment.inputs.is_empty() && !segment.outputs.iter().any(|o| names_file(o)) && !segment.words.iter().any(|w| expands(w));
+        if let Some(call) = plain.then(|| test_run(without_rtk(&segment.words))).flatten() {
+            return Some(call);
+        }
+    }
+    args.insert("command".into(), json!(before));
+    Some(("run_command", Value::Object(args)))
+}
+
+/// A program that only filters what is piped into it: `grep`, `head` or `tail`.
+fn is_output_filter(segment: &crate::shell_guard::Segment) -> bool {
+    without_rtk(&segment.words).first().is_some_and(|p| matches!(basename(p), "grep" | "head" | "tail"))
+}
+
+/// `grep`'s options and pattern, as `run_command`'s `filter` regex: `-E`, `-F` and `-i`.
+fn grep_filter(args: &[String]) -> Option<String> {
+    let (mut extended, mut fixed, mut insensitive, mut pattern) = (false, false, false, None);
+    for arg in args {
+        match arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+            Some(flags) => {
+                for flag in flags.chars() {
+                    match flag {
+                        'E' => extended = true,
+                        'F' => fixed = true,
+                        'i' => insensitive = true,
+                        _ => return None,
+                    }
+                }
+            }
+            None if pattern.is_none() => pattern = Some(arg.as_str()),
+            None => return None,
+        }
+    }
+    let pattern = pattern.filter(|p| !p.is_empty())?;
+    let regex = if fixed {
+        regex::escape(pattern)
+    } else if extended {
+        pattern.to_string()
+    } else {
+        match basic_regex(pattern)? {
+            (regex, true) => regex,
+            (text, false) => regex::escape(&text),
+        }
+    };
+    regex::Regex::new(&regex).ok()?;
+    Some(if insensitive { format!("(?i){regex}") } else { regex })
+}
+
+/// `head` and `tail`'s line count, without a file: `-n 20`, `-20`, `--lines=20`.
+fn line_count(args: &[String]) -> Option<u64> {
+    let mut count = 10;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word == "-n" || word == "--lines" {
+            count = digits(words.next()?)?;
+        } else if let Some(n) = word.strip_prefix("--lines=").or_else(|| word.strip_prefix("-n")).or_else(|| word.strip_prefix('-')) {
+            count = digits(n)?;
+        } else {
+            return None;
+        }
+    }
+    Some(count.max(1))
+}
+
+/// A test run (`cargo test parser`, `go test ./pkg/...`, `dotnet test`, `npm test`, `npx
+/// vitest run a.test.ts`, `pytest a.py::test_b`), as `run_tests` with the same tests.
+fn test_run(words: &[String]) -> Option<Call> {
+    let (program, args) = words.split_first()?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let tests = match (basename(program), args.as_slice()) {
+        ("cargo", ["test", rest @ ..]) => cargo_test(rest)?,
+        ("go", ["test", rest @ ..]) => go_test(rest)?,
+        ("dotnet", ["test", rest @ ..]) => dotnet_test(rest)?,
+        ("npm" | "pnpm" | "yarn", ["test" | "t"] | ["run", "test"]) => Map::new(),
+        ("npx" | "pnpx", [runner @ ("jest" | "vitest"), rest @ ..]) => js_test(runner, rest)?,
+        (runner @ ("jest" | "vitest"), rest) => js_test(runner, rest)?,
+        ("pytest", rest) => pytest(rest)?,
+        ("python" | "python3", ["-m", "pytest", rest @ ..]) => pytest(rest)?,
+        _ => return None,
+    };
+    Some(("run_tests", Value::Object(tests)))
+}
+
+/// A test name `run_tests` can look for (its `name` is a substring): letters, digits, `_`,
+/// `.` and `:`.
+fn test_name(text: &str) -> Option<String> {
+    let text = text.trim_start_matches('^').trim_end_matches('$');
+    (!text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || "_.:".contains(c))).then(|| text.to_string())
+}
+
+/// A folder of the project, as `run_tests`' `path`: `./pkg/...` → `pkg`; `None` for the root.
+fn test_path(word: &str) -> Option<Option<String>> {
+    let path = word.trim_start_matches("./").trim_end_matches("...").trim_end_matches('/');
+    match path {
+        "" | "." => Some(None),
+        path if is_path(path) => Some(Some(path.to_string())),
+        _ => None,
+    }
+}
+
+fn tests_args(path: Option<String>, name: Option<String>) -> Map<String, Value> {
+    let mut args = Map::new();
+    if let Some(path) = path {
+        args.insert("path".into(), json!(path));
+    }
+    if let Some(name) = name {
+        args.insert("name".into(), json!(name));
+    }
+    args
+}
+
+/// `cargo test [-p crate] [name] [-- --nocapture]`.
+fn cargo_test(args: &[&str]) -> Option<Map<String, Value>> {
+    let (mut path, mut name) = (None, None);
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "--workspace" | "--all" | "-q" | "--quiet" => {}
+            "-p" | "--package" => path = Some(package_dir(Path::new("."), words.next()?)?),
+            "--" => {
+                // The test binary's options: only those that change what is shown.
+                for &option in words.by_ref() {
+                    if !matches!(option, "--nocapture" | "--show-output" | "-q" | "--quiet") && !option.starts_with("--test-threads=") {
+                        return None;
+                    }
+                }
+            }
+            w if w.starts_with("--package=") => path = Some(package_dir(Path::new("."), &w["--package=".len()..])?),
+            w if !w.starts_with('-') && name.is_none() => name = Some(test_name(w)?),
+            _ => return None,
+        }
+    }
+    Some(tests_args(path, name))
+}
+
+/// The folder of the workspace's crate `name`, under `root`: where its Cargo.toml names it,
+/// in the usual places.
+fn package_dir(root: &Path, name: &str) -> Option<String> {
+    let names_it = |dir: &str| {
+        std::fs::read_to_string(root.join(dir).join("Cargo.toml")).is_ok_and(|toml| {
+            toml.lines().map(str::trim).any(|l| l.strip_prefix("name").map(|v| v.trim_start().trim_start_matches('=').trim().trim_matches('"')) == Some(name))
+        })
+    };
+    let candidates = [format!("crates/{name}"), name.to_string(), format!("packages/{name}"), format!("libs/{name}")];
+    candidates.into_iter().find(|dir| is_path(dir) && names_it(dir))
+}
+
+/// `go test [./pkg/...] [-run Name] [-v] [-count=1]`.
+fn go_test(args: &[&str]) -> Option<Map<String, Value>> {
+    let (mut path, mut name, mut package) = (None, None, false);
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "-v" | "-count=1" => {}
+            "-count" if words.next() == Some(&"1") => {}
+            "-run" => name = Some(test_name(words.next()?)?),
+            w if w.starts_with("-run=") => name = Some(test_name(&w["-run=".len()..])?),
+            w if !w.starts_with('-') && !package => {
+                package = true;
+                path = test_path(w)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(tests_args(path, name))
+}
+
+/// `dotnet test [folder|project] [--filter Name~x] [--no-restore] [-v q]`.
+fn dotnet_test(args: &[&str]) -> Option<Map<String, Value>> {
+    let (mut path, mut name, mut target) = (None, None, false);
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "--no-restore" | "--nologo" => {}
+            "-v" | "--verbosity" => {
+                words.next()?;
+            }
+            "--filter" => {
+                let filter = words.next()?;
+                let wanted = ["FullyQualifiedName~", "Name~", "DisplayName~"].iter().find_map(|p| filter.strip_prefix(p)).unwrap_or(filter);
+                name = Some(test_name(wanted)?);
+            }
+            w if !w.starts_with('-') && !target => {
+                target = true;
+                path = if w.ends_with(".sln") || w.ends_with(".slnx") {
+                    None
+                } else if w.ends_with(".csproj") || w.ends_with(".fsproj") || w.ends_with(".vbproj") {
+                    match Path::new(w).parent().and_then(Path::to_str) {
+                        Some(dir) => test_path(dir)?,
+                        None => None,
+                    }
+                } else {
+                    test_path(w)?
+                };
+            }
+            _ => return None,
+        }
+    }
+    Some(tests_args(path, name))
+}
+
+/// `jest [path] [-t name]`, `vitest [run] [path] [-t name]`.
+fn js_test(runner: &str, args: &[&str]) -> Option<Map<String, Value>> {
+    let args = if runner == "vitest" { args.strip_prefix(&["run"]).unwrap_or(args) } else { args };
+    let (mut path, mut name, mut target) = (None, None, false);
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "--run" => {}
+            "-t" | "--testNamePattern" => name = Some(test_name(words.next()?)?),
+            w if w.starts_with("--testNamePattern=") => name = Some(test_name(&w["--testNamePattern=".len()..])?),
+            w if !w.starts_with('-') && !target => {
+                target = true;
+                path = test_path(w)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(tests_args(path, name))
+}
+
+/// `pytest [path[::Class::test]] [-k name] [-q] [-v] [-s]`.
+fn pytest(args: &[&str]) -> Option<Map<String, Value>> {
+    let (mut path, mut name, mut target) = (None, None, false);
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "-q" | "-v" | "-vv" | "-s" => {}
+            "-k" => name = Some(test_name(words.next()?)?),
+            w if w.starts_with("--tb=") => {}
+            w if !w.starts_with('-') && !target => {
+                target = true;
+                let mut parts = w.split("::");
+                path = test_path(parts.next()?)?;
+                if let Some(test) = parts.last() {
+                    name = Some(test_name(test)?);
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(tests_args(path, name))
 }
 
 /// A word the shell would expand (`$HOME`, `$1`, `${x}`).
@@ -393,6 +699,22 @@ pub(crate) fn exec_command(exe: &std::path::Path, url: &str, call: &Call) -> Str
     format!("\"{}\" {EXEC_ARG} {url} {hex}", exe.display())
 }
 
+/// A command line [`exec_command`] wrote, as the user reads it: the command for
+/// `run_command`, else the tool and what it was asked (`Read a file src/a.rs`).
+pub(crate) fn describe(command: &str) -> Option<String> {
+    let mut words = command.split(' ').skip_while(|w| *w != EXEC_ARG).skip(2);
+    let call: Value = serde_json::from_slice(&unhex(words.next()?)?).ok()?;
+    let (name, args) = (call["name"].as_str()?, &call["arguments"]);
+    if let Some(command) = args["command"].as_str().filter(|_| name == "run_command") {
+        return Some(command.to_string());
+    }
+    let title = crate::forge_mcp::tool_title(name).unwrap_or_else(|| name.to_string());
+    Some(match crate::forge_mcp::tool_summary(args) {
+        Some(summary) => format!("{title} {summary}"),
+        None => title,
+    })
+}
+
 fn unhex(hex: &str) -> Option<Vec<u8>> {
     (hex.len() % 2 == 0).then_some(())?;
     (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect()
@@ -412,7 +734,8 @@ pub fn run_exec(args: &[String]) -> i32 {
     match call_tool(url, name, &call["arguments"]) {
         Ok((text, false)) => {
             println!("{text}");
-            0
+            // A command's own exit code (`run_command` answers "Exit code 1." first).
+            text.strip_prefix("Exit code ").and_then(|rest| rest.split('.').next()?.parse().ok()).unwrap_or(0)
         }
         Ok((text, true)) => {
             eprintln!("{text}");
@@ -430,7 +753,9 @@ pub(crate) fn call_tool(url: &str, name: &str, arguments: &Value) -> Result<(Str
     let rest = url.strip_prefix("http://").ok_or("not an http URL")?;
     let (host, path) = rest.split_at(rest.find('/').ok_or("no path in the URL")?);
     let mut stream = TcpStream::connect(host).map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(Duration::from_secs(120))).map_err(|e| e.to_string())?;
+    // Tests and commands wait as long as the shell tool lets them run.
+    let timeout = (!takes_long(name)).then_some(Duration::from_secs(120));
+    stream.set_read_timeout(timeout).map_err(|e| e.to_string())?;
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string();
     let request = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
@@ -513,6 +838,56 @@ mod tests {
         assert_eq!(call("git blame -L 10,20 a.rs").unwrap().1, json!({ "action": "blame", "start_line": 10, "end_line": 20, "path": "a.rs" }));
         assert_eq!(call("git diff main..feature -- a.rs").unwrap().1, json!({ "action": "diff", "from": "main", "to": "feature", "path": "a.rs" }));
         assert_eq!(call("git diff --stat").unwrap().1, json!({ "action": "diff", "stat_only": true }));
+    }
+
+    #[test]
+    fn translates_test_runs() {
+        let tests = |command: &str| call(command).filter(|(name, _)| name == "run_tests").map(|(_, args)| args);
+        assert_eq!(tests("cargo test"), Some(json!({})));
+        assert_eq!(tests("cargo test parser::tests -- --nocapture"), Some(json!({ "name": "parser::tests" })));
+        assert_eq!(tests("cargo test --workspace 2>&1"), Some(json!({})));
+        assert_eq!(tests("go test ./..."), Some(json!({})));
+        assert_eq!(tests("go test -v -run ^TestParse$ ./internal/parser/..."), Some(json!({ "path": "internal/parser", "name": "TestParse" })));
+        assert_eq!(tests("dotnet test"), Some(json!({})));
+        assert_eq!(tests("dotnet test tests/App.Tests/App.Tests.csproj --filter FullyQualifiedName~Parser"), Some(json!({ "path": "tests/App.Tests", "name": "Parser" })));
+        assert_eq!(tests("dotnet test App.sln --no-restore -v q"), Some(json!({})));
+        assert_eq!(tests("npm test"), Some(json!({})));
+        assert_eq!(tests("pnpm run test"), Some(json!({})));
+        assert_eq!(tests("npx vitest run src/a.test.ts -t parses"), Some(json!({ "path": "src/a.test.ts", "name": "parses" })));
+        assert_eq!(tests("pytest tests/test_a.py::TestA::test_b -q"), Some(json!({ "path": "tests/test_a.py", "name": "test_b" })));
+        assert_eq!(tests("python3 -m pytest -k parse"), Some(json!({ "name": "parse" })));
+        assert_eq!(tests("rtk cargo test"), Some(json!({})));
+        // Piped into a filter: run_tests sums the results up itself.
+        assert_eq!(tests("cargo test parser 2>&1 | tail -30"), Some(json!({ "name": "parser" })));
+        // What run_tests can't do runs as it is.
+        for command in ["cargo test --features x", "cargo test --release", "cargo test -p no-such-crate", "cargo test -- --exact a", "go test -race ./...", "pytest -x", "npm test -- --watch", "dotnet test --filter Category=Slow", "cd sub && cargo test", "cargo test $NAME"] {
+            assert_eq!(call(command), None, "{command:?}");
+            assert_eq!(crate::shell_guard::refusal(command), None, "{command:?} runs");
+        }
+    }
+
+    #[test]
+    fn finds_a_crates_folder() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("crates/forge-x")).unwrap();
+        std::fs::write(root.path().join("crates/forge-x/Cargo.toml"), "[package]\nname = \"forge-x\"\n").unwrap();
+        assert_eq!(package_dir(root.path(), "forge-x").as_deref(), Some("crates/forge-x"));
+        assert_eq!(package_dir(root.path(), "forge-y"), None);
+        assert_eq!(package_dir(root.path(), "../x"), None);
+    }
+
+    #[test]
+    fn translates_piped_commands() {
+        assert_eq!(call("cargo build 2>&1 | tail -20"), Some(("run_command".into(), json!({ "command": "cargo build 2>&1", "tail": 20 }))));
+        assert_eq!(call("npm ls |& head -n 5").unwrap().1, json!({ "command": "npm ls", "head": 5 }));
+        assert_eq!(call("cd web && npm run build | grep -i 'error|warn' | tail -n 10").unwrap().1, json!({ "command": "cd web && npm run build", "filter": "(?i)error\\|warn", "tail": 10 }));
+        assert_eq!(call("make | grep -E 'error|warn'").unwrap().1, json!({ "command": "make", "filter": "error|warn" }));
+        assert_eq!(call("make | grep -F 'a.b'").unwrap().1, json!({ "command": "make", "filter": "a\\.b" }));
+        assert_eq!(call("make | grep error").unwrap().1, json!({ "command": "make", "filter": "error" }));
+        for command in ["make | grep -v x", "make | tail -f", "make | sort", "make | tail -5 | grep x", "make | head -5 | tail -2", "cat a.rs | grep x", "git log | head", "make | tail -5 > out.txt", "| tail"] {
+            assert_eq!(call(command), None, "{command:?}");
+            assert!(crate::shell_guard::refusal(command).is_some(), "{command:?} stays refused");
+        }
     }
 
     #[test]

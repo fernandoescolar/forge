@@ -113,7 +113,7 @@ fn write_copilot_files(root: &Path, hook: &str) -> std::io::Result<PathBuf> {
     Ok(root.to_path_buf())
 }
 
-fn dirs_home() -> Option<PathBuf> {
+pub(crate) fn dirs_home() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 

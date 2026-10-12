@@ -81,6 +81,14 @@ pub enum Status {
 }
 
 impl Status {
+    fn of(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Failed => Status::Failed,
+            Outcome::Passed => Status::Passed,
+            Outcome::Skipped => Status::Skipped,
+        }
+    }
+
     fn icon(self) -> (IconName, Color) {
         match self {
             Status::NotRun => (IconName::Circle, Color::Muted),
@@ -128,9 +136,47 @@ struct Run {
     current: Option<(String, std::time::Instant)>,
     /// What it has printed so far.
     live: runner::LiveLog,
+    /// Rust tests by what libtest calls them (`tests::adds`), to show each one's outcome as
+    /// soon as libtest prints it: a run's results come when the whole command ends, and a
+    /// test that hangs, or doc-tests that take long to build, would hold back every other.
+    live_names: HashMap<String, Vec<String>>,
+    /// Outcomes printed so far, by method.
+    live_outcomes: HashMap<String, Outcome>,
+    /// How much of `live` has been read for them, and in which job.
+    live_read: (usize, Option<std::time::Instant>),
     _task: Task<()>,
     /// Repaints the elapsed time and the live output.
     _ticker: Task<()>,
+}
+
+impl Run {
+    /// Reads the outcomes the Rust tests printed since the last time (see `live_names`).
+    fn read_live_outcomes(&mut self) {
+        if self.live_names.is_empty() {
+            return;
+        }
+        let log = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let job = self.current.as_ref().map(|(_, started)| *started);
+        let (read, read_job) = &mut self.live_read;
+        // Each job's output starts over.
+        if *read_job != job || *read > log.len() {
+            *read = 0;
+            *read_job = job;
+        }
+        let Some(unread) = log.get(*read..) else {
+            *read = 0;
+            return;
+        };
+        // Whole lines only: the last may still be coming.
+        let Some(end) = unread.rfind('\n') else { return };
+        for line in unread[..end].lines() {
+            let Some((name, outcome)) = crate::rust::live_result(line.trim_start()) else { continue };
+            for method in self.live_names.get(name).into_iter().flatten() {
+                self.live_outcomes.insert(method.clone(), outcome);
+            }
+        }
+        *read += end + 1;
+    }
 }
 
 pub struct TestPanel {
@@ -281,15 +327,13 @@ impl TestPanel {
     }
 
     fn method_status(&self, fqn: &str) -> Status {
-        if self.run.as_ref().is_some_and(|run| run.methods.contains(fqn)) {
-            return Status::Running;
+        if let Some(run) = self.run.as_ref().filter(|run| run.methods.contains(fqn)) {
+            return run.live_outcomes.get(fqn).map_or(Status::Running, |outcome| Status::of(*outcome));
         }
         match self.results.get(fqn) {
             None => Status::NotRun,
             Some(cases) => match cases.iter().map(|c| c.outcome).max() {
-                Some(Outcome::Failed) => Status::Failed,
-                Some(Outcome::Passed) => Status::Passed,
-                Some(Outcome::Skipped) => Status::Skipped,
+                Some(outcome) => Status::of(outcome),
                 None => Status::NotRun,
             },
         }
@@ -463,6 +507,14 @@ impl TestPanel {
             .map(|(p, scope)| (self.projects[p].clone(), self.methods_in(p, &scope), scope))
             .collect();
         let methods = jobs.iter().flat_map(|(_, methods, _)| methods.iter().cloned()).collect();
+        let mut live_names: HashMap<String, Vec<String>> = HashMap::new();
+        for (_, methods, _) in jobs.iter().filter(|(project, _, _)| matches!(project.kind, discovery::Kind::Rust { .. })) {
+            for method in methods {
+                if let Some(name) = crate::rust::libtest_name(method) {
+                    live_names.entry(name.to_string()).or_default().push(method.clone());
+                }
+            }
+        }
         self.error = None;
         let live = runner::LiveLog::default();
         let task_live = live.clone();
@@ -520,6 +572,9 @@ impl TestPanel {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
                 let running = this.update(cx, |this, cx| {
+                    if let Some(run) = &mut this.run {
+                        run.read_live_outcomes();
+                    }
                     cx.notify();
                     this.run.is_some()
                 });
@@ -528,7 +583,7 @@ impl TestPanel {
                 }
             }
         });
-        self.run = Some(Run { methods, current: None, live, _task: task, _ticker: ticker });
+        self.run = Some(Run { methods, current: None, live, live_names, live_outcomes: HashMap::new(), live_read: (0, None), _task: task, _ticker: ticker });
         self.publish_gutter(cx);
         cx.notify();
     }

@@ -5,9 +5,15 @@
 //! src`, `git log -n 5`) is run through them: the hook rewrites it into a call to Forge's
 //! MCP server ([`crate::shell_translate`]). A command that greps, cats, pipes into `tail` or
 //! writes a file and isn't that simple is refused with the tool to use instead, which Claude
-//! reads and follows. Everything else runs as usual. Copilot and agy run the same hook, but
+//! reads and follows; so are `git commit` and `git push`, which the user makes from Forge.
+//! Test runs and commands piped into `grep`, `head` or `tail` go to `run_tests` and
+//! `run_command`. Everything else runs as usual. Copilot and agy run the same hook, but
 //! can't have a command changed, so they are refused; Codex and Gemini get rules generated
 //! from the same table, [`RULES`] (see [`crate::agent_setup`]).
+//!
+//! Claude's hook also sees other MCP servers' tools: those that name a file kept from
+//! agents are refused, and those that change files ask the user first, since their changes
+//! skip the review Forge gives the agent's own edits.
 //!
 //! It's a guide, not a sandbox: it reads the command line as a shell would, well enough to
 //! catch the usual ways (`cd x && grep`, `$(cat a)`, `bash -c '…'`, `sudo`, `xargs grep`),
@@ -41,24 +47,36 @@ pub fn hook_answer(call: &Value) -> Option<Value> {
     hook_answer_with(call, None)
 }
 
+/// The longest a Claude Code shell command may run (ms): what translated test runs and
+/// commands get, instead of the default two minutes.
+const LONGEST_COMMAND_MS: u64 = 600_000;
+
 /// [`hook_answer`], translating Claude's commands that Forge's tools can run (`exe` runs
 /// them against the server at the URL) instead of refusing them.
 fn hook_answer_with(call: &Value, tools: Option<(&std::path::Path, &str)>) -> Option<Value> {
+    // Claude Code: another MCP server's tool (`{"tool_name": "mcp__…", "tool_input"}`).
+    if let Some(name) = call.get("tool_name").and_then(Value::as_str).filter(|n| n.starts_with("mcp__")) {
+        let root = call.get("cwd").and_then(Value::as_str).map(std::path::Path::new);
+        return mcp_answer(name, &call["tool_input"], root);
+    }
     // Claude Code: `{"tool_input": {"command"}}`.
     if let Some(command) = call.pointer("/tool_input/command").and_then(Value::as_str) {
-        let reason = refusal(command)?;
-        if let Some((exe, url)) = tools {
-            if let Some(translated) = crate::shell_translate::translate(command) {
-                let mut input = call["tool_input"].clone();
-                input["command"] = json!(crate::shell_translate::exec_command(exe, url, &translated));
-                return Some(json!({ "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": format!("Forge ran this with its `{}` tool.", translated.0),
-                    "updatedInput": input,
-                } }));
+        // Test runs aren't refused, but go to the Tests panel when they can.
+        if let (Some((exe, url)), Some(translated)) = (tools, crate::shell_translate::translate(command)) {
+            let mut input = call["tool_input"].clone();
+            input["command"] = json!(crate::shell_translate::exec_command(exe, url, &translated));
+            if crate::shell_translate::takes_long(translated.0) {
+                let asked = input.get("timeout").and_then(Value::as_u64).unwrap_or(0);
+                input["timeout"] = json!(asked.max(LONGEST_COMMAND_MS));
             }
+            return Some(json!({ "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": format!("Forge ran this with its `{}` tool.", translated.0),
+                "updatedInput": input,
+            } }));
         }
+        let reason = refusal(command)?;
         return Some(json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }));
     }
     // Antigravity (agy): `{"toolCall": {"name": "run_command", "args": {"CommandLine"}}}`.
@@ -86,7 +104,74 @@ pub fn hook_settings(exe: &std::path::Path, url: Option<&str>) -> Value {
         Some(url) => format!("{} {url}", hook_command(exe)),
         None => hook_command(exe),
     };
-    json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }] } })
+    json!({ "hooks": { "PreToolUse": [
+        { "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": 10 }] },
+        // Other MCP servers' tools (Forge's own check their arguments themselves).
+        { "matcher": OTHER_MCP_TOOLS, "hooks": [{ "type": "command", "command": hook_command(exe), "timeout": 10 }] },
+    ] } })
+}
+
+/// The hook's matcher for tools of MCP servers other than Forge's (a regex for Claude Code).
+const OTHER_MCP_TOOLS: &str = "^mcp__(?!forge__)";
+
+/// Words in the name of a tool that changes files (`replace_content`, `write_file`).
+const WRITING_TOOL_WORDS: &[&str] = &["write", "edit", "replace", "insert", "create", "delete", "remove", "rename", "move", "patch", "append", "save"];
+
+/// Argument names that hold a file or folder.
+const PATH_KEYS: &[&str] = &["path", "paths", "file", "files", "file_path", "filepath", "filename", "relative_path", "source", "destination"];
+
+/// The hook's answer to a tool of another MCP server (`name` as Claude calls it, `root`
+/// the project): refused when it names a file kept from agents, and asked about when it
+/// changes files, since those changes skip the review Forge gives the agent's own edits.
+fn mcp_answer(name: &str, input: &Value, root: Option<&std::path::Path>) -> Option<Value> {
+    if name.starts_with(&format!("mcp__{}__", crate::forge_mcp::SERVER_NAME)) {
+        return None;
+    }
+    let paths: Vec<&str> = PATH_KEYS
+        .iter()
+        .filter_map(|key| input.get(*key))
+        .flat_map(|value| match value {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => vec![],
+        })
+        .collect();
+    let answer = |decision: &str, reason: String| Some(json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason } }));
+    if let Some(root) = root {
+        let kept = crate::agent_ignore::AgentIgnore::load(root);
+        if let Some(path) = paths.iter().find(|p| kept.denies(std::path::Path::new(p))) {
+            return answer("deny", format!("Forge refused `{name}`: the user keeps {path} from agents. Ask the user if you need something from it."));
+        }
+    }
+    let tool = name.rsplit("__").next().unwrap_or(name).to_lowercase();
+    if !paths.is_empty() && WRITING_TOOL_WORDS.iter().any(|w| tool.contains(w)) {
+        return answer("ask", format!("`{name}` changes files without the review Forge gives your own edits. {WRITE}."));
+    }
+    None
+}
+
+/// The commands of the user's own `PreToolUse` hooks for Claude Code's shell tool, in
+/// `~/.claude` and the project in `root`: they may change the same commands Forge's hook
+/// changes, and Claude Code doesn't say which change wins.
+pub fn other_shell_hooks(home: Option<&std::path::Path>, root: &std::path::Path) -> Vec<String> {
+    let files = home.map(|h| h.join(".claude/settings.json")).into_iter().chain([root.join(".claude/settings.json"), root.join(".claude/settings.local.json")]);
+    let mut commands = Vec::new();
+    for file in files {
+        let Some(settings) = std::fs::read_to_string(&file).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) else { continue };
+        for entry in settings.pointer("/hooks/PreToolUse").and_then(Value::as_array).into_iter().flatten() {
+            let matcher = entry.get("matcher").and_then(Value::as_str).unwrap_or_default();
+            let matches_bash = matcher.is_empty() || matcher == "*" || regex::Regex::new(&format!("^(?:{matcher})$")).is_ok_and(|r| r.is_match("Bash"));
+            if !matches_bash {
+                continue;
+            }
+            for hook in entry.get("hooks").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(command) = hook.get("command").and_then(Value::as_str).filter(|c| !c.contains(HOOK_ARG)) {
+                    commands.push(command.to_string());
+                }
+            }
+        }
+    }
+    commands
 }
 
 // Agents name MCP tools their own way (`mcp__forge__search`, `forge/search`…): the
@@ -97,6 +182,7 @@ pub(crate) const FIND: &str = "Find files with your own file-finding tool, or th
 pub(crate) const WRITE: &str = "Change files with your own edit and write tools: the user reviews each change as a diff in Forge, and what a shell writes skips that review";
 pub(crate) const GIT: &str = "Read the history with the `git_history` tool of the `forge` MCP server (`log`, `changes` for git log -S/-G, `show`, `file_at`, `blame`, `diff`)";
 pub(crate) const PIPE: &str = "Run the command with the `run_command` tool of the `forge` MCP server and pass `tail`, `head` or `filter` (a regex) instead of piping: you get that part of the output and the user watches all of it live";
+pub(crate) const PUBLISH: &str = "Commits and pushes are the user's to make: call the `propose_commit` tool of the `forge` MCP server (`message`, and `files` instead of staging them) or `propose_push`, and the user makes them from Forge";
 
 /// When the programs of a [`Rule`] are refused.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -133,6 +219,7 @@ pub(crate) const RULES: &[Rule] = &[
     Rule { programs: &["find", "fd", "tree"], when: When::Always, reason: FIND },
     Rule { programs: &["ls"], when: When::Flag('R'), reason: FIND },
     Rule { programs: &["git log", "git show", "git blame", "git diff", "git annotate", "git whatchanged"], when: When::Always, reason: GIT },
+    Rule { programs: &["git commit", "git push"], when: When::Always, reason: PUBLISH },
 ];
 
 /// Commands that run the command after them (`sudo grep …`), with their options that take
@@ -150,6 +237,8 @@ const PREFIXES: &[(&str, &[&str])] = &[
     ("timeout", &["-s", "-k", "--signal", "--kill-after"]),
     ("stdbuf", &["-i", "-o", "-e"]),
     ("xargs", &["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"]),
+    // RTK (a token-saving proxy): `rtk grep …`, `rtk proxy git log`.
+    ("rtk", &[]),
 ];
 
 /// Shell keywords before a command (`if grep …`, `{ cat a; }`, `! grep …`).
@@ -254,6 +343,9 @@ fn command_words(words: &[String]) -> Option<(&[String], bool)> {
         if name == "timeout" {
             i += 1; // Its duration.
         }
+        if name == "rtk" && words.get(i).is_some_and(|w| w == "proxy") {
+            i += 1;
+        }
     }
     Some((&words[i.min(words.len())..], xargs))
 }
@@ -279,6 +371,8 @@ pub(crate) struct Segment {
     pub words: Vec<String>,
     /// Its input is piped from the command before.
     pub piped: bool,
+    /// Where that `|` is in the command line, in characters.
+    pub pipe_at: usize,
     /// Where it redirects output (`> file`, `>> file`, `2>&1` as `&1`).
     pub outputs: Vec<String>,
     /// What it reads with `<`.
@@ -419,6 +513,7 @@ pub(crate) fn parse(command: &str) -> Line {
                 target = Target::Output;
             }
             (None, '|' | '&' | ';' | '\n' | '(' | ')') => {
+                let at = i - 1;
                 end_word(&mut current, &mut word, &mut target, &mut heredocs);
                 let doubled = matches!(c, '|' | '&' | ';') && next == Some(c);
                 if doubled || (c == '|' && next == Some('&')) {
@@ -426,6 +521,7 @@ pub(crate) fn parse(command: &str) -> Line {
                 }
                 finish(&mut line, &mut current);
                 current.piped = c == '|' && !doubled;
+                current.pipe_at = at;
                 if c == '\n' {
                     skip_heredocs(&chars, &mut i, &mut heredocs);
                 }
@@ -646,6 +742,13 @@ mod tests {
             ("(cd src && grep foo *.rs)", Some(search)),
             ("{ cat a.rs; }", Some(read)),
             ("if grep -q foo a.rs; then echo y; fi", Some(search)),
+            ("rtk grep foo src", Some(search)),
+            ("rtk proxy git log -n 3", Some(git)),
+            // Commits and pushes are the user's.
+            ("git commit -m \"fix: cat > dog\"", Some("propose_commit")),
+            ("git add -A && git commit -m x && git push", Some("propose_commit")),
+            ("git -C repo push origin main", Some("propose_push")),
+            ("cat <<EOF | git commit -F -\nfix\nEOF", Some("propose_commit")),
             // Allowed.
             ("cargo build", None),
             ("git status", None),
@@ -660,10 +763,12 @@ mod tests {
             ("cargo build 2>/dev/null", None),
             ("echo error >&2", None),
             ("echo 'a | grep b'", None),
-            ("git commit -m \"fix: cat > dog\"", None),
+            ("echo \"fix: cat > dog\"", None),
             ("dotnet build && dotnet test", None),
-            ("cat <<EOF | git commit -F -\nfix: find the grep bug\n\ncat > dog\nEOF", None),
-            ("git commit -F - <<'EOF'\nfind things\n| grep\nEOF\ncargo build", None),
+            ("cat <<EOF | gh pr create --body-file -\nfix: find the grep bug\n\ncat > dog\nEOF", None),
+            ("gh pr create --body-file - <<'EOF'\nfind things\n| grep\nEOF\ncargo build", None),
+            ("rtk gain", None),
+            ("git add -A", None),
             ("python3 - <<<'print(1)'", None),
             ("command -v grep", None),
             ("which rg", None),
@@ -733,13 +838,13 @@ mod tests {
         for command in ["cd x && grep foo", "FOO=1 grep x", "git -C dir log", "echo $(cat a.rs)", "echo hi > out.txt", "a; b\ncat a.rs", "xargs -0 grep x", "sudo -u root cat /etc/hosts", "cat \"a.rs\""] {
             assert!(gemini_denies(&gemini, command), "gemini: {command}");
         }
-        for command in ["cargo build", "git status", "git commit -m log", "ls -la", "npm test 2>&1", "echo hi >/dev/null", "echo hi >&2", "perl -Mstrict -e 1", "a || sort-files", "cargo test --features grep", "my-grep x"] {
+        for command in ["cargo build", "git status", "git add log", "ls -la", "npm test 2>&1", "echo hi >/dev/null", "echo hi >&2", "perl -Mstrict -e 1", "a || sort-files", "cargo test --features grep", "my-grep x"] {
             assert!(!codex_forbids(&rules, command), "codex: {command}");
             assert!(!gemini_denies(&gemini, command), "gemini: {command}");
             assert!(refusal(command).is_none(), "hook: {command}");
         }
         // Execpolicy refuses `cat` whatever follows.
-        for command in ["cat", "cat <<EOF | git commit -F -"] {
+        for command in ["cat", "cat <<EOF | gh pr create --body-file -"] {
             assert!(!gemini_denies(&gemini, command) && refusal(command).is_none(), "{command}");
         }
     }
@@ -774,6 +879,39 @@ mod tests {
         assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "\"/Applications/Forge.app/Contents/MacOS/forge\" --agent-shell-hook");
         let with_tools = hook_settings(exe, Some("http://127.0.0.1:5/mcp/t"));
         assert_eq!(with_tools["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "\"/Applications/Forge.app/Contents/MacOS/forge\" --agent-shell-hook http://127.0.0.1:5/mcp/t");
+        // Other MCP servers' tools, not Forge's.
+        let matcher = regex::Regex::new(&settings["hooks"]["PreToolUse"][1]["matcher"].as_str().unwrap().replace("(?!forge__)", "")).unwrap();
+        assert!(matcher.is_match("mcp__serena__replace_content"));
+        assert_eq!(settings["hooks"]["PreToolUse"][1]["matcher"], "^mcp__(?!forge__)", "a lookahead: Claude Code's matchers are JavaScript regexes");
+    }
+
+    #[test]
+    fn guards_other_mcp_servers_tools() {
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_str().unwrap();
+        let call = |name: &str, input: Value| hook_answer(&json!({ "tool_name": name, "tool_input": input, "cwd": cwd }));
+        let decision = |answer: Option<Value>| answer.map(|a| a["hookSpecificOutput"]["permissionDecision"].as_str().unwrap().to_string());
+        assert_eq!(decision(call("mcp__serena__read_file", json!({ "relative_path": ".env" }))).as_deref(), Some("deny"), "kept from agents");
+        assert_eq!(decision(call("mcp__serena__replace_content", json!({ "relative_path": "src/a.rs", "needle": "a", "repl": "b" }))).as_deref(), Some("ask"));
+        assert_eq!(decision(call("mcp__fs__write_file", json!({ "paths": ["a.rs"] }))).as_deref(), Some("ask"));
+        assert_eq!(call("mcp__serena__find_symbol", json!({ "relative_path": "src/a.rs" })), None, "reads go ahead");
+        assert_eq!(call("mcp__github__create_issue", json!({ "title": "x" })), None, "names no file");
+        assert_eq!(call("mcp__forge__read_file", json!({ "path": ".env" })), None, "Forge's own tools check themselves");
+        // A tool's `command` argument isn't a shell command.
+        assert_eq!(call("mcp__ssh__run", json!({ "command": "cat a.rs" })), None);
+    }
+
+    #[test]
+    fn finds_the_users_own_shell_hooks() {
+        let (home, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+        let hooks = |matcher: &str, command: &str| json!({ "hooks": { "PreToolUse": [{ "matcher": matcher, "hooks": [{ "type": "command", "command": command }] }] } }).to_string();
+        std::fs::write(home.path().join(".claude/settings.json"), hooks("Bash", "rtk-rewrite.sh")).unwrap();
+        std::fs::write(project.path().join(".claude/settings.json"), hooks("Edit|Write", "fmt.sh")).unwrap();
+        std::fs::write(project.path().join(".claude/settings.local.json"), hooks("*", "\"/F/forge\" --agent-shell-hook")).unwrap();
+        assert_eq!(other_shell_hooks(Some(home.path()), project.path()), ["rtk-rewrite.sh"]);
+        assert!(other_shell_hooks(None, project.path()).is_empty());
     }
 
     #[test]
@@ -787,9 +925,20 @@ mod tests {
         assert!(output["updatedInput"]["command"].as_str().unwrap().starts_with("\"/F/forge\" --agent-shell-exec http://127.0.0.1:5/mcp/t "));
         // Not exact, or no server: refused as before.
         assert_eq!(hook_answer_with(&call("grep -c foo a.rs"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(hook_answer_with(&call("cargo test | tail -5"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(hook_answer_with(&call("npm ls | sort"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(hook_answer_with(&call("git commit -m x"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(hook_answer_with(&call("head -n 5 src/a.rs"), None).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(hook_answer_with(&call("cargo build"), tools), None);
+        // Tests and piped commands go to the Tests panel and the terminal, with time to run.
+        let tests = &hook_answer_with(&call("cargo test parser 2>&1 | tail -20"), tools).unwrap()["hookSpecificOutput"];
+        assert_eq!((tests["permissionDecision"].as_str(), tests["updatedInput"]["timeout"].as_u64()), (Some("allow"), Some(LONGEST_COMMAND_MS)));
+        assert!(tests["permissionDecisionReason"].as_str().unwrap().contains("run_tests"));
+        let piped = &hook_answer_with(&call("cargo build 2>&1 | tail -20"), tools).unwrap()["hookSpecificOutput"];
+        assert!(piped["permissionDecisionReason"].as_str().unwrap().contains("run_command"));
+        let read = &hook_answer_with(&call("cat a.rs"), tools).unwrap()["hookSpecificOutput"];
+        assert_eq!(read["updatedInput"].get("timeout"), None, "reads keep the agent's timeout");
+        // Without Forge's server, tests run as they are.
+        assert_eq!(hook_answer_with(&call("cargo test"), None), None);
         // Other agents have no way to change the command: they are refused.
         let agy = hook_answer_with(&json!({ "toolCall": { "args": { "CommandLine": "cat a.rs" } } }), tools).unwrap();
         assert_eq!(agy["decision"], "deny");

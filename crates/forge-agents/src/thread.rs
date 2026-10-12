@@ -808,6 +808,11 @@ impl Thread {
         let mut mcp = self.mcp_servers.clone();
         let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
         let spec_for_auth = spec.clone();
+        // The user's own hooks for Claude's shell tool may change the commands Forge's hook does.
+        let other_shell_hooks = match crate::agent_setup::kind(&spec) {
+            crate::agent_setup::AgentKind::Claude => crate::shell_guard::other_shell_hooks(crate::agent_setup::dirs_home().as_deref(), &self.root),
+            _ => vec![],
+        };
         // The agent's `initialize` answer, kept even when `session/new` fails: its login
         // methods are what that failure (not signed in) needs.
         let initialized: Arc<std::sync::Mutex<Option<Value>>> = Arc::default();
@@ -887,6 +892,15 @@ impl Thread {
                             (true, _) => this.system(format!("Resumed the session with {name}."), Color::Success),
                             (false, true) => this.system(format!("{name} can't resume that session; started a new one (the conversation above is for reference only)."), Color::Warning),
                             (false, false) => this.system(format!("Connected to {name}."), Color::Success),
+                        }
+                        if this.forge_tools && !resumed && !other_shell_hooks.is_empty() {
+                            this.system(
+                                format!(
+                                    "Your own Claude Code hooks change shell commands too ({}). Forge's hook runs commands such as `cat`, `grep` or `cargo test` through its tools, and when both change the same command, Claude Code doesn't say which change wins: if the agent's commands skip Forge's tools, turn those hooks off while working in Forge.",
+                                    other_shell_hooks.join(", ")
+                                ),
+                                Color::Warning,
+                            );
                         }
                         if let Some(reason) = this.auth_pending.take() {
                             this.show_auth(&reason, cx);

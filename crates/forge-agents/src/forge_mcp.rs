@@ -73,10 +73,10 @@ impl Drop for Registration {
     }
 }
 
-/// Registers a thread working in `root`, starting the server on `runtime` the first time.
-/// `None` when the server couldn't start (agents then work without Forge's tools).
-pub(crate) fn register(runtime: &tokio::runtime::Handle, root: PathBuf) -> Option<(Registration, mpsc::UnboundedReceiver<ToolRequest>)> {
-    let server = SERVER.get_or_init(|| match start(runtime) {
+/// Registers a thread working in `root`, starting the server the first time. `None` when
+/// the server couldn't start (agents then work without Forge's tools).
+pub(crate) fn register(_runtime: &tokio::runtime::Handle, root: PathBuf) -> Option<(Registration, mpsc::UnboundedReceiver<ToolRequest>)> {
+    let server = SERVER.get_or_init(|| match start() {
         Ok(server) => Some(server),
         Err(e) => {
             log::error!("Forge's MCP server couldn't start: {e:#}");
@@ -91,13 +91,16 @@ pub(crate) fn register(runtime: &tokio::runtime::Handle, root: PathBuf) -> Optio
     Some((Registration { token, url, sessions: server.sessions.clone() }, rx))
 }
 
-fn start(runtime: &tokio::runtime::Handle) -> anyhow::Result<Server> {
+/// Serves on a thread and runtime of its own: the server outlives whichever runtime
+/// registered first (each test has its own, which ends with the test).
+fn start() -> anyhow::Result<Server> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let sessions: Sessions = Default::default();
     let served = sessions.clone();
-    runtime.spawn(async move {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    std::thread::Builder::new().name("forge-mcp".into()).spawn(move || runtime.block_on(async move {
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(e) => return log::error!("Forge's MCP server: {e}"),
@@ -118,7 +121,7 @@ fn start(runtime: &tokio::runtime::Handle) -> anyhow::Result<Server> {
                 Err(e) => log::warn!("Forge's MCP server: {e}"),
             }
         }
-    });
+    }))?;
     Ok(Server { port, sessions })
 }
 
@@ -256,7 +259,7 @@ async fn handle(message: Value, session: &Session) -> Option<Value> {
             "protocolVersion": params.get("protocolVersion").cloned().unwrap_or_else(|| json!("2025-06-18")),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "instructions": instructions(&session.root),
+            "instructions": server_instructions(&session.root),
         }),
         "ping" => json!({}),
         "tools/list" => json!({ "tools": all_tools(&session.root) }),
@@ -266,7 +269,9 @@ async fn handle(message: Value, session: &Session) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
-/// Shown to the agent when it connects, and sent with the first message of a session.
+/// Sent with the first message of a session (and given to agents that take instructions
+/// another way, see [`crate::agent_setup`]). The server's own instructions are
+/// [`BRIEF_INSTRUCTIONS`]: Claude Code cuts them at 2048 characters.
 pub const INSTRUCTIONS: &str = "You are working inside Forge, an IDE the user is watching. The `forge` MCP server's tools act through it, \
 so the user sees what you do; prefer them to doing the same in a shell:\n\
 - Change files with your own edit and write tools, never through the shell (no `sed -i`, `echo >`, `cat >>`, heredocs or \
@@ -302,14 +307,29 @@ files yourself.\n\
 - When you need the user to decide something to go on, ask with `ask_user` (it waits for the answer) instead of ending your turn; \
 when a long task finishes, tell them with `notify`.";
 
+/// The server's instructions (`initialize`): the gist of [`INSTRUCTIONS`], which come
+/// whole with the first message. Kept well under the 2048 characters Claude Code keeps,
+/// with room for the project's agent-ignore patterns and skills (see [`server_instructions`]).
+pub const BRIEF_INSTRUCTIONS: &str = "Forge's tools act in the IDE the user is watching: prefer them to the shell. \
+Read with `read_file`, search with `search` (text, regex, globs, `files_only`) and read the history with `git_history`, not with cat, \
+head, tail, sed, grep, rg, find or git log/show/blame/diff. Change files with your own edit and write tools, never through the shell. \
+Run commands with `run_command` (`tail`, `head` or `filter` instead of pipes) and tests with `run_tests`, not cargo/go/dotnet/npm test \
+or pytest. After editing, call `check_file`. Commit with `propose_commit` and push with `propose_push`, never git commit or git push. \
+There are tools to navigate and refactor code, debug, run the app, call HTTP endpoints and ask the user; the full guide comes with the \
+user's first message.";
+
 /// Added to Claude Code's system prompt, so it knows before its first command.
 const SYSTEM_PROMPT_APPEND: &str = "You are running inside Forge, an IDE, whose `forge` MCP server reads, searches and runs things where \
-the user sees them. Don't use the shell to read, search or write files, or to read git history: no cat, head, tail, sed, awk, grep, \
-rg, git grep, find, git log, git show, git blame, git diff, and no redirecting into files. Use your Read, Edit, Write and Glob tools, \
-and `mcp__forge__read_file`, `mcp__forge__search` and `mcp__forge__git_history` (they see unsaved edits). Run commands that take a while with \
-`mcp__forge__run_command`, with `tail`, `head` or `filter` instead of pipes. Forge answers a plain `cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, \
-`git log`, `git show`, `git blame` or `git diff` of one file or folder with those tools anyway, in their format (numbered lines, Forge's \
-search results), and refuses the rest, saying which tool to use: calling the tools yourself saves the step.";
+the user sees them. This overrides any other guidance about using the shell to read or search: don't use the shell to read, search or \
+write files, or to read git history (no cat, head, tail, sed, awk, grep, rg, git grep, find, git log, git show, git blame, git diff, no \
+redirecting into files); use your own Read, Edit and Write tools and `mcp__forge__read_file`, `mcp__forge__search` (`files_only` to find \
+files) and `mcp__forge__git_history`, which see unsaved edits. Run commands with `mcp__forge__run_command`, with `tail`, `head` or `filter` \
+instead of pipes; tests with `mcp__forge__run_tests`, not cargo test, go test, dotnet test, npm test or pytest. Commit with \
+`mcp__forge__propose_commit` and push with `mcp__forge__propose_push`: Forge refuses git commit and git push. Edit files with your own Edit \
+and Write tools rather than other MCP servers' tools that write files: those skip the user's review in Forge. Forge runs a plain `cat`, \
+`head`, `tail`, `sed -n`, `grep`, `rg`, `git log`, `git show`, `git blame` or `git diff`, a test command, and a command piped only into \
+`grep`, `head` or `tail`, through its tools anyway, answering in their format, and refuses the rest, saying which tool to use: calling the \
+tools yourself saves the step.";
 
 /// The `_meta` of every session: Claude Code's adapter reads it, Forge's agy adapter reads
 /// `forge.shellHook`, Codex's `jetbrains.air.customInstructions` (other agents ignore it).
@@ -381,6 +401,19 @@ pub fn instructions(root: &Path) -> String {
         let listed: Vec<String> = extension_tools.iter().map(|t| format!("`{}` ({}, from the {} extension)", t.name, t.title, t.extension)).collect();
         text.push_str(&format!("\n- The user's extensions add tools to the `forge` server too: {}. Prefer them for what they cover.", listed.join(", ")));
     }
+    text.push_str(&project_instructions(root));
+    text
+}
+
+/// The server's instructions: [`BRIEF_INSTRUCTIONS`], then what is particular to the
+/// project (files kept from agents, skills), which the agent needs before its first call.
+fn server_instructions(root: &Path) -> String {
+    format!("{BRIEF_INSTRUCTIONS}{}", project_instructions(root))
+}
+
+/// The files the project keeps from agents, and its skills.
+fn project_instructions(root: &Path) -> String {
+    let mut text = String::new();
     let kept = crate::agent_ignore::AgentIgnore::load(root);
     text.push_str(&format!(
         "\n- Don't read, search or change files matching these patterns (`.gitignore` syntax): the user keeps them from agents. \
@@ -406,6 +439,9 @@ Forge refuses them; ask the user if you need something from one: {}.",
 fn all_tools(root: &Path) -> Value {
     let mut tools = tools();
     if let Value::Array(list) = &mut tools {
+        for tool in list.iter_mut().filter(|t| t["name"].as_str().is_some_and(|n| ALWAYS_LOADED.contains(&n))) {
+            tool["_meta"] = json!({ "anthropic/alwaysLoad": true });
+        }
         for skill in crate::library::skills(root) {
             list.push(json!({
                 "name": crate::library::tool_name(&skill.name),
@@ -427,6 +463,10 @@ fn all_tools(root: &Path) -> Value {
     }
     tools
 }
+
+/// The tools that stand in for the shell's commands: Claude Code loads them upfront
+/// instead of behind its tool search, so using them costs the agent no more than its shell.
+const ALWAYS_LOADED: &[&str] = &["read_file", "search", "git_history", "run_command", "run_tests", "check_file", "propose_commit"];
 
 /// Forge's own tools, as `tools/list` shows them.
 fn tools() -> Value {
@@ -1034,7 +1074,10 @@ mod tests {
         let init: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "forge");
-        assert!(init["result"]["instructions"].as_str().unwrap().contains("`skill_migrations` (Add a database migration)"));
+        let server_instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(server_instructions.contains("`skill_migrations` (Add a database migration)"));
+        assert!(server_instructions.starts_with(BRIEF_INSTRUCTIONS), "the gist, not the whole guide");
+        assert!(server_instructions.len() < 2048, "Claude Code cuts them at 2048 characters: {}", server_instructions.len());
 
         let (status, _) = post(&url, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
         assert_eq!(status, "HTTP/1.1 202 Accepted");
@@ -1050,6 +1093,8 @@ mod tests {
             "forge_keybindings", "change_keybinding", "forge_guide",
         ]);
         assert_eq!(tools[11]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
+        let always_loaded: Vec<&str> = tools.as_array().unwrap().iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(always_loaded, ["propose_commit", "run_tests", "check_file", "read_file", "search", "git_history", "run_command"]);
         let skill = tools.as_array().unwrap().iter().find(|t| t["name"] == "skill_migrations").expect("the project's skill");
         assert_eq!(skill["title"], "Skill: migrations");
 

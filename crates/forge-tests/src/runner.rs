@@ -275,6 +275,8 @@ pub async fn execute(mut command: util::command::Command, live: LiveLog, show: O
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     live.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let mut child = forge_ui::process::spawn_unblocked(command)?;
+    // Declared after `child`, so dropped first: its children go while it still has them.
+    let mut cancel = KillDescendantsOnDrop { pid: child.id(), armed: true };
     let stdout_text = LiveLog::default();
     let stderr_text = LiveLog::default();
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -298,6 +300,8 @@ pub async fn execute(mut command: util::command::Command, live: LiveLog, show: O
         unreachable!()
     })
     .await?;
+    // What it leaves running on purpose (build servers) stays.
+    cancel.armed = false;
     // Give the pipes a moment to deliver what the process printed last.
     smol::future::or(drain.as_mut(), async {
         for _ in 0..20 {
@@ -310,6 +314,22 @@ pub async fn execute(mut command: util::command::Command, live: LiveLog, show: O
     .await;
     let take = |log: &LiveLog| log.lock().unwrap_or_else(|e| e.into_inner()).clone();
     Ok(Executed { stdout: take(&stdout_text), stderr: take(&stderr_text), log: take(&live), success: status.success() })
+}
+
+/// Stops what a test command started when its run is dropped before it ends (the user
+/// cancelled): `kill_on_drop` stops only the command, and `cargo test`'s test binary would
+/// run on, adopted by init.
+struct KillDescendantsOnDrop {
+    pid: u32,
+    armed: bool,
+}
+
+impl Drop for KillDescendantsOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            forge_ui::process::kill_descendants(self.pid);
+        }
+    }
 }
 
 /// Appends everything `stream` yields to `raw` and, line by line through `show`, to

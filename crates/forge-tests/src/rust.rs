@@ -291,6 +291,24 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
 
 static RESULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^test (\S+) \.\.\. (ok|FAILED|ignored)").unwrap());
 
+/// A test's outcome as libtest prints it while the run goes on (`test a::b ... ok`): what
+/// libtest calls the test, and how it ended. The full results come from [`parse`] at the
+/// end, which knows each test's target.
+pub fn live_result(line: &str) -> Option<(&str, Outcome)> {
+    let captures = RESULT.captures(line)?;
+    let outcome = match captures.get(2)?.as_str() {
+        "ok" => Outcome::Passed,
+        "FAILED" => Outcome::Failed,
+        _ => Outcome::Skipped,
+    };
+    Some((captures.get(1)?.as_str(), outcome))
+}
+
+/// What libtest calls the test with id `id` (`package|target|path` → `path`).
+pub fn libtest_name(id: &str) -> Option<&str> {
+    split_id(id).map(|(_, path)| path)
+}
+
 /// Results from libtest's output. Cargo names each test binary on stderr (`Running
 /// unittests src/lib.rs`, `Running tests/api.rs`, `Doc-tests`) in the order their
 /// `running N tests` blocks appear on stdout.
@@ -424,6 +442,15 @@ fn at_root() {}
         let summary: Vec<(&str, Outcome)> = results.iter().map(|r| (r.method_fqn.as_str(), r.outcome)).collect();
         assert_eq!(summary, [("calc||tests::adds", Outcome::Passed), ("calc||tests::fails", Outcome::Failed), ("calc|api|checks_api", Outcome::Skipped)]);
         assert!(results[1].message.as_deref().unwrap().contains("panicked at src/lib.rs:12:9"));
+    }
+
+    #[test]
+    fn reads_results_as_they_come() {
+        assert_eq!(live_result("test parser::tests::adds ... ok"), Some(("parser::tests::adds", Outcome::Passed)));
+        assert_eq!(live_result("test slow ... FAILED"), Some(("slow", Outcome::Failed)));
+        assert_eq!(live_result("test later ... ignored, not today"), Some(("later", Outcome::Skipped)));
+        assert_eq!(live_result("test result: ok. 3 passed"), None);
+        assert_eq!(libtest_name("calc|api|tests::adds"), Some("tests::adds"));
     }
 
     /// Runs `cargo test` for real on a small package.

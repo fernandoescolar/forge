@@ -37,6 +37,10 @@ pub(super) fn tool_title(u: &Value, root: &std::path::Path) -> (Option<String>, 
 
 /// `command` as the user reads it: see [`tool_title`].
 fn tidy_command(command: &str, root: &std::path::Path) -> String {
+    // A command Forge's hook ran through its tools: what it ran, not Forge's command line.
+    if let Some(described) = crate::shell_translate::describe(command) {
+        return described;
+    }
     let mut rest = command.trim();
     // `cd <dir> && …` / `cd <dir>; …`, maybe more than one.
     while let Some(after_cd) = rest.strip_prefix("cd ") {
@@ -105,6 +109,10 @@ mod detail_tests {
         assert_eq!(tool_title(&forge, root), (Some("Find references".into()), Some("src/a.rs:12 parse".into())));
         assert_eq!(tidy_command("cd sub", root), "cd sub", "a lone cd stays");
         assert_eq!(tidy_command("cd /work/app && cd src && cargo test", root), "cargo test");
+        let exe = std::path::Path::new("/Apps/Forge/forge");
+        let ran = |name: &'static str, args: Value| crate::shell_translate::exec_command(exe, "http://127.0.0.1:1/mcp/t", &(name, args));
+        assert_eq!(tidy_command(&ran("read_file", json!({ "path": "src/a.rs", "lines": 2000 })), root), "Read a file src/a.rs");
+        assert_eq!(tidy_command(&ran("run_command", json!({ "command": "cargo build", "tail": 20 })), root), "cargo build");
     }
 
     fn text(t: &str) -> Value {
