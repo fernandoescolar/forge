@@ -38,6 +38,7 @@ pub mod rules;
 pub mod worktree;
 pub mod settings;
 pub mod shell_guard;
+pub mod shell_translate;
 mod terminals;
 mod verify;
 

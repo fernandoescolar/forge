@@ -57,10 +57,15 @@ fn main() {
         util::shell_env::print_env();
         return;
     }
-    // Claude Code's hook for the commands its agents run (see `forge_agents::shell_guard`).
+    // Claude Code's hook for the commands its agents run (see `forge_agents::shell_guard`),
+    // and the commands it rewrites them into (see `forge_agents::shell_translate`).
     if std::env::args().nth(1).as_deref() == Some(forge_agents::shell_guard::HOOK_ARG) {
-        forge_agents::shell_guard::run_hook();
+        forge_agents::shell_guard::run_hook(std::env::args().nth(2).as_deref());
         return;
+    }
+    if std::env::args().nth(1).as_deref() == Some(forge_agents::shell_translate::EXEC_ARG) {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(forge_agents::shell_translate::run_exec(&args));
     }
 
     // Same filtering and stderr output as before; the Output panel also gets a copy.

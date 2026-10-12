@@ -495,7 +495,18 @@ impl Thread {
         let fs = Arc::new(ProjectFs::new(&project, root.clone(), policy, cx));
         let terminals = TerminalRegistry::default();
         let terminal_host = Arc::new(ZedTerminals::new(&project, terminals.clone(), cx));
-        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host.clone()).with_terminal_auth().with_display_terminals().with_session_meta(crate::forge_mcp::session_meta()));
+        let forge_mcp = crate::forge_mcp::register(&Tokio::handle(cx), root.clone()).map(|(registration, mut requests)| {
+            cx.spawn_in(window, async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
+                while let Some(request) = requests.next().await {
+                    if this.update_in(cx, |this, window, cx| this.handle_tool_request(request, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            registration
+        });
+        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host.clone()).with_terminal_auth().with_display_terminals().with_session_meta(crate::forge_mcp::session_meta(forge_mcp.as_ref().map(|m| m.url()))));
 
         // broadcast (tokio) → unbounded (GPUI): the thread consumes events on the UI thread.
         let (tx, mut rx) = mpsc::unbounded();
@@ -538,17 +549,6 @@ impl Thread {
         })
         .detach();
 
-        let forge_mcp = crate::forge_mcp::register(&Tokio::handle(cx), root.clone()).map(|(registration, mut requests)| {
-            cx.spawn_in(window, async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
-                while let Some(request) = requests.next().await {
-                    if this.update_in(cx, |this, window, cx| this.handle_tool_request(request, window, cx)).is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-            registration
-        });
         let mcp_servers: Vec<Value> = config.as_ref().map(|c| c.mcp_servers.iter().map(|m| m.to_acp()).collect()).unwrap_or_default();
         let agents = config.as_ref().map(|c| c.agents.clone()).unwrap_or_default();
         Self {

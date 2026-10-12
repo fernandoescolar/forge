@@ -1,9 +1,12 @@
 //! Keeps agents from reading, searching and writing files through their shell, where
 //! Forge has a tool for it. Forge gives Claude a `PreToolUse` hook (in the settings it
 //! passes with each session, see [`crate::forge_mcp::session_meta`]) that runs Forge itself
-//! with [`HOOK_ARG`]; a command that greps, cats, pipes into `tail` or writes a file is
-//! refused with the tool to use instead, which Claude reads and follows. Everything else
-//! runs as usual. Copilot and agy run the same hook; Codex and Gemini get rules generated
+//! with [`HOOK_ARG`]. A simple command Forge's tools do exactly (`cat a.rs`, `grep -rn x
+//! src`, `git log -n 5`) is run through them: the hook rewrites it into a call to Forge's
+//! MCP server ([`crate::shell_translate`]). A command that greps, cats, pipes into `tail` or
+//! writes a file and isn't that simple is refused with the tool to use instead, which Claude
+//! reads and follows. Everything else runs as usual. Copilot and agy run the same hook, but
+//! can't have a command changed, so they are refused; Codex and Gemini get rules generated
 //! from the same table, [`RULES`] (see [`crate::agent_setup`]).
 //!
 //! It's a guide, not a sandbox: it reads the command line as a shell would, well enough to
@@ -14,27 +17,48 @@ use std::io::Read as _;
 
 use serde_json::{Value, json};
 
-/// `forge --agent-shell-hook`: answers Claude Code's `PreToolUse` hook for `Bash`.
+/// `forge --agent-shell-hook [url]`: answers Claude Code's `PreToolUse` hook for `Bash`.
 pub const HOOK_ARG: &str = "--agent-shell-hook";
 
 /// Runs the hook: reads the tool call from stdin and prints the refusal, if any, in the
-/// form of the agent that asks. Nothing printed lets the command run.
-pub fn run_hook() {
+/// form of the agent that asks. Nothing printed lets the command run. With the URL of
+/// the thread's Forge MCP server, Claude's simple commands are run through its tools
+/// instead of refused (see [`crate::shell_translate`]).
+pub fn run_hook(url: Option<&str>) {
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return;
     }
     let Ok(call) = serde_json::from_str::<Value>(&input) else { return };
-    if let Some(answer) = hook_answer(&call) {
+    let tools = url.zip(std::env::current_exe().ok());
+    if let Some(answer) = hook_answer_with(&call, tools.as_ref().map(|(url, exe)| (exe.as_path(), *url))) {
         println!("{answer}");
     }
 }
 
 /// The hook's answer to a tool call, `None` to let it run.
 pub fn hook_answer(call: &Value) -> Option<Value> {
+    hook_answer_with(call, None)
+}
+
+/// [`hook_answer`], translating Claude's commands that Forge's tools can run (`exe` runs
+/// them against the server at the URL) instead of refusing them.
+fn hook_answer_with(call: &Value, tools: Option<(&std::path::Path, &str)>) -> Option<Value> {
     // Claude Code: `{"tool_input": {"command"}}`.
     if let Some(command) = call.pointer("/tool_input/command").and_then(Value::as_str) {
         let reason = refusal(command)?;
+        if let Some((exe, url)) = tools {
+            if let Some(translated) = crate::shell_translate::translate(command) {
+                let mut input = call["tool_input"].clone();
+                input["command"] = json!(crate::shell_translate::exec_command(exe, url, &translated));
+                return Some(json!({ "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": format!("Forge ran this with its `{}` tool.", translated.0),
+                    "updatedInput": input,
+                } }));
+            }
+        }
         return Some(json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }));
     }
     // Antigravity (agy): `{"toolCall": {"name": "run_command", "args": {"CommandLine"}}}`.
@@ -55,9 +79,13 @@ pub fn hook_command(exe: &std::path::Path) -> String {
     format!("\"{}\" {HOOK_ARG}", exe.display())
 }
 
-/// Claude Code settings that install the hook, running `exe` (this Forge).
-pub fn hook_settings(exe: &std::path::Path) -> Value {
-    let command = hook_command(exe);
+/// Claude Code settings that install the hook, running `exe` (this Forge). With the URL
+/// of the thread's MCP server, the hook runs simple commands through its tools.
+pub fn hook_settings(exe: &std::path::Path, url: Option<&str>) -> Value {
+    let command = match url {
+        Some(url) => format!("{} {url}", hook_command(exe)),
+        None => hook_command(exe),
+    };
     json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }] } })
 }
 
@@ -181,13 +209,13 @@ fn refusal_in(command: &str, depth: usize) -> Option<String> {
 }
 
 /// `/usr/bin/grep` → `grep`.
-fn basename(word: &str) -> &str {
+pub(crate) fn basename(word: &str) -> &str {
     let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
     name.strip_suffix(".exe").unwrap_or(name)
 }
 
 /// A file a redirection or argument names: not `-`, `&2` or `/dev/null`.
-fn names_file(target: &str) -> bool {
+pub(crate) fn names_file(target: &str) -> bool {
     target != "-" && !target.starts_with('&') && !target.starts_with("/dev/")
 }
 
@@ -247,22 +275,22 @@ fn git_subcommand(args: &[String]) -> Option<&str> {
 
 /// A simple command of a command line.
 #[derive(Default)]
-struct Segment {
-    words: Vec<String>,
+pub(crate) struct Segment {
+    pub words: Vec<String>,
     /// Its input is piped from the command before.
-    piped: bool,
+    pub piped: bool,
     /// Where it redirects output (`> file`, `>> file`, `2>&1` as `&1`).
-    outputs: Vec<String>,
+    pub outputs: Vec<String>,
     /// What it reads with `<`.
-    inputs: Vec<String>,
+    pub inputs: Vec<String>,
 }
 
 /// A command line: its simple commands, and the scripts it runs inside (`$(…)`, backticks,
 /// `<(…)`).
 #[derive(Default)]
-struct Line {
-    segments: Vec<Segment>,
-    nested: Vec<String>,
+pub(crate) struct Line {
+    pub segments: Vec<Segment>,
+    pub nested: Vec<String>,
 }
 
 /// What the word being read is.
@@ -280,7 +308,7 @@ enum Target {
 /// Reads `command` as a shell would, roughly: quotes group words; `&&`, `||`, `;`, `|`,
 /// `&`, newlines and parentheses separate commands; `>`, `<`, `<<EOF` (whose body is
 /// skipped) and `<<<` are redirections; `#` starts a comment.
-fn parse(command: &str) -> Line {
+pub(crate) fn parse(command: &str) -> Line {
     let chars: Vec<char> = command.chars().collect();
     let mut line = Line::default();
     let mut current = Segment::default();
@@ -740,8 +768,30 @@ mod tests {
 
     #[test]
     fn answers_claude_codes_hook() {
-        let settings = hook_settings(std::path::Path::new("/Applications/Forge.app/Contents/MacOS/forge"));
+        let exe = std::path::Path::new("/Applications/Forge.app/Contents/MacOS/forge");
+        let settings = hook_settings(exe, None);
         assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "Bash");
         assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "\"/Applications/Forge.app/Contents/MacOS/forge\" --agent-shell-hook");
+        let with_tools = hook_settings(exe, Some("http://127.0.0.1:5/mcp/t"));
+        assert_eq!(with_tools["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "\"/Applications/Forge.app/Contents/MacOS/forge\" --agent-shell-hook http://127.0.0.1:5/mcp/t");
+    }
+
+    #[test]
+    fn runs_what_forge_has_a_tool_for_when_it_can() {
+        let tools = Some((std::path::Path::new("/F/forge"), "http://127.0.0.1:5/mcp/t"));
+        let call = |command: &str| json!({ "tool_name": "Bash", "tool_input": { "command": command, "description": "Read it" } });
+        let answer = hook_answer_with(&call("head -n 5 src/a.rs"), tools).unwrap();
+        let output = &answer["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "allow");
+        assert_eq!(output["updatedInput"]["description"], "Read it", "the rest of the input stays");
+        assert!(output["updatedInput"]["command"].as_str().unwrap().starts_with("\"/F/forge\" --agent-shell-exec http://127.0.0.1:5/mcp/t "));
+        // Not exact, or no server: refused as before.
+        assert_eq!(hook_answer_with(&call("grep -c foo a.rs"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(hook_answer_with(&call("cargo test | tail -5"), tools).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(hook_answer_with(&call("head -n 5 src/a.rs"), None).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(hook_answer_with(&call("cargo build"), tools), None);
+        // Other agents have no way to change the command: they are refused.
+        let agy = hook_answer_with(&json!({ "toolCall": { "args": { "CommandLine": "cat a.rs" } } }), tools).unwrap();
+        assert_eq!(agy["decision"], "deny");
     }
 }

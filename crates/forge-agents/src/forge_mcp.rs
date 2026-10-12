@@ -56,6 +56,11 @@ pub(crate) struct Registration {
 }
 
 impl Registration {
+    /// The thread's URL on the server.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// The ACP `McpServer` object to pass in `session/new`.
     pub fn acp_server(&self) -> Value {
         json!({ "type": "http", "name": SERVER_NAME, "url": self.url, "headers": [] })
@@ -301,21 +306,25 @@ when a long task finishes, tell them with `notify`.";
 const SYSTEM_PROMPT_APPEND: &str = "You are running inside Forge, an IDE, whose `forge` MCP server reads, searches and runs things where \
 the user sees them. Don't use the shell to read, search or write files, or to read git history: no cat, head, tail, sed, awk, grep, \
 rg, git grep, find, git log, git show, git blame, git diff, and no redirecting into files. Use your Read, Edit, Write and Glob tools, \
-and `mcp__forge__read_file`, `mcp__forge__search` and `mcp__forge__git_history`. Run commands that take a while with \
-`mcp__forge__run_command`, with `tail`, `head` or `filter` instead of pipes. Forge refuses those shell commands and says which tool to use.";
+and `mcp__forge__read_file`, `mcp__forge__search` and `mcp__forge__git_history` (they see unsaved edits). Run commands that take a while with \
+`mcp__forge__run_command`, with `tail`, `head` or `filter` instead of pipes. Forge answers a plain `cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, \
+`git log`, `git show`, `git blame` or `git diff` of one file or folder with those tools anyway, in their format (numbered lines, Forge's \
+search results), and refuses the rest, saying which tool to use: calling the tools yourself saves the step.";
 
 /// The `_meta` of every session: Claude Code's adapter reads it, Forge's agy adapter reads
 /// `forge.shellHook`, Codex's `jetbrains.air.customInstructions` (other agents ignore it).
 /// It tells Claude, in its system prompt, to read, search and write files with Forge's
-/// tools and its own instead of the shell, and installs a hook that refuses the shell
-/// commands that do (see [`crate::shell_guard`]), with the tool to use instead. It also
+/// tools and its own instead of the shell, and installs a hook that runs the simple shell
+/// commands that do through Forge's tools and refuses the rest (see
+/// [`crate::shell_guard`]), with the tool to use instead; `url` is the thread's server, which
+/// the hook calls. It also
 /// asks for summaries of Claude's thinking: recent models otherwise send it empty, and
 /// the thread only says "Working".
-pub fn session_meta() -> Value {
+pub fn session_meta(url: Option<&str>) -> Value {
     let mut options = json!({ "extraArgs": { "thinking-display": "summarized" } });
     let mut meta = json!({ "systemPrompt": { "append": SYSTEM_PROMPT_APPEND } });
     if let Ok(exe) = std::env::current_exe() {
-        options["settings"] = crate::shell_guard::hook_settings(&exe);
+        options["settings"] = crate::shell_guard::hook_settings(&exe, url);
         // Forge's own adapters (agy's) install it as their agent's hook.
         meta["forge"] = json!({ "shellHook": { "command": crate::shell_guard::hook_command(&exe) } });
     }
