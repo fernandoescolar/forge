@@ -712,6 +712,8 @@ mod tests {
             forge_update::init(cx);
             forge_git::init(cx);
             forge_dotnet::init(cx);
+            // The app runs it from `forge_languages::init`, which needs the language registry.
+            forge_languages::type_hierarchy::init(cx);
             init(cx);
             crate::open_editors::init(cx);
             crate::docks::init(cx);
