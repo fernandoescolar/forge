@@ -37,6 +37,7 @@ Keep each patch small and generic (a hook, not Forge logic), one concern per fil
 | `0011-git-ui-commit-context-menu-extension.patch` | `git_ui::CommitContextMenuExtension`: a global hook that adds entries to the commit context menu (History graph, Git panel); Forge adds *Create Tag…*. |
 | `0012-editor-code-action-providers.patch` | `Editor::push_code_action_provider`: more sources of code actions next to the language servers' in the ⌘. menu (forge-dotnet's *Move usings to GlobalUsings.cs*). |
 | `0013-editor-code-lens-references-at-position.patch` | A code lens whose references command names a position but no locations (Roslyn's `roslyn.client.peekReferences`, mapped to `ClientCommand::ShowLocations`) finds the references there instead of doing nothing: the "N references" lens. |
+| `0014-debugger-ui-console-elsewhere.patch` | `DebugPanel::set_console_elsewhere` and `DebugPanel::active_console`: the sessions' consoles leave the Debug panel's panes so that Forge shows the active one in its Debug Console panel (`forge-native/src/debug_console.rs`). |
 
 Things Forge does without patches, so they don't come back as patches:
 

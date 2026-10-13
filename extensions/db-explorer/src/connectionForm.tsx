@@ -157,7 +157,12 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
 
   const save = async (connect: boolean) => {
     const c = config();
-    await store.saveConnection(c, secret, sentinelSecret);
+    try {
+      await store.saveConnection(c, secret, sentinelSecret);
+    } catch (e) {
+      setStatus({ kind: 'error', text: `Couldn't save: ${(e as Error).message}` });
+      return;
+    }
     onDone();
     if (connect) {
       const node = store.visibleRows().find((r) => r.node.key === c.id)?.node;

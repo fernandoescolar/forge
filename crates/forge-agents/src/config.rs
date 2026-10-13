@@ -68,6 +68,11 @@ pub struct AgentsConfig {
     /// The files listing what agents don't get (see `default_agent_ignore_files`).
     #[serde(default = "default_agent_ignore_files")]
     pub agent_ignore_files: Vec<String>,
+    /// How long an agent waits for one of Forge's tools to answer (an `ask_user` question,
+    /// a review, a test run), in seconds; unset: until it answers (see
+    /// `agent_setup::set_tool_timeout`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_seconds: Option<u64>,
 }
 
 impl AgentsConfig {
@@ -99,6 +104,7 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
         "instructions_files": saved.instructions_files,
         "agent_ignore_files": saved.agent_ignore_files,
         "mcp_servers": saved.mcp_servers,
+        "tool_timeout_seconds": saved.tool_timeout_seconds,
         "agents": saved.agents,
     }))
     .unwrap_or_default();
@@ -115,6 +121,8 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
          // relative to its root (every one found is sent; agents' notes go to the first found).\n\
          // \"agent_ignore_files\": files listing what agents don't get, in .gitignore's syntax (a\n\
          // name with a folder is relative to the root; a bare name counts in every folder).\n\
+         // \"tool_timeout_seconds\": how long agents wait for Forge's tools (a question to you, a\n\
+         // review); null: until you answer.\n\
          // Forge > Settings > Agents edits this file too.\n{body}\n"
     )
 }

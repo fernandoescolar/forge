@@ -198,6 +198,10 @@ pub struct TestPanel {
     /// Output of the last `dotnet test`, shown on demand and after build failures.
     last_log: Option<String>,
     show_log: bool,
+    /// Shows the output in a read-only editor (so it can be selected and copied), and the
+    /// text it holds.
+    log_view: Entity<Editor>,
+    log_shown: String,
     error: Option<String>,
     list_scroll: ScrollHandle,
     details_scroll: ScrollHandle,
@@ -242,6 +246,13 @@ impl TestPanel {
             selected: None,
             last_log: None,
             show_log: false,
+            log_view: cx.new(|cx| {
+                let mut editor = Editor::multi_line(window, cx);
+                editor.set_read_only(true);
+                editor.set_show_gutter(false, cx);
+                editor
+            }),
+            log_shown: String::new(),
             error: None,
             list_scroll: ScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
@@ -862,18 +873,40 @@ impl TestPanel {
         rows
     }
 
-    fn render_details(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Puts the current output in `log_view`: what was added when it only grew (a run
+    /// printing), all of it otherwise. Follows the end unless the user is in it (selecting).
+    fn sync_log_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let log = match &self.run {
+            Some(run) => run.live.lock().map(|l| l.clone()).unwrap_or_default(),
+            None => self.last_log.clone().unwrap_or_default(),
+        };
+        if log == self.log_shown {
+            return;
+        }
+        let follow = !self.log_view.focus_handle(cx).contains_focused(window, cx);
+        self.log_view.update(cx, |editor, cx| {
+            match log.strip_prefix(self.log_shown.as_str()).filter(|_| !self.log_shown.is_empty()) {
+                Some(added) => editor.buffer().update(cx, |buffer, cx| {
+                    let end = buffer.len(cx);
+                    buffer.edit([(end..end, added.to_string())], None, cx);
+                }),
+                None => editor.set_text(log.clone(), window, cx),
+            }
+            if follow {
+                editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            }
+        });
+        self.log_shown = log;
+    }
+
+    fn render_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let border = cx.theme().colors().border;
-        let body: AnyElement = if self.show_log {
-            let log = match &self.run {
-                Some(run) => run.live.lock().map(|l| l.clone()).unwrap_or_default(),
-                None => self.last_log.clone().unwrap_or_default(),
-            };
-            // Long build logs: the end is what matters.
-            let lines: Vec<&str> = log.lines().collect();
-            let log = lines[lines.len().saturating_sub(400)..].join("\n");
-            v_flex().children(log.lines().map(|line| Label::new(line.to_string()).size(LabelSize::XSmall).buffer_font(cx))).into_any_element()
-        } else {
+        if self.show_log {
+            self.sync_log_view(window, cx);
+            // The editor scrolls itself; it needs a height of its own.
+            return Some(div().flex_shrink_0().h(px(260.)).border_t_1().border_color(border).pl_2().child(self.log_view.clone()).into_any_element());
+        }
+        let body: AnyElement = {
             let (fqn, cases): (&String, Vec<&CaseResult>) = match &self.selected {
                 Some(NodeKey::Method(fqn)) => (fqn, self.results.get(fqn)?.iter().collect()),
                 Some(NodeKey::Case(fqn, label)) => (fqn, self.case_rows(fqn).into_iter().find(|row| &row.label == label)?.results),

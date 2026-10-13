@@ -1,0 +1,113 @@
+diff --git a/crates/debugger_ui/src/debugger_panel.rs b/crates/debugger_ui/src/debugger_panel.rs
+--- a/crates/debugger_ui/src/debugger_panel.rs
++++ b/crates/debugger_ui/src/debugger_panel.rs
+@@ -18,7 +18,7 @@ use dap::{client::SessionId, debugger_settings::DebuggerSettings};
+ use editor::Editor;
+ use feature_flags::{FeatureFlag, FeatureFlagAppExt as _, PresenceFlag, register_feature_flag};
+ use gpui::{
+-    Action, Anchor, App, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
++    Action, Anchor, AnyView, App, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
+     EntityId, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Point,
+     Subscription, Task, TaskExt, WeakEntity, anchored, deferred,
+ };
+@@ -73,6 +73,9 @@ pub struct DebugPanel {
+     is_zoomed: bool,
+     _subscriptions: [Subscription; 2],
+     breakpoint_list: Entity<BreakpointList>,
++    /// The sessions' consoles are shown outside the panel (`active_console`): their
++    /// panes leave the Console out, as one view can't be drawn in two places.
++    console_elsewhere: bool,
+ }
+
+ impl DebugPanel {
+@@ -120,9 +123,42 @@ impl DebugPanel {
+                 is_zoomed: false,
+                 _subscriptions: [focus_subscription, breakpoint_subscription],
+                 debug_scenario_scheduled_last: true,
++                console_elsewhere: false,
+             }
+         })
+     }
++
++    /// Shows the sessions' consoles outside the panel (see `active_console`), or back in
++    /// their sessions' panes.
++    pub fn set_console_elsewhere(
++        &mut self,
++        elsewhere: bool,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.console_elsewhere = elsewhere;
++        let running_states: Vec<_> = self
++            .sessions_with_children
++            .keys()
++            .map(|session| session.read(cx).running_state().clone())
++            .collect();
++        for running in running_states {
++            running.update(cx, |running, cx| {
++                if elsewhere {
++                    running.remove_pane_item(DebuggerPaneItem::Console, window, cx);
++                } else {
++                    running.ensure_pane_item(DebuggerPaneItem::Console, window, cx);
++                }
++            });
++        }
++        cx.notify();
++    }
++
++    /// The active session's console, to show outside the panel.
++    pub fn active_console(&self, cx: &App) -> Option<AnyView> {
++        let running = self.active_session.as_ref()?.read(cx).running_state();
++        Some(running.read(cx).console().clone().into())
++    }
+
+     pub(crate) fn focus_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         let Some(session) = self.active_session.clone() else {
+@@ -553,7 +589,10 @@ impl DebugPanel {
+             .as_ref()
+             .map(|session| session.read(cx).running_state().clone())
+         {
+-            let pane_items_status = running_state.read(cx).pane_items_status(cx);
++            let mut pane_items_status = running_state.read(cx).pane_items_status(cx);
++            if self.console_elsewhere {
++                pane_items_status.shift_remove(&DebuggerPaneItem::Console);
++            }
+             let this = cx.weak_entity();
+
+             let context_menu = ContextMenu::build(window, cx, |mut menu, _window, _cx| {
+@@ -1061,6 +1100,9 @@ impl DebugPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        if self.console_elsewhere && item == DebuggerPaneItem::Console {
++            return;
++        }
+         if let Some(session) = self.active_session() {
+             session.update(cx, |session, cx| {
+                 session.running_state().update(cx, |running, cx| {
+@@ -1093,8 +1135,12 @@ impl DebugPanel {
+     ) {
+         debug_assert!(self.sessions_with_children.contains_key(&session_item));
+         session_item.focus_handle(cx).focus(window, cx);
++        let console_elsewhere = self.console_elsewhere;
+         session_item.update(cx, |this, cx| {
+             this.running_state().update(cx, |this, cx| {
++                if console_elsewhere {
++                    this.remove_pane_item(DebuggerPaneItem::Console, window, cx);
++                }
+                 this.go_to_selected_stack_frame(window, cx);
+             });
+         });
+diff --git a/crates/debugger_ui/src/session/running.rs b/crates/debugger_ui/src/session/running.rs
+--- a/crates/debugger_ui/src/session/running.rs
++++ b/crates/debugger_ui/src/session/running.rs
+@@ -1652,8 +1652,7 @@ impl RunningState {
+         &self.stack_frame_list
+     }
+
+-    #[cfg(test)]
+-    pub fn console(&self) -> &Entity<Console> {
++    pub(crate) fn console(&self) -> &Entity<Console> {
+         &self.console
+     }
+

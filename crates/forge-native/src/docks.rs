@@ -325,12 +325,52 @@ fn show_together(name: &'static str, with: Arc<dyn PanelHandle>, panel: Arc<dyn 
 
 gpui::actions!(forge, [ShowOrHidePanels]);
 
+/// Shows a built-in panel and focuses it, putting its button back if it was hidden
+/// (View › Panels). `title` is its `DockEntry`'s.
+#[derive(PartialEq, Clone, serde::Deserialize, Default, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = forge)]
+#[serde(deny_unknown_fields)]
+pub struct OpenPanel {
+    pub title: String,
+}
+
+/// The built-in panels: their `DockEntry` titles, and their names in View › Panels.
+/// Every panel Forge adds must be here, so that it can be shown again once hidden.
+pub const BUILT_IN_PANELS: &[(&str, &str)] = &[
+    ("Project", "Project"),
+    ("Open Editors", "Open Editors"),
+    ("Solution", "Solution Explorer"),
+    ("Terminal", "Terminal"),
+    ("Debug", "Debug"),
+    ("Debug Console", "Debug Console"),
+    ("Threads", "Threads"),
+    ("Tests", "Tests"),
+    ("Output", "Output"),
+    ("Git", "Git Changes"),
+    ("History", "Git History"),
+    ("Extensions", "Extensions"),
+];
+
 /// View › Show or Hide Panels…: every panel, shown or hidden; picking one switches it.
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ShowOrHidePanels, window, cx| show_or_hide_panels(workspace, window, cx));
+        workspace.register_action(|workspace, action: &OpenPanel, window, cx| open_panel(workspace, &action.title, window, cx));
     })
     .detach();
+}
+
+fn open_panel(workspace: &mut Workspace, title: &str, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(registry) = cx.try_global::<Registries>().and_then(|r| r.0.get(&cx.entity_id()).cloned()) else { return };
+    let Some(handle) = registry.read(cx).entries.iter().find(|e| (e.title)(cx) == title).map(|e| e.handle.clone()) else { return };
+    HiddenPanels::global(cx).update(cx, |h, cx| h.set_hidden(handle.persistent_name(), false, cx));
+    let dock = workspace.dock_at_position(handle.position(window, cx)).clone();
+    let shown = dock.read(cx).shown_panels().iter().any(|p| p.panel_id() == handle.panel_id());
+    if shown {
+        handle.panel_focus_handle(cx).focus(window, cx);
+    } else {
+        window.dispatch_action(handle.toggle_action(window, cx), cx);
+    }
 }
 
 fn show_or_hide_panels(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -387,6 +427,10 @@ pub struct PanelRegistry {
 
 /// Swaps Zed's panel buttons for Forge's draggable ones.
 pub fn install(workspace: &mut Workspace, entries: Vec<DockEntry>, extension_host: Option<Entity<ExtensionHost>>, window: &mut Window, cx: &mut Context<Workspace>) {
+    debug_assert!(
+        entries.iter().all(|e| SLOT_KEYS.contains(&e.handle.persistent_name()) || BUILT_IN_PANELS.iter().any(|(title, _)| *title == (e.title)(cx).as_ref())),
+        "a panel missing from BUILT_IN_PANELS (View › Panels)"
+    );
     let registry = cx.new(|_| PanelRegistry { entries });
     let workspace_id = cx.entity_id();
     cx.default_global::<Registries>().0.insert(workspace_id, registry.clone());

@@ -258,6 +258,7 @@ mod tests {
             package_versions: vec![],
             project_references: references.iter().map(PathBuf::from).collect(),
             references: vec![],
+            framework_references: vec![],
             imports: vec![],
             central_packages_file: None,
             items_file: None,

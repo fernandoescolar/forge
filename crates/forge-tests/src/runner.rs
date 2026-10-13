@@ -179,14 +179,43 @@ fn coverage_collector(project: &Path) -> &'static str {
     }
 }
 
+/// Whether `dotnet test` runs `project` on Microsoft.Testing.Platform rather than VSTest:
+/// the nearest `global.json` above it says `"test": { "runner": "Microsoft.Testing.Platform" }`
+/// (.NET 10). It takes other arguments then, and exits with 5 on VSTest's.
+fn uses_testing_platform(project: &Path) -> bool {
+    let Some(global) = project.ancestors().skip(1).map(|dir| dir.join("global.json")).find(|file| file.is_file()) else {
+        return false;
+    };
+    let json: serde_json::Value = match std::fs::read_to_string(&global).map_err(anyhow::Error::from).and_then(|text| Ok(serde_json::from_str(&text)?)) {
+        Ok(json) => json,
+        Err(error) => {
+            log::warn!("{}: {error:#}", global.display());
+            return false;
+        }
+    };
+    json.pointer("/test/runner").and_then(|runner| runner.as_str()).is_some_and(|runner| runner.eq_ignore_ascii_case("Microsoft.Testing.Platform"))
+}
+
+/// The Microsoft.Testing.Platform option that writes a TRX file: xUnit v3 has its own, the
+/// others take `Microsoft.Testing.Extensions.TrxReport`'s.
+fn testing_platform_trx_option(project: &Path) -> &'static str {
+    let text = std::fs::read_to_string(project).unwrap_or_default().to_ascii_lowercase();
+    if text.contains("\"xunit.v3") { "--report-xunit-trx" } else { "--report-trx" }
+}
+
 /// The `dotnet test` arguments for `options`, after the project.
-fn dotnet_test_args(project: &Path, options: &RunOptions) -> Vec<String> {
+fn dotnet_test_args(project: &Path, options: &RunOptions, testing_platform: bool) -> Vec<String> {
     let mut args = dotnet_build_args(project, &options.build);
     if let Some(settings) = &options.settings {
         args.extend(["--settings".to_string(), settings.to_string_lossy().into_owned()]);
     }
     if options.coverage {
-        args.extend(["--collect".to_string(), coverage_collector(project).to_string()]);
+        if testing_platform {
+            // `Microsoft.Testing.Extensions.CodeCoverage`'s.
+            args.extend(["--coverage", "--coverage-output-format", "cobertura"].map(String::from));
+        } else {
+            args.extend(["--collect".to_string(), coverage_collector(project).to_string()]);
+        }
     }
     args
 }
@@ -195,15 +224,27 @@ fn dotnet_test_args(project: &Path, options: &RunOptions) -> Vec<String> {
 /// writes.
 async fn run_dotnet(project: &Path, scope: &Scope, live: LiveLog, env: &Env, options: &RunOptions) -> Result<RunOutput> {
     let results_dir = tempfile::Builder::new().prefix("forge-tests-").tempdir()?;
+    let testing_platform = uses_testing_platform(project);
     let mut command = command("dotnet", env);
-    command
-        .arg("test")
-        .arg(project)
-        .args(dotnet_test_args(project, options))
-        .args(["--logger", "trx", "--results-directory"])
-        .arg(results_dir.path())
-        // Plain output: the terminal logger's live view is noise in a captured log.
-        .args(["--tl:off", "--nologo"]);
+    command.arg("test");
+    if testing_platform {
+        command
+            .arg("--project")
+            .arg(project)
+            .args(dotnet_test_args(project, options, true))
+            .args([testing_platform_trx_option(project), "--results-directory"])
+            .arg(results_dir.path())
+            // Plain output: the live progress is noise in a captured log.
+            .args(["--no-ansi", "--no-progress"]);
+    } else {
+        command
+            .arg(project)
+            .args(dotnet_test_args(project, options, false))
+            .args(["--logger", "trx", "--results-directory"])
+            .arg(results_dir.path())
+            // Plain output: the terminal logger's live view is noise in a captured log.
+            .args(["--tl:off", "--nologo"]);
+    }
     if let Some(filter) = scope.filter() {
         command.args(["--filter", &filter]);
     }
@@ -411,9 +452,25 @@ mod tests {
         let without = dir.path().join("B.Tests.csproj");
         std::fs::write(&without, r#"<Project><ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" /></ItemGroup></Project>"#).unwrap();
         let options = RunOptions { coverage: true, settings: Some("/s/ci.runsettings".into()), ..Default::default() };
-        assert_eq!(dotnet_test_args(&with_coverlet, &options), ["--settings", "/s/ci.runsettings", "--collect", "XPlat Code Coverage;Format=cobertura"]);
-        assert_eq!(dotnet_test_args(&without, &options)[3], "Code Coverage;Format=cobertura");
-        assert!(dotnet_test_args(&without, &RunOptions::default()).is_empty());
+        assert_eq!(dotnet_test_args(&with_coverlet, &options, false), ["--settings", "/s/ci.runsettings", "--collect", "XPlat Code Coverage;Format=cobertura"]);
+        assert_eq!(dotnet_test_args(&without, &options, false)[3], "Code Coverage;Format=cobertura");
+        assert!(dotnet_test_args(&without, &RunOptions::default(), false).is_empty());
+        assert_eq!(dotnet_test_args(&without, &options, true)[2..], ["--coverage", "--coverage-output-format", "cobertura"]);
+    }
+
+    #[test]
+    fn detects_microsoft_testing_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("tests/A.Tests/A.Tests.csproj");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, r#"<Project><ItemGroup><PackageReference Include="xunit.v3" /></ItemGroup></Project>"#).unwrap();
+        assert!(!uses_testing_platform(&project), "no global.json: VSTest");
+        std::fs::write(dir.path().join("global.json"), r#"{ "sdk": { "version": "10.0.100" }, "test": { "runner": "Microsoft.Testing.Platform" } }"#).unwrap();
+        assert!(uses_testing_platform(&project));
+        assert_eq!(testing_platform_trx_option(&project), "--report-xunit-trx");
+        // The nearest global.json decides.
+        std::fs::write(dir.path().join("tests/global.json"), r#"{ "sdk": { "version": "10.0.100" } }"#).unwrap();
+        assert!(!uses_testing_platform(&project));
     }
 
     #[test]

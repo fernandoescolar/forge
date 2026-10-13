@@ -91,6 +91,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
             "instructions_files": { "type": "array", "title": "Project instructions files", "description": "The project's instructions for agents, relative to its root, sent with every new session's first message (all that exist). Agents' notes go to the first that exists." },
             "agent_ignore_files": { "type": "array", "title": "Files agents don't get", "description": "Files listing what agents may not read or change, in .gitignore's syntax. A name with a folder (`.forge/agentignore`) is relative to the project's root; a bare name (`.agentignore`) counts in every folder, for the files below it." },
             "mcp_servers": { "type": "array", "title": "MCP servers", "description": "Tool servers every agent session gets: name, command, args and env." },
+            "tool_timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "title": "How long agents wait for Forge's tools", "description": "In seconds: how long an agent waits for a question to you, a review or a test run before giving up. Empty: until you answer. Claude takes it when its thread starts." },
             "agents": { "type": "array", "title": "Agents", "description": "The ACP agents threads can talk to. Manage agents adds them from a list." }
         }
     });
@@ -131,7 +132,7 @@ pub fn global(cx: &App) -> Entity<AgentSettings> {
 }
 
 fn empty() -> AgentsConfig {
-    AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], permissions: Default::default() }
+    AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], default_agent: None, review_writes: true, verify_changes: true, mcp_servers: vec![], tool_timeout_seconds: None, permissions: Default::default() }
 }
 
 impl AgentSettings {

@@ -384,6 +384,8 @@ pub struct Thread {
     accepts_images: bool,
     /// MCP servers (ACP JSON) passed to every session.
     mcp_servers: Vec<Value>,
+    /// How long the agent waits for Forge's tools (`AgentsConfig::tool_timeout_seconds`).
+    tool_timeout_seconds: Option<u64>,
     /// This thread's place on Forge's own MCP server (`forge_mcp`), for agents that take
     /// HTTP MCP servers.
     forge_mcp: Option<crate::forge_mcp::Registration>,
@@ -589,6 +591,7 @@ impl Thread {
             embedded_context: false,
             accepts_images: false,
             mcp_servers,
+            tool_timeout_seconds: config.as_ref().and_then(|c| c.tool_timeout_seconds),
             forge_mcp,
             git_redirects: HashMap::new(),
             forge_tools: false,
@@ -806,6 +809,7 @@ impl Thread {
         let (rt, root, id) = (self.runtime.clone(), self.root.clone(), spec.id.clone());
         let resume_id = resume.as_ref().map(|r| r.session_id.clone());
         let mut mcp = self.mcp_servers.clone();
+        let tool_timeout = self.tool_timeout_seconds;
         let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
         let spec_for_auth = spec.clone();
         // The user's own hooks for Claude's shell tool may change the commands Forge's hook does.
@@ -829,6 +833,7 @@ impl Thread {
             if let Ok(exe) = std::env::current_exe() {
                 crate::agent_setup::prepare(&mut spec, &exe, &paths::data_dir().join("agents"));
             }
+            crate::agent_setup::set_tool_timeout(&mut spec, tool_timeout);
             let task = cx.update(|_, cx| {
                 let id = id.clone();
                 Tokio::spawn_result(cx, async move {

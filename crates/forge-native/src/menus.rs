@@ -274,20 +274,13 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
     use editor::actions as ed;
     let extensions = extension_entries(cx);
 
-    // Every panel, built in or from an extension, by name.
-    let mut panels: Vec<(String, MenuItem)> = vec![
-        ("Debug".into(), MenuItem::action("Debug", zed_actions::debug_panel::ToggleFocus)),
-        ("Extensions".into(), MenuItem::action("Extensions", forge_extension_host::panel::ToggleFocus)),
-        ("Git Changes".into(), MenuItem::action("Git Changes", zed_actions::git_panel::ToggleFocus)),
-        ("Open Editors".into(), MenuItem::action("Open Editors", crate::open_editors::ToggleFocus)),
-        ("Output".into(), MenuItem::action("Output", forge_output::panel::ToggleFocus)),
-        ("Problems".into(), MenuItem::action("Problems", diagnostics::Deploy)),
-        ("Project".into(), MenuItem::action("Project", zed_actions::project_panel::ToggleFocus)),
-        ("Solution Explorer".into(), MenuItem::action("Solution Explorer", forge_dotnet::explorer::ToggleFocus)),
-        ("Terminal".into(), MenuItem::action("Terminal", terminal_view::terminal_panel::ToggleFocus)),
-        ("Tests".into(), MenuItem::action("Tests", forge_tests::panel::ToggleFocus)),
-        ("Threads".into(), MenuItem::action("Threads", forge_agents::ToggleThreadsPanel)),
-    ];
+    // Every panel, built in or from an extension, by name. Built-in ones are shown even when
+    // hidden from the side bars; Problems is a tab, not a panel.
+    let mut panels: Vec<(String, MenuItem)> = crate::docks::BUILT_IN_PANELS
+        .iter()
+        .map(|(title, name)| (name.to_string(), MenuItem::action(*name, crate::docks::OpenPanel { title: title.to_string() })))
+        .collect();
+    panels.push(("Problems".into(), MenuItem::action("Problems", diagnostics::Deploy)));
     for (title, id) in &extensions.panels {
         panels.push((title.clone(), MenuItem::action(title.clone(), forge_extension_host::panel::ShowPanel { id: id.clone() })));
     }

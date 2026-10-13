@@ -19,6 +19,7 @@ mod settings_view;
 #[cfg(any(unix, windows))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod single_instance;
+mod debug_console;
 mod open_editors;
 mod problems;
 mod statusbar;
@@ -197,6 +198,7 @@ fn main() {
         menus::init(cx);
         windows::init(cx);
         open_editors::init(cx);
+        debug_console::init(cx);
         docks::init(cx);
         settings_view::init(cx);
         external_changes::init(cx);
@@ -418,6 +420,8 @@ pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
                 workspace.add_panel(project_panel.clone(), window, cx);
                 workspace.add_panel(terminal_panel.clone(), window, cx);
                 workspace.add_panel(debug_panel.clone(), window, cx);
+                let debug_console = cx.new(|cx| debug_console::DebugConsolePanel::new(workspace, debug_panel.clone(), window, cx));
+                workspace.add_panel(debug_console.clone(), window, cx);
                 let solution_explorer = cx.new(|cx| forge_dotnet::SolutionExplorer::new(workspace, window, cx));
                 workspace.add_panel(solution_explorer.clone(), window, cx);
                 let threads_panel = cx.new(|cx| forge_agents::ThreadsPanel::new(workspace, window, cx));
@@ -437,6 +441,7 @@ pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
                     docks::DockEntry { handle: Arc::new(solution_explorer), title: Rc::new(|_| "Solution".into()) },
                     docks::DockEntry { handle: Arc::new(terminal_panel), title: Rc::new(|_| "Terminal".into()) },
                     docks::DockEntry { handle: Arc::new(debug_panel), title: Rc::new(|_| "Debug".into()) },
+                    docks::DockEntry { handle: Arc::new(debug_console), title: Rc::new(|_| "Debug Console".into()) },
                     docks::DockEntry { handle: Arc::new(threads_panel), title: Rc::new(|_| "Threads".into()) },
                     docks::DockEntry { handle: Arc::new(test_panel), title: Rc::new(|_| "Tests".into()) },
                     docks::DockEntry { handle: Arc::new(output_panel), title: Rc::new(|_| "Output".into()) },

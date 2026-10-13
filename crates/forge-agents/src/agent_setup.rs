@@ -90,6 +90,27 @@ pub fn prepare(spec: &mut AgentSpec, exe: &Path, dir: &Path) {
     }
 }
 
+/// The longest a Node timer waits (2³¹ − 1 ms, about 24 days); a longer one fires at once.
+const NODE_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
+
+/// How long the agent `spec` starts waits for a tool of Forge's to answer (`ask_user` waits
+/// for the user): `seconds`, or as long as it can when unset (an `MCP_TOOL_TIMEOUT` of the
+/// user's own wins then). Claude Code takes it from `MCP_TOOL_TIMEOUT`; its ACP adapter
+/// drops a per-server timeout.
+pub fn set_tool_timeout(spec: &mut AgentSpec, seconds: Option<u64>) {
+    const VAR: &str = "MCP_TOOL_TIMEOUT";
+    if kind(spec) != AgentKind::Claude {
+        return;
+    }
+    let ms = match seconds {
+        Some(seconds) => seconds.saturating_mul(1000).clamp(1000, NODE_MAX_TIMEOUT_MS),
+        None if spec.env.iter().any(|(k, _)| k == VAR) => return,
+        None => NODE_MAX_TIMEOUT_MS,
+    };
+    spec.env.retain(|(k, _)| k != VAR);
+    spec.env.push((VAR.into(), ms.to_string()));
+}
+
 /// What every agent is told: Forge's tools and why to use them (the `forge` MCP server's
 /// instructions).
 fn instructions() -> String {
@@ -280,6 +301,24 @@ mod tests {
         let mut other = spec("python3", &["agent.py"]);
         prepare(&mut other, exe, dir.path());
         assert_eq!(other.args, ["agent.py"]);
+    }
+
+    #[test]
+    fn waits_for_forge_tools_as_long_as_asked() {
+        let claude = || spec("npx", &["-y", "@agentclientprotocol/claude-agent-acp"]);
+        let timeout = |spec: &AgentSpec| spec.env.iter().find(|(k, _)| k == "MCP_TOOL_TIMEOUT").map(|(_, v)| v.clone());
+        let mut unset = claude();
+        set_tool_timeout(&mut unset, None);
+        assert_eq!(timeout(&unset).as_deref(), Some("2147483647"), "until the user answers");
+        let mut users = claude();
+        users.env.push(("MCP_TOOL_TIMEOUT".into(), "5000".into()));
+        set_tool_timeout(&mut users, None);
+        assert_eq!(timeout(&users).as_deref(), Some("5000"), "the user's own");
+        set_tool_timeout(&mut users, Some(300));
+        assert_eq!((timeout(&users).as_deref(), users.env.len()), (Some("300000"), 1), "the setting wins");
+        let mut other = spec("python3", &["agent.py"]);
+        set_tool_timeout(&mut other, Some(300));
+        assert!(other.env.is_empty());
     }
 
     #[test]

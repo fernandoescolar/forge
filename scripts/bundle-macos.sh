@@ -24,6 +24,14 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)"/\1/')"
 # The app's own version fields take numbers only (0.0.1 for 0.0.1-beta); the zip keeps it all.
 BUNDLE_VERSION="${VERSION%%-*}"
 APP="$ROOT/dist/Forge.app"
+# Releases (CI sets FORGE_UPDATE_REPOSITORY) are dev.forge.ide; a local build gets its own id so
+# that it and an installed Forge are different apps to macOS (a notification's click goes to
+# the app with its bundle id, which with both running may be the other one).
+if [ -n "${FORGE_UPDATE_REPOSITORY:-}" ]; then
+  BUNDLE_ID="dev.forge.ide"
+else
+  BUNDLE_ID="dev.forge.ide.local"
+fi
 # The architecture to build for: this Mac's, or FORGE_TARGET (Apple silicon builds Intel too).
 TARGET="${FORGE_TARGET:-}"
 target_args=()
@@ -88,7 +96,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Forge</string>
   <key>CFBundleDisplayName</key><string>Forge</string>
-  <key>CFBundleIdentifier</key><string>dev.forge.ide</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>forge</string>
   <key>CFBundleIconFile</key><string>Forge</string>
   <key>CFBundlePackageType</key><string>APPL</string>

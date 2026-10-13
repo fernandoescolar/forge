@@ -689,15 +689,9 @@ impl ExtensionHost {
                     let write = cx.write_credentials(&url, key, value.as_bytes());
                     cx.background_spawn(async move { write.await.map(|_| Value::Null) })
                 }
-                None => {
-                    let delete = cx.delete_credentials(&url);
-                    cx.background_spawn(async move { delete.await.map(|_| Value::Null) })
-                }
+                None => Self::delete_secret(url, cx),
             },
-            _ => {
-                let delete = cx.delete_credentials(&url);
-                cx.background_spawn(async move { delete.await.map(|_| Value::Null) })
-            }
+            _ => Self::delete_secret(url, cx),
         };
         cx.background_spawn(async move {
             let (ok, json) = match task.await {
@@ -707,6 +701,18 @@ impl ExtensionHost {
             js.send(ToJs::Resolve { call: id, ok, json });
         })
         .detach();
+    }
+
+    /// Deleting a secret that isn't there succeeds: the macOS keychain fails with
+    /// "item not found" instead, which broke saving a connection with no password.
+    fn delete_secret(url: String, cx: &mut Context<Self>) -> gpui::Task<Result<Value>> {
+        let read = cx.read_credentials(&url);
+        cx.spawn(async move |this, cx| {
+            if read.await?.is_some() {
+                this.update(cx, |_, cx| cx.delete_credentials(&url))?.await?;
+            }
+            Ok(Value::Null)
+        })
     }
 
     fn with_workspace(&self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> Value) -> Result<Value> {
