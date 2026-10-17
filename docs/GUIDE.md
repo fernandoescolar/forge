@@ -149,6 +149,10 @@ File-based .NET apps (a single `.cs` that opens with `#:` directives, run with `
 
 Debugging uses each language's debugger: CodeLLDB for Rust, Delve for Go, debugpy for Python, the JavaScript debugger for Node, and netcoredbg for .NET. Set breakpoints in the gutter; the debugger opens in its panel when a session starts. The program's output, and an input to evaluate expressions, are in the **Debug Console** panel (View › Panels › Debug Console): put it in any dock, or drop its button on the Debug panel's to show them together. Projects can add their own tasks and debug scenarios in `.forge/tasks.json` and `.forge/debug.json`.
 
+**Makefiles.** Each target of a rule has a run button in the gutter: it runs `make <target>` in a terminal, from the Makefile's folder (special targets like `.PHONY` and patterns like `%.o` have none). The targets also show in the file's outline.
+
+**Helm charts.** A chart's templates (`templates/**/*.yaml`, `*.yml`, `*.tpl` and `NOTES.txt`) open as Helm: the template actions (`{{ include "app.labels" . | nindent 4 }}`, `if`, `range`, `.Values…`) are coloured as Go templates, and the YAML around them as YAML. Other files can be mapped to it with `file_types` in your settings.
+
 ![Debugging an ASP.NET Core API: stopped at a breakpoint, with the call stack and the variables](images/debug.jpg)
 
 ## Terminal
@@ -203,7 +207,7 @@ The **Tests** panel (View › Panels › Tests, or Run › *Run All Tests*) find
 
 ## Agents
 
-Agents work in **threads**. A thread is one conversation with an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com), such as Claude Code, Codex, Gemini or GitHub Copilot. You list agents in `agents.json`. There are three ways to start one:
+Agents work in **threads**. A thread is one conversation with an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com), such as Claude Code, Codex, Gemini, GitHub Copilot or opencode. You list agents in `agents.json`. There are three ways to start one:
 
 - **The thread tab** (⌘⇧A, or the spark in the title bar; ⌘⌥N starts a new one). The conversation fills the editor area. You see your messages, the agent's answers, its tool calls with their terminals, plans and permission requests. Under the input are the session's settings (mode, model and others the agent offers) and its usage. **Changes** lists every file the agent modified, with lines added and removed. Click a file, or *Review*, to see the changes as a diff in a tab, then keep or undo each file or all of them.
 - **In the code** (⌃↩ in any file). A question card opens right below the selection. It keeps the latest answer, the changes to review and a reply box.

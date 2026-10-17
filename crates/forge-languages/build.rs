@@ -2,7 +2,7 @@
 //! `grammars/<name>/src`).
 
 fn main() {
-    for name in ["sln", "http"] {
+    for name in ["sln", "http", "helm"] {
         let dir = std::path::Path::new("grammars").join(name).join("src");
         println!("cargo:rerun-if-changed={}", dir.join("parser.c").display());
         cc::Build::new()

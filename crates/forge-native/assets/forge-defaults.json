@@ -31,5 +31,7 @@
   // "N references" above C# types and members (Roslyn), like Visual Studio.
   "code_lens": "on",
   // The C# servers send parameter-name and inferred-type hints (see forge-languages/src/roslyn.rs and omnisharp.rs).
-  "languages": { "C#": { "inlay_hints": { "enabled": true } } }
+  "languages": { "C#": { "inlay_hints": { "enabled": true } } },
+  // Helm charts: their templates are Go templates over YAML (forge-languages/src/helm).
+  "file_types": { "Helm": ["**/templates/**/*.yaml", "**/templates/**/*.yml", "**/templates/**/*.tpl", "**/templates/NOTES.txt"] }
 }

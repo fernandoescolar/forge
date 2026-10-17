@@ -60,14 +60,20 @@ export function openTable(node: TreeNode) {
 const KEY_ICONS: Record<string, string> = { string: 'text_snippet', hash: 'hash', list: 'list_tree', set: 'box', zset: 'arrow_up', stream: 'clock' };
 export const redisKeyIcon = (type: string) => KEY_ICONS[type] ?? 'binary';
 
-/** A Redis key: its value by type, TTL, rename and delete. */
+/** A key's tab title: long keys keep their end (`…:42:profile`), the most specific part. */
+export function keyTitle(name: string, max = 40): string {
+  return name.length <= max ? name : `…${name.slice(name.length - (max - 1))}`;
+}
+
+/** A Redis key: its value by type, TTL, rename and delete. The tab's tooltip has the whole key. */
 export function openKey(connectionId: string, db: number, name: string, escaped: boolean, type: string) {
   const tab = forge.tabs.open({
     id: `db-explorer.key:${connectionId}:${db}:${name}`,
-    title: name,
+    title: keyTitle(name),
     icon: redisKeyIcon(type),
-    render: () => <KeyView connectionId={connectionId} db={db} keyName={name} keyEscaped={escaped} onRenamed={(to) => tab.update({ title: to })} onDeleted={() => tab.close()} />,
+    render: () => <KeyView connectionId={connectionId} db={db} keyName={name} keyEscaped={escaped} onRenamed={(to) => tab.update({ title: keyTitle(to), tooltip: to })} onDeleted={() => tab.close()} />,
   });
+  tab.update({ tooltip: name });
 }
 
 /** The form for a new Redis key in database `db`; the key's tab opens once created. */

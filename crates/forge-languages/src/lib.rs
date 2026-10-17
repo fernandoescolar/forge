@@ -46,6 +46,8 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
         ("msbuild_xml", tree_sitter_xml::LANGUAGE_XML),
         ("sln", SLN),
         ("http", HTTP),
+        ("make", tree_sitter_make::LANGUAGE),
+        ("helm", HELM),
     ]);
     let use_roslyn = roslyn::use_roslyn();
     if use_roslyn {
@@ -58,6 +60,26 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
     register(&languages, "msbuild", vec![], None);
     register(&languages, "sln", vec![], None);
     register(&languages, "http", vec![], Some(Arc::new(HttpContextProvider)));
+    register(&languages, "make", vec![], Some(Arc::new(MakeContextProvider)));
+    register(&languages, "helm", vec![], None);
+}
+
+/// Each target of a Makefile is a runnable (`make-target`, see make/runnables.scm): its run
+/// button runs `make -f <the file> <target>` in a terminal, from the file's folder.
+struct MakeContextProvider;
+
+impl ContextProvider for MakeContextProvider {
+    fn associated_tasks(&self, _: Option<gpui::Entity<language::Buffer>>, _: &gpui::App) -> gpui::Task<Option<task::TaskTemplates>> {
+        let target = task::VariableName::Custom("_target".into()).template_value();
+        gpui::Task::ready(Some(task::TaskTemplates(vec![task::TaskTemplate {
+            label: format!("make {target}"),
+            command: "make".into(),
+            args: vec!["-f".into(), task::VariableName::Filename.template_value(), target],
+            cwd: Some(task::VariableName::Dirname.template_value()),
+            tags: vec!["make-target".into()],
+            ..task::TaskTemplate::default()
+        }])))
+    }
 }
 
 /// `.http` request lines are runnables (`http-request`), so the editor shows a run button
@@ -79,11 +101,14 @@ impl ContextProvider for HttpContextProvider {
 unsafe extern "C" {
     fn tree_sitter_sln() -> *const ();
     fn tree_sitter_http() -> *const ();
+    fn tree_sitter_helm() -> *const ();
 }
 
 /// The `.sln` grammar, compiled from `grammars/sln` by build.rs.
 pub const SLN: tree_sitter_language::LanguageFn = unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_sln) };
 pub const HTTP: tree_sitter_language::LanguageFn = unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_http) };
+/// Helm chart templates (Go templates over YAML), compiled from `grammars/helm` by build.rs.
+pub const HELM: tree_sitter_language::LanguageFn = unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_helm) };
 
 fn register(
     languages: &LanguageRegistry,
@@ -217,6 +242,90 @@ mod tests {
             rows.extend(m.captures.iter().map(|c| c.node.start_position().row));
         }
         assert_eq!(rows, [3, 9], "one run button per request line");
+    }
+
+    /// Makefiles: the queries compile, a Makefile parses without errors, and its targets,
+    /// variables, functions and comments are coloured.
+    #[test]
+    fn makefile_language() {
+        use streaming_iterator::StreamingIterator as _;
+
+        let make = Language::new(load_config("make"), Some(tree_sitter_make::LANGUAGE.into())).with_queries(load_queries("make")).expect("Makefile queries compile");
+        let grammar = make.grammar().unwrap();
+        assert!(grammar.highlights_config.is_some() && grammar.outline_config.is_some());
+        let runnables = grammar.runnable_config.as_ref().expect("runnables loaded");
+
+        let text = "# Build it\nCC := gcc\nSRC = $(wildcard src/*.c)\n\n.PHONY: all clean\n\nall: app\n\napp: $(SRC)\n\t$(CC) -o $@ $^\n\nclean:\n\trm -f app\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_make::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{}", tree.root_node().to_sexp());
+        let source = String::from_utf8(LanguageDir::get("make/highlights.scm").unwrap().data.into_owned()).unwrap();
+        let query = tree_sitter::Query::new(&tree_sitter_make::LANGUAGE.into(), &source).unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut captured = Vec::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures {
+                captured.push((query.capture_names()[capture.index as usize].to_string(), text[capture.node.byte_range()].to_string()));
+            }
+        }
+        for expected in [("comment", "# Build it"), ("constant.builtin", "CC"), ("function.builtin", "wildcard"), ("function", "app"), ("keyword", ".PHONY"), ("variable.special", "@")] {
+            assert!(captured.iter().any(|(name, text)| name == expected.0 && text == expected.1), "{expected:?} not in {captured:?}");
+        }
+
+        // A run button on each target that can be run by name: not on `.PHONY`.
+        let run = runnables.query.capture_index_for_name("run").unwrap();
+        let mut targets = Vec::new();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&runnables.query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            targets.extend(m.captures.iter().filter(|c| c.index == run).map(|c| text[c.node.byte_range()].to_string()));
+        }
+        assert_eq!(targets, ["all", "app", "clean"]);
+    }
+
+    /// Helm chart templates: the queries compile, a template parses without errors, its
+    /// actions are coloured and the YAML around them is injected.
+    #[test]
+    fn helm_language() {
+        use streaming_iterator::StreamingIterator as _;
+
+        let helm = Language::new(load_config("helm"), Some(HELM.into())).with_queries(load_queries("helm")).expect("Helm queries compile");
+        let grammar = helm.grammar().unwrap();
+        assert!(grammar.highlights_config.is_some() && grammar.injection_config.is_some());
+
+        let text = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"app.fullname\" . }}\n  labels:\n    {{- include \"app.labels\" . | nindent 4 }}\nspec:\n  {{- if not .Values.autoscaling.enabled }}\n  replicas: {{ .Values.replicaCount }}\n  {{- end }}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&HELM.into()).unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{}", tree.root_node().to_sexp());
+
+        let source = String::from_utf8(LanguageDir::get("helm/highlights.scm").unwrap().data.into_owned()).unwrap();
+        let query = tree_sitter::Query::new(&HELM.into(), &source).unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut captured = Vec::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures {
+                captured.push((query.capture_names()[capture.index as usize].to_string(), text[capture.node.byte_range()].to_string()));
+            }
+        }
+        for expected in [("function.builtin", "include"), ("function.builtin", "nindent"), ("keyword", "if"), ("keyword", "end"), ("property", "replicaCount"), ("string", "\"app.labels\"")] {
+            assert!(captured.iter().any(|(name, text)| name == expected.0 && text == expected.1), "{expected:?} not in {captured:?}");
+        }
+
+        let source = String::from_utf8(LanguageDir::get("helm/injections.scm").unwrap().data.into_owned()).unwrap();
+        let query = tree_sitter::Query::new(&HELM.into(), &source).unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut yaml = String::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures {
+                yaml.push_str(&text[capture.node.byte_range()]);
+            }
+        }
+        assert!(yaml.starts_with("apiVersion: apps/v1\nkind: Deployment\n"), "{yaml}");
     }
 
     /// The `.sln` grammar reads a real solution without errors.

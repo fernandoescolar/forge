@@ -10,7 +10,7 @@ HTTP, GitHub, updates) built from Zed's workspace, editor, project and terminal.
 forge-native (binary `forge`): bootstrap, menus, title & status bars, settings tab, themes
  ├─ Zed: workspace, editor, project (LSP, git, debugger), terminal_view, git_ui, search…
  │    (+ the small hooks in patches/zed)
- ├─ forge-languages ─── C# (Roslyn or OmniSharp, netcoredbg locators), MSBuild, .sln, .http grammars
+ ├─ forge-languages ─── C# (Roslyn or OmniSharp, netcoredbg locators), MSBuild, .sln, .http, Makefile and Helm grammars
  ├─ forge-run ───────── run targets → Run / Debug / hot reload as Zed tasks & debug scenarios
  ├─ forge-tests ─────── Tests panel: discovery and runners per kind; gutter statuses
  ├─ forge-dotnet ────── Solution Explorer, NuGet, project files (over dotnet-model)

@@ -119,6 +119,8 @@ impl Thread {
             "Run `codex login` in a terminal, then press + for a new session.".into()
         } else if launches("copilot") {
             "Run `npx @github/copilot login` in a terminal (or `copilot login`), then press + for a new session.".into()
+        } else if launches("opencode") {
+            "Run `npx opencode-ai auth login` in a terminal (or `opencode auth login`) and pick a provider, then press + for a new session.".into()
         } else {
             "Sign in with the agent's own CLI, then press + for a new session.".into()
         }
