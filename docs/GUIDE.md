@@ -139,6 +139,8 @@ When you save a palette, its theme reloads. Syntax scopes inherit from their pre
 
 **File icons.** Forge's icons are **Forge Dark** and **Forge Light** (based on [Catppuccin Icons](https://github.com/catppuccin/zed-icons)), following the system appearance like the colour themes. Forge also ships **Modern Icons**, **Colored Zed Icons**, **VSCode Great Icons** and **Seti Icons**, and Zed's own set as **Zed (Default)**. Pick one with Forge › *Select Icon Theme…*, in Settings › *File icons*, or with `"icon_theme"` in `settings.json` (a name, or `{ "mode": "system", "dark": …, "light": … }`). To add one, put a Zed icon theme file in `config/icon_themes/`; its icon paths are relative to that folder, so a theme from a Zed extension works if you copy its `icon_themes/*.json` there with its `icons/` folder next to it.
 
+![The Project panel with Forge Dark icons: folders, C#, project files, YAML, Helm templates, GitHub workflows, Docker and Makefile](images/file-explorer.jpg)
+
 **From extensions.** Extensions can bring themes and icon themes too. They show in the selectors while the extension is installed. *Install Themes* in either selector opens the Extensions panel. See [EXTENSIONS.md](EXTENSIONS.md#themes-and-icon-themes).
 
 ## Run and debug
@@ -153,7 +155,7 @@ Debugging uses each language's debugger: CodeLLDB for Rust, Delve for Go, debugp
 
 **Helm charts.** A chart's templates (`templates/**/*.yaml`, `*.yml`, `*.tpl` and `NOTES.txt`) open as Helm: the template actions (`{{ include "app.labels" . | nindent 4 }}`, `if`, `range`, `.Values…`) are coloured as Go templates, and the YAML around them as YAML. Other files can be mapped to it with `file_types` in your settings.
 
-![Debugging an ASP.NET Core API: stopped at a breakpoint, with the call stack and the variables](images/debug.jpg)
+![Debugging an ASP.NET Core API: stopped at a breakpoint, with the call stack and the variables, and the Debug Console shown with the Debug panel, evaluating an expression](images/debug.jpg)
 
 ## Terminal
 
@@ -191,7 +193,7 @@ The **Solution Explorer** shows `.sln`/`.slnx` solutions as Visual Studio does: 
 
 The **NuGet** tab browses, installs, updates and consolidates packages, including with central package management. In project files, package names complete as you type, and outdated versions are marked; ⌘↩ (or ⌘.) updates one.
 
-![The Solution Explorer with a solution of three projects, their dependencies and NuGet packages](images/solution-explorer.jpg)
+![The Solution Explorer with a solution of three projects, their dependencies and NuGet packages; reference counts above each member of the open file](images/solution-explorer.jpg)
 
 ## Tests
 
@@ -203,7 +205,7 @@ The **Tests** panel (View › Panels › Tests, or Run › *Run All Tests*) find
 
 **Run settings (.NET).** When the workspace has `.runsettings` files, a menu in the Tests panel's header chooses the one `dotnet test` runs with (`--settings`), or none. Forge remembers it for the workspace.
 
-![The Tests panel with a failed test, its message and Fix with agent; results in the editor's gutter](images/tests.jpg)
+![The Tests panel with a failed test, its message and Fix with agent, and a test with data rows; results in the editor's gutter](images/tests.jpg)
 
 ## Agents
 
@@ -213,7 +215,7 @@ Agents work in **threads**. A thread is one conversation with an agent that spea
 - **In the code** (⌃↩ in any file). A question card opens right below the selection. It keeps the latest answer, the changes to review and a reply box.
 - **Fix with agent**, from an error's popover, Agents › Fix the Problem at the Cursor, or a failed test. Agents › *Fix the Problems in This File* and *… in the Project* (also *Fix with Agent* on the Problems tab) send every error and warning there, errors first. Merge conflicts and pull request reviews go to agents too (see [Git and GitHub](#git-and-github)).
 
-![A thread that fixed a failing test: the agent's thoughts, reads, edits and test run, the files it changed, and their diff ready to review](images/agents.jpg)
+![A thread that fixed a failing test with Forge's tools (what the user is looking at, file outline, find references, check your changes, run tests), the files it changed, and their diff ready to review](images/agents.jpg)
 
 **Reading a thread.** Each turn starts with your message, set apart so it is easy to find when you scroll back, followed by the agent's part: a header with how long it worked (or a timer while it works), its answer, its thoughts folded to their first line, and one compact list of what it did. Reads, searches and finished commands take one line each; click one to see its output or diff. The agent's plan stays in its turn, updated as it goes, so earlier turns keep the plans they followed. Running commands, failures and anything waiting for you stay open. The files the agent changed are listed once, above the input: each with its added and removed lines, *Review* to see them in the review tab, *Keep* / *Undo* for each file or all of them, and *Undo turn*, which puts the files the last turn changed back as they were before it (pressed again, the turn before; if a later turn changed the same files, Forge asks first). While the agent works, a bar above the input says what it is doing now and for how long, in the warning colour when it waits for you, with *Stop* next to it.
 
@@ -341,7 +343,7 @@ The **Databases** panel (View › Panels › Databases; an extension that comes 
 - **Redis.** Expand a connection to see its databases (`db0`…, those with keys) and, in each, its keys as a tree split at `:` (`user:1:profile` under *user* › *1*), found with `SCAN` a batch at a time (*Load more keys…*), never `KEYS`. With a database (or anything in it) selected, the filter box at the top shows only the keys matching a pattern (`user:*`, `*:session`). Double-click a key to open it: a string as text (highlighted when it is JSON); a hash, list, set, sorted set or stream as a table, a page at a time, where you edit cells, mark rows to delete and *Save* them all, and add entries below. The key's tab also sets or removes its TTL, renames it and deletes it. Right-click a database for *New Key…* and the *Console*, which runs commands as `redis-cli` does (`HGETALL user:1`, `INFO memory`) on the database you pick; right-click a namespace to delete every key under it. Values that aren't text show their bytes as `\xNN`, and are saved from that form.
 - **Queries.** *New Query* (the file icon, or right-click › New Query) opens a query tab on the selected connection and database. Write SQL and press ⌘Enter or *Run*: each result appears in its own tab, with what the other statements did under *Messages*. *Cancel* stops a long query. *Database Explorer: Open the Active File (or Selection) in a Query* in the command palette starts one from a `.sql` file.
 
-![The Databases panel and a query tab with its results](images/database-explorer.jpg)
+![The Databases panel with a SQLite and a Redis connection, and a query tab with its results](images/database-explorer.jpg)
 
 Its settings (page size, query row limit, whether to confirm before saving) are in Forge › Settings › Database Explorer.
 
@@ -354,6 +356,8 @@ The **Containers** panel (View › Panels › Containers; an extension that come
 - **More.** Right-click a container to pause or resume it, inspect it (its `docker inspect`, in a tab), copy its id or remove it. Right-click a project for *Up*, *Start*, *Stop*, *Restart*, *Open Compose File* and *Down* (which removes its containers and networks, not its volumes).
 - **Images.** The *Images* view lists them with their size and age, the ones in use highlighted; right-click to inspect or remove one.
 - **Compose Up.** *Containers: Compose Up* in the command palette runs `docker compose up -d` for the active compose file, or for the project's.
+
+![The Containers panel with a Compose project of three services, its compose file, and a container's logs in a terminal](images/containers.jpg)
 
 Agents get four tools: `containers` and `logs` (with a `grep`) read at once; `control` (start, stop or restart a container or a project) and `compose_up` ask you first. Its settings (the Docker command, the shell, how many log lines to show, whether to confirm before removing) are in Forge › Settings › Containers.
 

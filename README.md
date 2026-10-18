@@ -2,7 +2,7 @@
 
 **The opinionated IDE for real-world .NET, Go, Rust and JavaScript development. Agents built in, built on Zed.**
 
-![Forge: an agent thread that fixed a failing test, next to the diff of its changes](docs/images/agents.jpg)
+![Forge: an agent thread that fixed a failing test with Forge's own tools, next to the diff of its changes](docs/images/agents.jpg)
 
 Forge is a native, GPU-rendered code editor that makes the decisions for you. Open a .NET solution, a Go module, a Cargo workspace or a Node package and it already knows how to run it, test it, debug it and talk about it with an AI agent. There are no extensions to hunt for and no `launch.json` to write first. It is built from the open-source crates of the [Zed](https://zed.dev) editor, so it starts in a blink and stays fast on large projects.
 
@@ -10,14 +10,15 @@ Forge is a native, GPU-rendered code editor that makes the decisions for you. Op
 
 - **Your stack, ready on day one.** C# with Roslyn (the language server of C# Dev Kit) and a Visual Studio–style Solution Explorer (with NuGet, user secrets and EF Core migrations), Rust, Go, TypeScript/JavaScript and Python with their language servers. Run targets are found from your manifests: .NET apps and launch profiles, Cargo binaries, Go `main` packages, `package.json` scripts and Python programs.
 - **Run, test, debug.** One Run / Debug / Stop in the title bar, and hot reload for .NET. The Tests panel covers .NET, Go, Rust, Jest, Vitest and pytest: run or debug any test, with results in the gutter.
-- **Agents in the flow, not in a chat box.** Any [ACP](https://agentclientprotocol.com) agent (Claude Code, Codex, Gemini, GitHub Copilot…) works in *threads*, conversations laid out as documents in the editor area. The agent edits through your editor, and you keep or undo every change. Threads can be anchored to a line, follow the agent live, run in their own git worktree, and take your project's standing instructions. Agents are one click away from an error, a failing test, the terminal output, a commit message, a merge conflict or a pull request review.
+- **Agents in the flow, not in a chat box.** Any [ACP](https://agentclientprotocol.com) agent (Claude Code, Codex, Gemini, GitHub Copilot, opencode, Antigravity…) works in *threads*, conversations laid out as documents in the editor area. The agent edits through your editor, and you keep or undo every change. Threads can be anchored to a line, follow the agent live, run in their own git worktree, and take your project's standing instructions. They work through Forge's own tools: they run tests in the Tests panel, read the language servers' problems, find references, set breakpoints and debug, and check their changes before they finish. Agents are one click away from an error, a failing test, the terminal output, a commit message, a merge conflict or a pull request review.
 - **Git and GitHub.** Zed's Git panel, a commit graph, a three-pane merge editor, and your branch's pull request with its checks in the status bar, through `gh`.
-- **The rest of a working day.** `.http` request files with environments, a database explorer (SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, MongoDB, Redis), an Output panel, layouts you drag into place, and palette themes you edit in 30 colours.
+- **The rest of a working day.** `.http` request files with environments, a database explorer (SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, MongoDB, Redis), Docker containers and Compose projects, an Output panel, layouts you drag into place, and palette themes you edit in 30 colours.
 
 | | | |
 | --- | --- | --- |
-| [![Solution Explorer](docs/images/solution-explorer.jpg)](docs/images/solution-explorer.jpg)<br>Solution Explorer | [![Tests](docs/images/tests.jpg)](docs/images/tests.jpg)<br>Tests | [![Debugging](docs/images/debug.jpg)](docs/images/debug.jpg)<br>Debugging |
-| [![Terminal](docs/images/terminal.jpg)](docs/images/terminal.jpg)<br>Terminal | [![Database Explorer](docs/images/database-explorer.jpg)](docs/images/database-explorer.jpg)<br>Database Explorer | [![Panels shown together](docs/images/panel-groups.jpg)](docs/images/panel-groups.jpg)<br>Panels shown together |
+| [![Solution Explorer](docs/images/solution-explorer.jpg)](docs/images/solution-explorer.jpg)<br>Solution Explorer | [![Tests](docs/images/tests.jpg)](docs/images/tests.jpg)<br>Tests | [![Debugging](docs/images/debug.jpg)](docs/images/debug.jpg)<br>Debugging and Debug Console |
+| [![Files and icons](docs/images/file-explorer.jpg)](docs/images/file-explorer.jpg)<br>Files and icons | [![Database Explorer](docs/images/database-explorer.jpg)](docs/images/database-explorer.jpg)<br>Database Explorer | [![Containers](docs/images/containers.jpg)](docs/images/containers.jpg)<br>Containers |
+| [![Terminal](docs/images/terminal.jpg)](docs/images/terminal.jpg)<br>Terminal | [![Panels shown together](docs/images/panel-groups.jpg)](docs/images/panel-groups.jpg)<br>Panels shown together | |
 
 ## For developers who extend it
 
