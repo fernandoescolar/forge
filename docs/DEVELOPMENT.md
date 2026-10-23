@@ -40,7 +40,7 @@ Forge keeps its state in `~/Library/Application Support/Forge` (on Linux, `$XDG_
 | `config/settings.json` | User settings, created from Forge's template. Forge's defaults are in `crates/forge-native/assets/forge-defaults.json`. |
 | `config/keymap.json` | Key bindings |
 | `config/palettes/*.json` | Colour palettes, one theme each. Built-in ones that were never edited are updated with Forge (`theme.rs`, `PREVIOUS_BUILTINS`). |
-| `config/agents.json` | The ACP agents threads talk to, MCP servers and agent permissions |
+| `config/agents.json` | The ACP agents threads talk to, MCP servers and agent permissions. Created from `crates/forge-agents/assets/agents.json` (Claude Code, Gemini, Codex, Copilot, Antigravity through `packages/agy-acp`, OpenCode); `presets()` in `crates/forge-agents/src/settings.rs` lists the same agents for Settings › Agents |
 | `config/AGENTS.md` | The user's instructions for agents, sent with the first message of every thread |
 | `config/extensions.json` | Extension settings |
 | `config/dotnet.json` | Solution Explorer and NuGet options (`configuration`, `properties`, `itemTypes`, `customCommands`, `nestFiles`, `globalUsingsFile`, `nuget.includePrerelease`…) |

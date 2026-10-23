@@ -164,8 +164,90 @@ fn migrate(agents: &mut [AgentSpec]) {
     }
 }
 
+/// Lets `npx -y <package>` run the package's install scripts under npm 12's install-script
+/// policy. npm 12 skips the `postinstall` of packages it was not told to trust, silently,
+/// and `npx -y` then runs a half-installed package: `opencode-ai` ("postinstall script was
+/// not run") and `@zed-industries/codex-acp` set up their binaries that way. Trusting just
+/// the package named in the args keeps the policy for its dependencies. npm 9 to 11 accept
+/// the flag and ignore it, so no version check is needed. Explicit `--allow-scripts`,
+/// `--ignore-scripts` or `--dangerously-allow-all-scripts` in the args are left alone.
+pub fn allow_npx_install_scripts(spec: &mut AgentSpec) {
+    let is_npx = std::path::Path::new(&spec.command).file_name().and_then(|f| f.to_str()).is_some_and(|f| matches!(f, "npx" | "npx.cmd" | "npx.exe"));
+    if !is_npx || !spec.args.iter().any(|a| a == "-y" || a == "--yes") {
+        return;
+    }
+    if spec.args.iter().any(|a| a.starts_with("--allow-scripts") || a.starts_with("--ignore-scripts") || a.starts_with("--dangerously-allow-all-scripts")) {
+        return;
+    }
+    // The package is `-p`'s value, else the first argument that is not a flag; what follows
+    // that argument are the package's own arguments, so the flag goes right before it.
+    let mut package = None;
+    let mut command_at = None;
+    let mut i = 0;
+    while i < spec.args.len() {
+        let arg = spec.args[i].as_str();
+        if let Some(value) = arg.strip_prefix("--package=") {
+            package = Some(value.to_string());
+        } else if matches!(arg, "-p" | "--package") {
+            package = spec.args.get(i + 1).cloned();
+            i += 1;
+        } else if matches!(arg, "-c" | "--call") {
+            i += 1;
+        } else if !arg.starts_with('-') {
+            command_at = Some(i);
+            package = package.or_else(|| Some(arg.to_string()));
+            break;
+        }
+        i += 1;
+    }
+    if let (Some(package), Some(at)) = (package, command_at) {
+        spec.args.insert(at, format!("--allow-scripts={}", npm_package_name(&package)));
+    }
+}
+
+/// `@scope/name@1.2.3` → `@scope/name`; `name@latest` → `name`.
+fn npm_package_name(spec: &str) -> &str {
+    match spec.get(1..).and_then(|rest| rest.find('@')) {
+        Some(at) => &spec[..at + 1],
+        None => spec,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use ide_api::AgentSpec;
+
+    fn npx(args: &[&str]) -> AgentSpec {
+        AgentSpec { id: "a".into(), command: "npx".into(), args: args.iter().map(|a| a.to_string()).collect(), env: vec![], cwd: None }
+    }
+
+    #[test]
+    fn npx_agents_get_their_install_scripts_allowed() {
+        let allowed = |args: &[&str]| {
+            let mut spec = npx(args);
+            super::allow_npx_install_scripts(&mut spec);
+            spec.args
+        };
+        assert_eq!(allowed(&["-y", "opencode-ai", "acp"]), ["-y", "--allow-scripts=opencode-ai", "opencode-ai", "acp"]);
+        assert_eq!(allowed(&["-y", "@zed-industries/codex-acp@0.9.1"]), ["-y", "--allow-scripts=@zed-industries/codex-acp", "@zed-industries/codex-acp@0.9.1"]);
+        assert_eq!(allowed(&["-y", "@github/copilot", "--acp", "--stdio"]), ["-y", "--allow-scripts=@github/copilot", "@github/copilot", "--acp", "--stdio"]);
+        assert_eq!(allowed(&["--yes", "opencode-ai@latest", "acp"]), ["--yes", "--allow-scripts=opencode-ai", "opencode-ai@latest", "acp"]);
+        assert_eq!(allowed(&["-y", "-p", "opencode-ai@2", "opencode", "acp"]), ["-y", "-p", "opencode-ai@2", "--allow-scripts=opencode-ai", "opencode", "acp"]);
+        assert_eq!(allowed(&["-y", "--package=opencode-ai", "opencode", "acp"]), ["-y", "--package=opencode-ai", "--allow-scripts=opencode-ai", "opencode", "acp"]);
+        // Nothing to trust, or the user decided already.
+        assert_eq!(allowed(&["opencode-ai", "acp"]), ["opencode-ai", "acp"], "without -y, npx asks before installing");
+        assert_eq!(allowed(&["-y"]), ["-y"]);
+        assert_eq!(allowed(&["-y", "--allow-scripts=x", "opencode-ai"]), ["-y", "--allow-scripts=x", "opencode-ai"]);
+        assert_eq!(allowed(&["-y", "--ignore-scripts", "opencode-ai"]), ["-y", "--ignore-scripts", "opencode-ai"]);
+        // Other commands are left alone; a path to npx counts.
+        let mut gemini = AgentSpec { command: "gemini".into(), ..npx(&["-y", "x"]) };
+        super::allow_npx_install_scripts(&mut gemini);
+        assert_eq!(gemini.args, ["-y", "x"]);
+        let mut path = AgentSpec { command: "/usr/local/bin/npx".into(), ..npx(&["-y", "x"]) };
+        super::allow_npx_install_scripts(&mut path);
+        assert_eq!(path.args, ["-y", "--allow-scripts=x", "x"]);
+    }
+
     #[test]
     fn renamed_packages_are_migrated() {
         let config = super::parse(r#"{"agents": [{"id": "claude", "command": "npx", "args": ["-y", "@zed-industries/claude-code-acp@0.16.2"]}]}"#).unwrap();
@@ -191,7 +273,8 @@ mod tests {
     #[test]
     fn default_agents_parse() {
         let config = super::parse(super::DEFAULT_AGENTS).unwrap();
-        assert!(config.agents.iter().any(|a| a.id == "claude"));
+        let ids: Vec<&str> = config.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["claude", "gemini", "codex", "copilot", "antigravity", "opencode"]);
         assert!(config.review_writes);
         assert!(!super::parse(r#"{"agents": [], "review_writes": false}"#).unwrap().review_writes);
         let with_mcp = super::parse(r#"{"agents": [], "mcp_servers": [{"name": "gh", "command": "gh-mcp", "env": {"TOKEN": "t"}}]}"#).unwrap();

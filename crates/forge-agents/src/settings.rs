@@ -222,5 +222,26 @@ pub fn presets() -> Vec<AgentSpec> {
         npx("codex", "@zed-industries/codex-acp"),
         AgentSpec { id: "gemini".into(), command: "gemini".into(), args: vec!["--experimental-acp".into()], env: vec![], cwd: None },
         AgentSpec { id: "copilot".into(), command: "npx".into(), args: ["-y", "@github/copilot", "--acp", "--stdio"].map(String::from).to_vec(), env: vec![], cwd: None },
+        // Google Antigravity's `agy`, through Forge's own adapter (`packages/agy-acp`).
+        npx("antigravity", "@forge-ide/agy-acp"),
+        // The standalone `opencode` binary (its installer), not `npx opencode-ai`: npm's
+        // `latest` tag lags the installer, and a 1.x opencode refuses a 2.x database.
+        AgentSpec { id: "opencode".into(), command: "opencode".into(), args: vec!["acp".into()], env: vec![], cwd: None },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn presets_match_the_default_agents() {
+        let presets = super::presets();
+        let defaults = crate::config::parse(include_str!("../assets/agents.json")).unwrap().agents;
+        assert_eq!(presets.len(), defaults.len(), "every default agent is a preset and the other way round");
+        for default in &defaults {
+            let preset = presets.iter().find(|p| p.id == default.id).unwrap_or_else(|| panic!("{} is a default agent but not a preset", default.id));
+            assert_eq!((&preset.command, &preset.args), (&default.command, &default.args), "{}", preset.id);
+        }
+        assert!(presets.iter().any(|a| a.id == "antigravity" && a.args.contains(&"@forge-ide/agy-acp".to_string())));
+        assert!(presets.iter().any(|a| a.id == "opencode" && a.command == "opencode" && a.args == ["acp"]));
+    }
 }

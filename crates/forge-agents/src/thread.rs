@@ -810,6 +810,7 @@ impl Thread {
             return self.changed(cx);
         }
         let Some(mut spec) = self.agents.get(self.selected).cloned() else { return };
+        crate::config::allow_npx_install_scripts(&mut spec);
         self.persist(cx);
         self.warned_auth = false;
         self.auth_pending = None;
