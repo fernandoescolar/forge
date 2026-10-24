@@ -105,7 +105,8 @@ pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf]) -
     if permissions.mode == PermissionMode::SuperUser {
         return Decision::Allow("super user mode");
     }
-    // They only propose: the user decides in the thread.
+    // Forge decides itself: tools that change something propose it in the thread, and
+    // those that run code or reach the network ask there first (`forge_tool_asks`).
     if is_forge_tool(tool_call) {
         return Decision::Allow("Forge's own tools ask you themselves");
     }
@@ -133,6 +134,17 @@ pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf]) -
         return Decision::Allow("tools in the workspace are allowed");
     }
     Decision::Ask
+}
+
+/// Whether a call to Forge's own tool `name` waits for the user: requests leave the
+/// computer (and can carry secrets) so they ask unless the user lets everything run; tests,
+/// apps and the debugger run the project's code, so they ask where commands do.
+pub fn forge_tool_asks(permissions: &Permissions, name: &str) -> bool {
+    match name {
+        "http_request" => permissions.mode != PermissionMode::SuperUser,
+        "run_tests" | "run_app" | "start_debugging" | "debug_evaluate" => permissions.mode < PermissionMode::Auto,
+        _ => false,
+    }
 }
 
 /// The option to answer an allowed request with: allow this once (the policy decides the
@@ -356,6 +368,18 @@ mod tests {
         assert!(matches!(decide(&perms(PermissionMode::Ask), &propose, &roots()), Decision::Allow(_)));
         let other = json!({"kind": "other", "title": "x", "_meta": {"claudeCode": {"toolName": "mcp__github__create_pr"}}});
         assert_eq!(decide(&perms(PermissionMode::Ask), &other, &roots()), Decision::Ask);
+    }
+
+    #[test]
+    fn forge_tools_that_run_code_or_reach_the_network_ask() {
+        for mode in [PermissionMode::Ask, PermissionMode::AllowEdits, PermissionMode::Auto, PermissionMode::AllowWorkspace] {
+            assert!(forge_tool_asks(&perms(mode), "http_request"), "{mode:?}");
+        }
+        assert!(!forge_tool_asks(&perms(PermissionMode::SuperUser), "http_request"));
+        assert!(forge_tool_asks(&perms(PermissionMode::AllowEdits), "run_tests"));
+        assert!(forge_tool_asks(&perms(PermissionMode::Ask), "debug_evaluate"));
+        assert!(!forge_tool_asks(&perms(PermissionMode::Auto), "run_app"));
+        assert!(!forge_tool_asks(&perms(PermissionMode::Ask), "diagnostics"));
     }
 
     #[test]

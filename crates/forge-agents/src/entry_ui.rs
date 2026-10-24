@@ -227,7 +227,8 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::Commit { message, files, origin, state, .. } => render_commit(thread, handle, ix, message, files, *origin, state, cx),
         Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
-        Entry::ExtensionTool { tool, args, state, .. } => render_extension_tool(handle, ix, tool, args, state, cx),
+        Entry::ExtensionTool { tool, args, state, .. } => render_tool_card(handle, ix, &tool.title, Some(format!("from the {} extension", tool.extension)), args, state, Thread::answer_extension_tool, cx),
+        Entry::ForgeTool { name, args, state, .. } => render_tool_card(handle, ix, crate::forge_tools::title(name), None, args, state, Thread::answer_forge_tool, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
@@ -490,7 +491,19 @@ fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note
 
 /// An agent's call to an extension's tool, waiting for the user: which extension, which
 /// tool, and with what.
-fn render_extension_tool(handle: &WeakEntity<Thread>, ix: usize, tool: &forge_ui::agent_tools::AgentTool, args: &serde_json::Value, state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+/// A tool call that waits for the user: what runs (`title`, from `source`), its arguments,
+/// and Allow / Deny, which call `answer`.
+#[allow(clippy::too_many_arguments)]
+fn render_tool_card(
+    handle: &WeakEntity<Thread>,
+    ix: usize,
+    title: &str,
+    source: Option<String>,
+    args: &serde_json::Value,
+    state: &crate::forge_tools::EditState,
+    answer: fn(&mut Thread, usize, bool, &mut Window, &mut gpui::Context<Thread>),
+    cx: &App,
+) -> AnyElement {
     use crate::forge_tools::EditState;
     let colors = cx.theme().colors().clone();
     let open = state.is_open();
@@ -510,8 +523,8 @@ fn render_extension_tool(handle: &WeakEntity<Thread>, ix: usize, tool: &forge_ui
         EditState::Applying => Label::new("Running…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
         EditState::Waiting => h_flex()
             .gap_1()
-            .child(Button::new(("ext-tool-allow", ix), "Allow").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_extension_tool(ix, true, window, cx))))
-            .child(Button::new(("ext-tool-deny", ix), "Deny").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_extension_tool(ix, false, window, cx))))
+            .child(Button::new(("ext-tool-allow", ix), "Allow").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| answer(t, ix, true, window, cx))))
+            .child(Button::new(("ext-tool-deny", ix), "Deny").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| answer(t, ix, false, window, cx))))
             .into_any_element(),
         EditState::Failed(e) => h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e.clone()).size(LabelSize::Small).color(Color::Error))).into_any_element(),
     };
@@ -527,8 +540,8 @@ fn render_extension_tool(handle: &WeakEntity<Thread>, ix: usize, tool: &forge_ui
                 .gap_1()
                 .child(Icon::new(IconName::Sparkle).size(IconSize::Small).color(if open { Color::Warning } else { Color::Muted }))
                 .child(Label::new("The agent wants to run").size(LabelSize::Small))
-                .child(Label::new(tool.title.clone()).size(LabelSize::Small).weight(FontWeight::MEDIUM))
-                .child(Label::new(format!("from the {} extension", tool.extension)).size(LabelSize::Small).color(Color::Muted)),
+                .child(Label::new(title.to_string()).size(LabelSize::Small).weight(FontWeight::MEDIUM))
+                .children(source.map(|s| Label::new(s).size(LabelSize::Small).color(Color::Muted))),
         )
         .when(!rows.is_empty(), |el| {
             el.child(v_flex().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).children(rows.into_iter().map(|(k, v)| {

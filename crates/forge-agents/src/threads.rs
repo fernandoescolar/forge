@@ -1881,6 +1881,29 @@ mod tests {
         agent_tools().unregister_extension("demo-ext");
     }
 
+    /// Forge's tools that reach the network or run code wait for the user (unless the mode
+    /// lets them run), and the agent hears when the user says no.
+    #[gpui::test]
+    async fn forge_tools_that_run_code_ask_first(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = crate::permissions::Permissions { mode: crate::permissions::PermissionMode::Ask, ..Default::default() };
+        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions };
+        let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        let (reply, mut answer) = futures::channel::oneshot::channel();
+        let request = crate::forge_mcp::ToolRequest { name: "http_request".into(), args: json!({ "url": "https://example.com/?k={{$processEnv HOME}}" }), reply };
+        thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv().unwrap(), None, "it waits for the user");
+        assert_eq!(thread.read_with(cx, |t, _| t.pending_reviews()), 1);
+        let card = thread.read_with(cx, |t, _| t.entries.iter().position(|e| matches!(e, Entry::ForgeTool { .. })).unwrap());
+        draw(&view, cx);
+        thread.update_in(cx, |t, window, cx| t.answer_forge_tool(card, false, window, cx));
+        cx.run_until_parked();
+        assert!(matches!(answer.try_recv().unwrap(), Some(Err(e)) if e.contains("didn't let you send an http request")));
+    }
+
     /// `remember` keeps a note (as the user edited it) in the project's instructions;
     /// `user_context` says where the user is, though the thread is the active tab.
     #[gpui::test]

@@ -200,7 +200,7 @@ A proposed push shows the branch, where it goes and the commits it takes. It goe
 - *What the user is looking at* tells the agent where you are: the file and line, what you selected, your open files, the problems near your cursor, your terminal's last output and the tests that failed in your last run. So "fix this" or "why does this fail?" need no more explaining.
 - *Show a file* opens a file at a line or a range for you. *Show your changes* opens the thread's review of its changes.
 
-These calls appear in the thread with their names ("Run tests", "Find references") and what they were asked.
+These calls appear in the thread with their names ("Run tests", "Find references") and what they were asked. *Send an HTTP request* reaches the network and can carry your environments' secrets, so it shows as a card with what the agent asked, and runs only if you *Allow* it (with *Super user*, it runs without asking). *Run tests*, *Run the app*, *Start debugging* and *Evaluate an expression* run your project's code: they ask the same way under *Ask every time* and *Allow file changes*, like commands.
 
 **Extensions' tools.** Extensions can offer agents tools of their own, through the same `forge` server. The Database Explorer does: agents can list your connections, read their schema, and run SQL on them, without credentials of their own. So does Containers: agents see your containers and read their logs, and start, stop or restart them, or bring a Compose project up. A tool that only reads runs when an agent calls it. Any other, such as running a query, shows in the thread with its arguments, and runs only if you *Allow* it (with *Super user*, it runs without asking). Agents see an extension's tools in threads started after it loads.
 

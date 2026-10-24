@@ -89,6 +89,9 @@ pub(crate) enum Entry {
     /// An agent's call to a tool an extension offers (`forge.agents.registerTool`), waiting
     /// for the user unless the tool only reads.
     ExtensionTool { tool: forge_ui::agent_tools::AgentTool, args: Value, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
+    /// An agent's call to one of Forge's tools that runs code or reaches the network
+    /// (`permissions::forge_tool_asks`), waiting for the user.
+    ForgeTool { name: String, args: Value, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
     /// A note the agent wants kept in the project's instructions (`remember`): editable
     /// until the user answers; `file` is where it goes.
     Remember { note: Entity<editor::Editor>, file: PathBuf, state: crate::forge_tools::EditState, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>> },
@@ -705,7 +708,7 @@ impl Thread {
 
     /// Writes waiting for the user's decision.
     pub fn pending_reviews(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Review { reply: Some(_), .. } | Entry::Permission { resolved: None, .. } | Entry::Commit { reply: Some(_), .. } | Entry::Push { reply: Some(_), .. } | Entry::LspEdit { reply: Some(_), .. } | Entry::ExtensionTool { reply: Some(_), .. } | Entry::ForgeTool { reply: Some(_), .. } | Entry::Remember { reply: Some(_), .. } | Entry::Question { answer: None, .. })).count()
     }
 
     /// Where the agent last read or wrote.
@@ -1224,6 +1227,7 @@ impl Thread {
                     Entry::Question { question, answer, .. } => RecordEntry::System { text: format!("Asked: {question} → {}", answer.as_deref().map(|a| if a.is_empty() { "skipped" } else { a }).unwrap_or("not answered")) },
                     Entry::Remember { note, state, .. } => RecordEntry::System { text: format!("Note \"{}\": {}", note.read(cx).text(cx).trim(), state.outcome()) },
                     Entry::ExtensionTool { tool, state, .. } => RecordEntry::System { text: format!("{} ({}): {}", tool.title, tool.extension, state.outcome()) },
+                    Entry::ForgeTool { name, state, .. } => RecordEntry::System { text: format!("{}: {}", crate::forge_tools::title(name), state.outcome()) },
                     Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
@@ -1558,6 +1562,7 @@ impl Thread {
             Entry::Push { reply: Some(_), .. } => Some("the proposed push".to_string()),
             Entry::LspEdit { plan, reply: Some(_), .. } => Some(plan.summary()),
             Entry::ExtensionTool { tool, reply: Some(_), .. } => Some(format!("let {} run", tool.title)),
+            Entry::ForgeTool { name, reply: Some(_), .. } => Some(format!("let it {}", crate::forge_tools::title(name).to_lowercase())),
             Entry::Remember { reply: Some(_), .. } => Some("keep a note".to_string()),
             Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
@@ -2081,35 +2086,52 @@ impl Thread {
                 let _ = reply.send(answer);
             }
             _ if forge_ui::agent_tools::agent_tools().get(&name).is_some() => self.extension_tool(name, args, reply, window, cx),
+            _ if crate::permissions::forge_tool_asks(&self.permissions.get(), &name) => {
+                self.entries.push(Entry::ForgeTool { name, args, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
+                self.changed(cx);
+            }
             _ => {
                 let ide = self.ide();
                 cx.spawn_in(window, async move |_, cx| {
-                    let answer = match name.as_str() {
-                        "run_tests" => tools::run_tests(ide, args, cx).await,
-                        "diagnostics" => tools::diagnostics(ide, args, cx).await,
-                        "go_to_definition" => tools::definition(ide, args, cx).await,
-                        "find_references" => tools::references(ide, args, cx).await,
-                        "hover" => tools::hover(ide, args, cx).await,
-                        "workspace_symbols" => tools::workspace_symbols(ide, args, cx).await,
-                        "code_actions" => tools::code_actions(ide, args, cx).await,
-                        "run_app" => tools::run_app(ide, args, cx).await,
-                        "app_output" => tools::app_output(ide, args, cx).await,
-                        "stop_app" => tools::stop_app(ide, cx).await,
-                        "show_file" => tools::show_file(ide, args, cx).await,
-                        "http_request" => tools::http_request(ide, args, cx).await,
-                        "set_breakpoint" => crate::forge_debug::set_breakpoint(ide, args, cx).await,
-                        "remove_breakpoint" => crate::forge_debug::remove_breakpoint(ide, args, cx).await,
-                        "start_debugging" => crate::forge_debug::start_debugging(ide, args, cx).await,
-                        "debug_step" => crate::forge_debug::debug_step(ide, args, cx).await,
-                        "debug_evaluate" => crate::forge_debug::debug_evaluate(ide, args, cx).await,
-                        "stop_debugging" => crate::forge_debug::stop_debugging(ide, cx).await,
-                        other => Err(format!("Unknown tool: {other}")),
-                    };
-                    let _ = reply.send(answer);
+                    let _ = reply.send(run_forge_tool(ide, &name, args, cx).await);
                 })
                 .detach();
             }
         }
+    }
+
+    /// Answers the card of Forge's tool at `ix`: runs it, or tells the agent no.
+    pub(crate) fn answer_forge_tool(&mut self, ix: usize, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::forge_tools::EditState;
+        let Some(Entry::ForgeTool { name, args, state, reply }) = self.entries.get_mut(ix) else { return };
+        if !state.is_open() {
+            return;
+        }
+        let Some(reply) = reply.take() else { return };
+        if !allow {
+            *state = EditState::Declined;
+            let _ = reply.send(Err(format!("The user didn't let you {}. Nothing was done.", crate::forge_tools::title(name).to_lowercase())));
+            self.changed(cx);
+            return;
+        }
+        *state = EditState::Applying;
+        let (name, args, ide) = (name.clone(), args.clone(), self.ide());
+        self.changed(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = run_forge_tool(ide, &name, args, cx).await;
+            this.update(cx, |this, cx| {
+                if let Some(Entry::ForgeTool { state, .. }) = this.entries.get_mut(ix) {
+                    *state = match &answer {
+                        Ok(_) => EditState::Applied,
+                        Err(e) => EditState::Failed(e.clone()),
+                    };
+                }
+                this.changed(cx);
+            })
+            .ok();
+            let _ = reply.send(answer);
+        })
+        .detach();
     }
 
     /// Answers the question at `ix`: with `answer`, or with what the user wrote when `None`.
@@ -2888,6 +2910,32 @@ impl Thread {
 }
 
 /// The last of a tool call's `locations`; lines are zero-based, as Zed reads them.
+/// Runs one of Forge's tools that answer from the project (no card of their own).
+async fn run_forge_tool(ide: crate::forge_tools::Ide, name: &str, args: Value, cx: &mut gpui::AsyncWindowContext) -> crate::forge_mcp::ToolReply {
+    use crate::forge_tools as tools;
+    match name {
+        "run_tests" => tools::run_tests(ide, args, cx).await,
+        "diagnostics" => tools::diagnostics(ide, args, cx).await,
+        "go_to_definition" => tools::definition(ide, args, cx).await,
+        "find_references" => tools::references(ide, args, cx).await,
+        "hover" => tools::hover(ide, args, cx).await,
+        "workspace_symbols" => tools::workspace_symbols(ide, args, cx).await,
+        "code_actions" => tools::code_actions(ide, args, cx).await,
+        "run_app" => tools::run_app(ide, args, cx).await,
+        "app_output" => tools::app_output(ide, args, cx).await,
+        "stop_app" => tools::stop_app(ide, cx).await,
+        "show_file" => tools::show_file(ide, args, cx).await,
+        "http_request" => tools::http_request(ide, args, cx).await,
+        "set_breakpoint" => crate::forge_debug::set_breakpoint(ide, args, cx).await,
+        "remove_breakpoint" => crate::forge_debug::remove_breakpoint(ide, args, cx).await,
+        "start_debugging" => crate::forge_debug::start_debugging(ide, args, cx).await,
+        "debug_step" => crate::forge_debug::debug_step(ide, args, cx).await,
+        "debug_evaluate" => crate::forge_debug::debug_evaluate(ide, args, cx).await,
+        "stop_debugging" => crate::forge_debug::stop_debugging(ide, cx).await,
+        other => Err(format!("Unknown tool: {other}")),
+    }
+}
+
 fn tool_location(u: &Value) -> Option<AgentLocation> {
     let location = u.get("locations")?.as_array()?.last()?;
     Some(AgentLocation {

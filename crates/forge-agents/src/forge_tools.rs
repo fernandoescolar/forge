@@ -596,6 +596,18 @@ pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolR
     Ok(text)
 }
 
+/// What a call to Forge's tool `name` does, for the card that asks the user.
+pub(crate) fn title(name: &str) -> &'static str {
+    match name {
+        "http_request" => "Send an HTTP request",
+        "run_tests" => "Run tests",
+        "run_app" => "Run the app",
+        "start_debugging" => "Start debugging",
+        "debug_evaluate" => "Evaluate in the debugger",
+        _ => "Use a Forge tool",
+    }
+}
+
 /// Response bodies quoted to the agent, at most (bytes).
 const BODY_BYTES: usize = 8_000;
 
