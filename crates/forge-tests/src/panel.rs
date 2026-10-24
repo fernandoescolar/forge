@@ -2,6 +2,7 @@
 //! packages, Rust modules or test files), with run buttons at every level, pass/fail state
 //! from the last run and failure details.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -13,7 +14,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions, div, px,
+    uniform_list,
 };
 use project::Project;
 use regex::Regex;
@@ -131,8 +133,11 @@ pub struct TestPanel {
     last_log: Option<String>,
     show_log: bool,
     error: Option<String>,
-    list_scroll: ScrollHandle,
+    list_scroll: UniformListScrollHandle,
     details_scroll: ScrollHandle,
+    /// Where failure lines point (`source_location`), by project and line: details are
+    /// drawn every frame while a test runs, and finding out means a `stat`.
+    locations: RefCell<HashMap<(Option<PathBuf>, String), Option<(PathBuf, u32)>>>,
     /// Files this panel last colored in the gutter, so stale entries can be cleared.
     published_files: HashSet<PathBuf>,
     _subscriptions: Vec<Subscription>,
@@ -169,8 +174,9 @@ impl TestPanel {
             last_log: None,
             show_log: false,
             error: None,
-            list_scroll: ScrollHandle::new(),
+            list_scroll: UniformListScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
+            locations: Default::default(),
             published_files: HashSet::new(),
             _subscriptions: vec![subscription],
         };
@@ -423,6 +429,8 @@ impl TestPanel {
                 }
             }
         });
+        // Files may have moved since: failure lines are looked up again.
+        self.locations.borrow_mut().clear();
         self.run = Some(Run { methods, current: None, live, _task: task, _ticker: ticker });
         self.publish_gutter(cx);
         cx.notify();
@@ -645,40 +653,69 @@ impl TestPanel {
             .into_any_element()
     }
 
-    fn render_tree(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The rows the tree shows (what isn't inside a collapsed node), as places in
+    /// `projects`: (project, class, test).
+    fn visible_rows(&self) -> Vec<(usize, Option<usize>, Option<usize>)> {
         let mut rows = Vec::new();
         for (p, project) in self.projects.iter().enumerate() {
-            let key = NodeKey::Project(project.path.clone());
-            let collapsed = self.collapsed.contains(&key);
-            rows.push(self.render_row(key, 0, project.name.clone(), self.project_status(p), true, cx));
-            if collapsed {
+            rows.push((p, None, None));
+            if self.collapsed.contains(&NodeKey::Project(project.path.clone())) {
                 continue;
             }
             for (c, class) in project.classes.iter().enumerate() {
-                let key = NodeKey::Class(class.fqn.clone());
-                let collapsed = self.collapsed.contains(&key);
-                rows.push(self.render_row(key, 1, class.name.clone(), self.class_status(p, c), true, cx));
-                if collapsed {
+                rows.push((p, Some(c), None));
+                if self.collapsed.contains(&NodeKey::Class(class.fqn.clone())) {
                     continue;
                 }
-                for test in &class.tests {
-                    rows.push(self.render_row(NodeKey::Method(test.fqn.clone()), 2, test.name.clone(), self.method_status(&test.fqn), false, cx));
-                }
+                rows.extend((0..class.tests.len()).map(|t| (p, Some(c), Some(t))));
             }
         }
         rows
     }
 
+    /// The rows of `range`: only those on screen are built, so a run (which redraws every
+    /// frame while a test spins) costs the same with ten tests or ten thousand.
+    fn render_tree(&self, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let rows = self.visible_rows();
+        rows.get(range.start.min(rows.len())..range.end.min(rows.len()))
+            .unwrap_or_default()
+            .iter()
+            .map(|&(p, class, test)| {
+                let project = &self.projects[p];
+                match (class, test) {
+                    (None, _) => self.render_row(NodeKey::Project(project.path.clone()), 0, project.name.clone(), self.project_status(p), true, cx),
+                    (Some(c), None) => {
+                        let class = &project.classes[c];
+                        self.render_row(NodeKey::Class(class.fqn.clone()), 1, class.name.clone(), self.class_status(p, c), true, cx)
+                    }
+                    (Some(c), Some(t)) => {
+                        let test = &project.classes[c].tests[t];
+                        self.render_row(NodeKey::Method(test.fqn.clone()), 2, test.name.clone(), self.method_status(&test.fqn), false, cx)
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// `source_location`, remembered.
+    fn location_of(&self, line: &str, root: Option<&std::path::Path>) -> Option<(PathBuf, u32)> {
+        let key = (root.map(|r| r.to_path_buf()), line.to_string());
+        if let Some(found) = self.locations.borrow().get(&key) {
+            return found.clone();
+        }
+        let found = source_location(line, root);
+        self.locations.borrow_mut().insert(key, found.clone());
+        found
+    }
+
     fn render_details(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let border = cx.theme().colors().border;
         let body: AnyElement = if self.show_log {
+            // Long build logs: the end is what matters, and only it is copied.
             let log = match &self.run {
-                Some(run) => run.live.lock().map(|l| l.clone()).unwrap_or_default(),
-                None => self.last_log.clone().unwrap_or_default(),
+                Some(run) => run.live.lock().map(|l| last_lines(&l, 400).to_string()).unwrap_or_default(),
+                None => self.last_log.as_deref().map(|l| last_lines(l, 400).to_string()).unwrap_or_default(),
             };
-            // Long build logs: the end is what matters.
-            let lines: Vec<&str> = log.lines().collect();
-            let log = lines[lines.len().saturating_sub(400)..].join("\n");
             v_flex().children(log.lines().map(|line| Label::new(line.to_string()).size(LabelSize::XSmall).buffer_font(cx))).into_any_element()
         } else {
             let Some(NodeKey::Method(fqn)) = &self.selected else {
@@ -715,7 +752,7 @@ impl TestPanel {
                 if let Some(message) = &case.message {
                     let mut lines = Vec::new();
                     for (i, line) in message.lines().enumerate() {
-                        lines.push(match source_location(line, root.as_deref()) {
+                        lines.push(match self.location_of(line, root.as_deref()) {
                             Some(_) => self.render_stack_line(10_000 + i, line, root.as_deref(), cx),
                             None => Label::new(line.to_string()).size(LabelSize::XSmall).buffer_font(cx).color(color).into_any_element(),
                         });
@@ -791,7 +828,7 @@ impl TestPanel {
     /// (Node). Relative paths are resolved against the test's project.
     fn render_stack_line(&self, index: usize, line: &str, root: Option<&std::path::Path>, cx: &mut Context<Self>) -> AnyElement {
         let label = Label::new(line.trim_end().to_string()).size(LabelSize::XSmall).buffer_font(cx);
-        let Some((file, row)) = source_location(line, root) else {
+        let Some((file, row)) = self.location_of(line, root) else {
             return label.color(Color::Muted).into_any_element();
         };
         div()
@@ -801,6 +838,15 @@ impl TestPanel {
             .child(label.color(Color::Accent))
             .on_click(cx.listener(move |this, _, window, cx| this.open(file.clone(), row, window, cx)))
             .into_any_element()
+    }
+}
+
+/// The last `count` lines of `text`, without splitting the rest.
+fn last_lines(text: &str, count: usize) -> &str {
+    let trimmed = text.trim_end_matches('\n');
+    match trimmed.rmatch_indices('\n').nth(count.saturating_sub(1)) {
+        Some((at, _)) => &trimmed[at + 1..],
+        None => trimmed,
     }
 }
 
@@ -936,14 +982,16 @@ impl Render for TestPanel {
                 })
                 .into_any_element()
         } else {
+            let count = self.visible_rows().len();
             div()
-                .id("test-tree")
                 .flex_1()
                 .min_h_0()
                 .py_1()
-                .overflow_y_scroll()
-                .track_scroll(&self.list_scroll)
-                .children(self.render_tree(cx))
+                .child(
+                    uniform_list("test-tree", count, cx.processor(|this, range, _window, cx| this.render_tree(range, cx)))
+                        .size_full()
+                        .track_scroll(&self.list_scroll),
+                )
                 .into_any_element()
         };
 
@@ -1039,6 +1087,13 @@ impl Panel for TestPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_the_last_lines() {
+        assert_eq!(last_lines("a\nb\nc\n", 2), "b\nc");
+        assert_eq!(last_lines("a\nb", 5), "a\nb");
+        assert_eq!(last_lines("", 3), "");
+    }
     use gpui::{TestAppContext, VisualTestContext, point, size};
     use std::time::Instant;
 

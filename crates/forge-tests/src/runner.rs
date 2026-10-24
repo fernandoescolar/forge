@@ -48,6 +48,25 @@ pub struct RunOutput {
 /// What the test command has printed so far, shared with the panel while it runs.
 pub type LiveLog = std::sync::Arc<std::sync::Mutex<String>>;
 
+/// The live output keeps its last this many bytes, about: it is only shown, and a long
+/// build log would otherwise grow without end.
+const LIVE_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Appends `text` to the live output, dropping its oldest part past `LIVE_LIMIT`.
+fn push_live(live: &LiveLog, text: &str) {
+    let mut log = live.lock().unwrap_or_else(|e| e.into_inner());
+    log.push_str(text);
+    if log.len() > LIVE_LIMIT {
+        let mut cut = log.len() - LIVE_LIMIT / 2;
+        while !log.is_char_boundary(cut) {
+            cut += 1;
+        }
+        // Start on a whole line.
+        let cut = log[cut..].find('\n').map_or(cut, |at| cut + at + 1);
+        log.drain(..cut);
+    }
+}
+
 /// Runs the tests in `scope` of `project`, with the tool for its kind. Dropping the
 /// future kills the process.
 /// `env` is the project's shell environment (so tools on the user's `PATH` are found when
@@ -234,13 +253,13 @@ async fn append(stream: Option<impl AsyncRead + Unpin>, raw: Vec<LiveLog>, live:
             log.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
         }
         match show {
-            None => live.lock().unwrap_or_else(|e| e.into_inner()).push_str(text),
+            None => push_live(&live, text),
             Some(show) => {
                 line.push_str(text);
                 while let Some(end) = line.find('\n') {
                     let full: String = line.drain(..=end).collect();
                     if let Some(shown) = show(full.trim_end_matches('\n')) {
-                        live.lock().unwrap_or_else(|e| e.into_inner()).push_str(&shown);
+                        push_live(&live, &shown);
                     }
                 }
             }
