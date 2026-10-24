@@ -326,6 +326,8 @@ child.onExit((code) => console.log('exited', code));
 
 Each program runs in a process group of its own: `kill()`, and unloading the extension, stop what it started too (a server's workers, the real program behind a wrapper script).
 
+Extensions share one JavaScript thread, so code that runs for more than 10 seconds without yielding (a `while (true) {}`) is interrupted and the error is shown in the Extensions panel; do long work in a program or a sidecar. A tool an agent calls must answer within 5 minutes.
+
 **Sidecars** are programs your extension ships, built for each platform. List them in `package.json`, and put each build at `bin/<platform>/<name>`, where the platform is `darwin-arm64`, `darwin-x64`, `linux-x64`, `win32-x64`…:
 
 ```json

@@ -15,7 +15,11 @@ use std::{
     cell::RefCell,
     collections::BTreeSet,
     rc::Rc,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -78,7 +82,18 @@ impl JsHost {
 
 type Timers = Rc<RefCell<BTreeSet<(Instant, u32)>>>;
 
+/// How long extensions' code may run at a stretch (one message, the timers due and the
+/// promise jobs they queue) before it is interrupted: a `while (true) {}` in one extension
+/// would otherwise stop every extension.
+#[cfg(not(test))]
+const BUDGET: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const BUDGET: Duration = Duration::from_secs(2);
+
 struct JsThread {
+    /// When the code running now must stop, in milliseconds since `started` (0: none).
+    deadline: Arc<AtomicU64>,
+    started: Instant,
     rt: Runtime,
     ctx: Context,
     timers: Timers,
@@ -92,7 +107,13 @@ impl JsThread {
         rt.set_max_stack_size(4 * 1024 * 1024);
         let ctx = Context::full(&rt)?;
         let timers: Timers = Rc::default();
-        let this = Self { rt, ctx, timers, out };
+        let (deadline, started) = (Arc::new(AtomicU64::new(0)), Instant::now());
+        let past = deadline.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            let deadline = past.load(Ordering::Relaxed);
+            deadline != 0 && started.elapsed().as_millis() as u64 > deadline
+        })));
+        let this = Self { deadline, started, rt, ctx, timers, out };
         this.install_native()?;
         this.ctx.with(|ctx| -> anyhow::Result<()> {
             ctx.eval::<(), _>(runtime_js).catch(&ctx).map_err(|e| anyhow::anyhow!("runtime.js failed: {e}"))?;
@@ -159,13 +180,18 @@ impl JsThread {
     fn run(self, rx: mpsc::Receiver<ToJs>) {
         loop {
             let wait = self.timers.borrow().first().map(|(at, _)| at.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(3600));
-            match rx.recv_timeout(wait) {
-                Ok(msg) => self.handle(msg),
-                Err(RecvTimeoutError::Timeout) => {}
+            let msg = match rx.recv_timeout(wait) {
+                Ok(msg) => Some(msg),
+                Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
+            };
+            self.deadline.store((self.started.elapsed() + BUDGET).as_millis() as u64, Ordering::Relaxed);
+            if let Some(msg) = msg {
+                self.handle(msg);
             }
             self.fire_due_timers();
             self.drain_jobs();
+            self.deadline.store(0, Ordering::Relaxed);
         }
     }
 
@@ -315,6 +341,25 @@ mod tests {
         thread::sleep(Duration::from_millis(60));
         let after: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| matches!(m, FromJs::Log { message, .. } if message == "tick")).collect();
         assert!(after.is_empty(), "ticks after unloading: {}", after.len());
+    }
+
+    /// A runaway extension is stopped, and the others keep working.
+    #[test]
+    fn runaway_code_is_interrupted() {
+        let (out, mut rx) = unbounded();
+        let host = JsHost::spawn(crate::RUNTIME_JS.to_string(), out).unwrap();
+        host.send(ToJs::Load { id: "spin".into(), path: "/s".into(), code: "var __forgeExtension = { activate() { while (true) {} } };".into() });
+        host.send(ToJs::Load { id: "ok".into(), path: "/o".into(), code: "var __forgeExtension = { activate() { console.log('still here'); } };".into() });
+        let (mut interrupted, deadline) = (false, Instant::now() + Duration::from_secs(10));
+        loop {
+            assert!(Instant::now() < deadline, "the other extension never ran");
+            match rx.try_recv() {
+                Ok(FromJs::Log { level, message }) if level == "error" && message.contains("interrupted") => interrupted = true,
+                Ok(FromJs::Log { message, .. }) if message == "still here" => break,
+                _ => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(interrupted, "the loop was reported");
     }
 
     #[test]

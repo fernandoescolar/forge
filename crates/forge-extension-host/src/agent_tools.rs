@@ -13,15 +13,26 @@ use serde_json::{Value, json};
 
 use crate::js::{JsHost, ToJs};
 
-/// Calls waiting for their extension's answer, by call id.
+/// How long an agent waits for an extension's tool before it is told it timed out.
+const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Calls waiting for their extension's answer, by call id, with the extension.
 #[derive(Clone, Default)]
-pub(crate) struct PendingCalls(Arc<Mutex<HashMap<u64, oneshot::Sender<AgentToolReply>>>>);
+pub(crate) struct PendingCalls(Arc<Mutex<HashMap<u64, (String, oneshot::Sender<AgentToolReply>)>>>);
 
 impl PendingCalls {
     /// The answer to call `call` (`agents.toolResult`).
     pub fn answer(&self, call: u64, reply: AgentToolReply) {
-        if let Some(waiting) = self.0.lock().unwrap().remove(&call) {
+        if let Some((_, waiting)) = self.0.lock().unwrap().remove(&call) {
             waiting.send(reply).ok();
+        }
+    }
+
+    /// `extension` unloaded: its calls won't be answered.
+    pub fn fail_extension(&self, extension: &str) {
+        let calls: Vec<u64> = self.0.lock().unwrap().iter().filter(|(_, (e, _))| e == extension).map(|(call, _)| *call).collect();
+        for call in calls {
+            self.answer(call, Err(format!("{extension} stopped before answering.")));
         }
     }
 }
@@ -37,7 +48,13 @@ impl AgentToolRunner for JsToolRunner {
     fn run(&self, tool: &AgentTool, args: Value, cwd: PathBuf) -> oneshot::Receiver<AgentToolReply> {
         let (tx, rx) = oneshot::channel();
         let call = self.next.fetch_add(1, Ordering::Relaxed);
-        self.pending.0.lock().unwrap().insert(call, tx);
+        self.pending.0.lock().unwrap().insert(call, (tool.extension.clone(), tx));
+        // An extension that never answers doesn't keep the agent waiting for ever.
+        let (pending, title) = (self.pending.clone(), tool.title.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(TOOL_TIMEOUT);
+            pending.answer(call, Err(format!("{title} didn't answer within {} minutes.", TOOL_TIMEOUT.as_secs() / 60)));
+        });
         let context = json!({ "cwd": cwd.to_string_lossy() }).to_string();
         self.js.send(ToJs::RunTool { call, extension: tool.extension.clone(), tool: tool.tool.clone(), args: args.to_string(), context });
         rx
@@ -82,6 +99,18 @@ pub(crate) fn answer(pending: &PendingCalls, args: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calls_fail_when_their_extension_unloads() {
+        let pending = PendingCalls::default();
+        let (tx, mut rx) = oneshot::channel();
+        let (other_tx, mut other) = oneshot::channel();
+        pending.0.lock().unwrap().insert(1, ("db".into(), tx));
+        pending.0.lock().unwrap().insert(2, ("docker".into(), other_tx));
+        pending.fail_extension("db");
+        assert_eq!(rx.try_recv().unwrap(), Some(Err("db stopped before answering.".into())));
+        assert_eq!(other.try_recv().unwrap(), None, "other extensions' calls still wait");
+    }
     use crate::host::ExtensionHost;
     use gpui::TestAppContext;
     use std::time::{Duration, Instant};

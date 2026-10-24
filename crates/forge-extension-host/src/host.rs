@@ -321,6 +321,7 @@ impl ExtensionHost {
         let extension = self.extensions.remove(index);
         self.js.send(ToJs::Unload { id: id.to_string() });
         self.kill_processes_of(id);
+        self.agent_calls.fail_extension(id);
         // Unloading unregisters them too; this also covers an extension whose JS failed.
         forge_ui::agent_tools::agent_tools().unregister_extension(id);
         cx.emit(HostEvent::Changed);
