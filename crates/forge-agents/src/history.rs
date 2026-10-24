@@ -90,6 +90,35 @@ pub fn save(base: &Path, record: &SessionRecord) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// What the list needs of a saved session: its entries are skipped, not built.
+#[derive(Deserialize)]
+struct Head {
+    session_id: String,
+    agent_id: String,
+    title: String,
+    updated_at: u64,
+}
+
+/// The summary of `file`, read again only when the file changed since the last time:
+/// the threads panel lists the history often, and transcripts can be large.
+fn summary(file: PathBuf) -> Option<SessionSummary> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, u64, SessionSummary)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let metadata = std::fs::metadata(&file).ok()?;
+    let stamp = (metadata.modified().ok()?, metadata.len());
+    if let Some((modified, len, summary)) = cache.lock().ok()?.get(&file) {
+        if (*modified, *len) == stamp {
+            return Some(summary.clone());
+        }
+    }
+    let head: Head = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+    let summary = SessionSummary { session_id: head.session_id, agent_id: head.agent_id, title: head.title, updated_at: head.updated_at, file: file.clone() };
+    cache.lock().ok()?.insert(file, (stamp.0, stamp.1, summary.clone()));
+    Some(summary)
+}
+
 /// Newest first. Unreadable files are skipped.
 pub fn list(base: &Path, project_root: &Path) -> Vec<SessionSummary> {
     let Ok(entries) = std::fs::read_dir(project_dir(base, project_root)) else { return vec![] };
@@ -97,10 +126,7 @@ pub fn list(base: &Path, project_root: &Path) -> Vec<SessionSummary> {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .filter_map(|file| {
-            let record = load(&file).ok()?;
-            Some(SessionSummary { session_id: record.session_id, agent_id: record.agent_id, title: record.title, updated_at: record.updated_at, file })
-        })
+        .filter_map(summary)
         .collect();
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out

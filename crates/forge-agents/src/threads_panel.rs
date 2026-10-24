@@ -50,6 +50,8 @@ pub struct ThreadsPanel {
     position: DockPosition,
     scroll: ScrollHandle,
     saved: Vec<SessionSummary>,
+    /// The open threads' sessions when `saved` was listed.
+    listed_with: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -58,8 +60,23 @@ impl ThreadsPanel {
         let store = threads::store_for(workspace.weak_handle().entity_id(), cx).expect("threads::init runs before panels are created");
         let settings = settings::global(cx);
         let mut subscriptions = vec![
+            // The store notifies on every change of every thread (each chunk an agent
+            // streams); the saved list only changes when threads open or close.
             cx.observe(&store, |this: &mut Self, _, cx| {
-                this.refresh_saved(cx);
+                if this.open_sessions(cx) != this.listed_with {
+                    this.refresh_saved(cx);
+                    // A closing thread saves its session in the background: list again
+                    // once that is written.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        this.update(cx, |this, cx| {
+                            this.refresh_saved(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 cx.notify();
             }),
             cx.observe(&settings, |this: &mut Self, _, cx| {
@@ -80,6 +97,7 @@ impl ThreadsPanel {
             position: forge_ui::dock_position::load(<Self as Panel>::panel_key(), cx).unwrap_or(DockPosition::Right),
             scroll: ScrollHandle::new(),
             saved: Vec::new(),
+            listed_with: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.refresh_saved(cx);
@@ -92,15 +110,21 @@ impl ThreadsPanel {
         self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf()).or_else(|| std::env::current_dir().ok())
     }
 
+    /// The sessions of the open threads, which the saved list leaves out.
+    fn open_sessions(&self, cx: &App) -> Vec<String> {
+        self.store.read(cx).threads().iter().filter_map(|t| t.read(cx).session_id().map(str::to_string)).collect()
+    }
+
     /// The project's saved conversations that aren't open as threads, newest first.
     pub fn refresh_saved(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root(cx) else {
             self.saved.clear();
             return;
         };
-        let open: Vec<String> = self.store.read(cx).threads().iter().filter_map(|t| t.read(cx).session_id().map(str::to_string)).collect();
+        let open = self.open_sessions(cx);
         let dir = self.settings.read(cx).history_dir().clone();
         self.saved = history::list(&dir, &root).into_iter().filter(|s| !open.contains(&s.session_id)).take(30).collect();
+        self.listed_with = open;
     }
 
     pub fn saved(&self) -> &[SessionSummary] {
