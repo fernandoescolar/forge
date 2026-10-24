@@ -218,12 +218,13 @@ impl AgentSettings {
 pub fn presets() -> Vec<AgentSpec> {
     let npx = |id: &str, package: &str| AgentSpec { id: id.into(), command: "npx".into(), args: vec!["-y".into(), package.into()], env: vec![], cwd: None };
     vec![
-        npx("claude", "@agentclientprotocol/claude-agent-acp"),
-        npx("codex", "@zed-industries/codex-acp"),
+        // Pinned like assets/agents.json: what this Forge was tested with.
+        npx("claude", "@agentclientprotocol/claude-agent-acp@0.95.0"),
+        npx("codex", "@zed-industries/codex-acp@0.16.0"),
         AgentSpec { id: "gemini".into(), command: "gemini".into(), args: vec!["--experimental-acp".into()], env: vec![], cwd: None },
-        AgentSpec { id: "copilot".into(), command: "npx".into(), args: ["-y", "@github/copilot", "--acp", "--stdio"].map(String::from).to_vec(), env: vec![], cwd: None },
+        AgentSpec { id: "copilot".into(), command: "npx".into(), args: ["-y", "@github/copilot@1.0.103", "--acp", "--stdio"].map(String::from).to_vec(), env: vec![], cwd: None },
         // Google Antigravity's `agy`, through Forge's own adapter (`packages/agy-acp`).
-        npx("antigravity", "@forge-ide/agy-acp"),
+        npx("antigravity", "@forge-ide/agy-acp@0.1.1"),
         // The standalone `opencode` binary (its installer), not `npx opencode-ai`: npm's
         // `latest` tag lags the installer, and a 1.x opencode refuses a 2.x database.
         AgentSpec { id: "opencode".into(), command: "opencode".into(), args: vec!["acp".into()], env: vec![], cwd: None },
@@ -241,7 +242,7 @@ mod tests {
             let preset = presets.iter().find(|p| p.id == default.id).unwrap_or_else(|| panic!("{} is a default agent but not a preset", default.id));
             assert_eq!((&preset.command, &preset.args), (&default.command, &default.args), "{}", preset.id);
         }
-        assert!(presets.iter().any(|a| a.id == "antigravity" && a.args.contains(&"@forge-ide/agy-acp".to_string())));
+        assert!(presets.iter().any(|a| a.id == "antigravity" && a.args.contains(&"@forge-ide/agy-acp@0.1.1".to_string())));
         assert!(presets.iter().any(|a| a.id == "opencode" && a.command == "opencode" && a.args == ["acp"]));
     }
 }

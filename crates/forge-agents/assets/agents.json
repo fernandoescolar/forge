@@ -8,12 +8,14 @@
   // MCP servers every agent session gets (ACP passes them to the agent), e.g.
   //   { "name": "github", "command": "github-mcp-server", "args": ["stdio"], "env": { "GITHUB_TOKEN": "…" } }
   "mcp_servers": [],
+  // npx agents are pinned to the version this Forge was tested with: `npx -y` runs what npm
+  // serves, install scripts included. Remove "@<version>" to follow the latest.
   "agents": [
-    { "id": "claude", "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp"] },
+    { "id": "claude", "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.95.0"] },
     { "id": "gemini", "command": "gemini", "args": ["--experimental-acp"] },
-    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp"] },
-    { "id": "copilot", "command": "npx", "args": ["-y", "@github/copilot", "--acp", "--stdio"] },
-    { "id": "antigravity", "command": "npx", "args": ["-y", "@forge-ide/agy-acp"] },
+    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp@0.16.0"] },
+    { "id": "copilot", "command": "npx", "args": ["-y", "@github/copilot@1.0.103", "--acp", "--stdio"] },
+    { "id": "antigravity", "command": "npx", "args": ["-y", "@forge-ide/agy-acp@0.1.1"] },
     { "id": "opencode", "command": "opencode", "args": ["acp"] }
   ]
 }
