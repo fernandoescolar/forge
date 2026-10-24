@@ -52,22 +52,20 @@ pub struct JsHost {
 }
 
 impl JsHost {
+    /// Starts the runtime without waiting for it: evaluating `runtime.js` (React and the
+    /// reconciler) takes a while, and the first window needn't wait. Messages sent meanwhile
+    /// queue; a runtime that fails to start says so as an error log.
     pub fn spawn(runtime_js: String, out: UnboundedSender<FromJs>) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
         thread::Builder::new()
             .name("forge-extensions".into())
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || match JsThread::new(&runtime_js, out) {
-                Ok(js) => {
-                    let _ = ready_tx.send(Ok(()));
-                    js.run(rx);
-                }
+            .spawn(move || match JsThread::new(&runtime_js, out.clone()) {
+                Ok(js) => js.run(rx),
                 Err(e) => {
-                    let _ = ready_tx.send(Err(e));
+                    let _ = out.unbounded_send(FromJs::Log { level: "error".into(), message: format!("The extension runtime didn't start: {e:#}") });
                 }
             })?;
-        ready_rx.recv()??;
         Ok(Self { tx })
     }
 
