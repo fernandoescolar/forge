@@ -1,5 +1,5 @@
-# Builds Forge and runs its tests (Rust crates and the extension API) on every push and
-# pull request, on macOS; on Linux, checks that everything compiles.
+# Builds Forge and runs its tests (Rust crates, the extension API and the agy adapter) on
+# every push and pull request, on macOS and on Linux. Actions are pinned by commit.
 name: CI
 
 on:
@@ -15,20 +15,21 @@ jobs:
   test:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: stable
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Apply Forge's patches to Zed
         run: scripts/apply-zed-patches.sh
       - name: Extension API
@@ -40,18 +41,19 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
-  # Forge also ships for Linux: its crates and tests must keep compiling there.
-  check-linux:
+  # Forge also ships for Linux: its tests run there too (GPUI's tests need no display).
+  test-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install the libraries GPUI builds against
         run: |
           sudo apt-get update
@@ -59,5 +61,11 @@ jobs:
             libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev libsqlite3-dev cmake clang lld
       - name: Apply Forge's patches to Zed
         run: scripts/apply-zed-patches.sh
-      - name: Check
-        run: cargo check --workspace --tests
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Antigravity ACP adapter
+        working-directory: packages/agy-acp
+        run: npm ci && npm test
+      - name: Rust tests
+        run: cargo test --workspace

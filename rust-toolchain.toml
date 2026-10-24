@@ -1,0 +1,5 @@
+# The Rust Zed is built with (vendor/zed/rust-toolchain.toml): CI, releases and local builds
+# all use it. When moving to a new Zed release, set the same channel here.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

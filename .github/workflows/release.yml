@@ -79,16 +79,15 @@ jobs:
       # No debug info in release builds made here: much less to compile, link and cache.
       CARGO_PROFILE_RELEASE_DEBUG: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install && rustup target add "$FORGE_TARGET"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.target }}
           # Only main's caches can be restored by the next tag.
@@ -147,7 +146,7 @@ jobs:
           fi
       - name: Build the app
         run: scripts/bundle-macos.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: forge-${{ matrix.target }}
@@ -169,14 +168,15 @@ jobs:
       FORGE_UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
       CARGO_PROFILE_RELEASE_DEBUG: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-linux-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -204,7 +204,7 @@ jobs:
         run: |
           tar -tzf dist/Forge-*-linux-${{ matrix.arch }}.tar.gz | grep -qx 'forge/bin/forge'
           dist/forge/bin/forge --printenv > /dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: forge-linux-${{ matrix.arch }}
@@ -220,7 +220,7 @@ jobs:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     runs-on: macos-15
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: forge-${{ matrix.target }}
           path: dist
@@ -236,8 +236,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true

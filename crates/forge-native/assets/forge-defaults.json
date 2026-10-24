@@ -1,5 +1,6 @@
 // Forge's default settings. Every setting not listed here keeps its built-in default.
-// Users override any of these in ~/Library/Application Support/Forge/config/settings.json.
+// Users override any of these in config/settings.json in Forge's data folder:
+// ~/Library/Application Support/Forge on macOS, $XDG_DATA_HOME/forge (~/.local/share/forge) on Linux.
 {
   // Forge's own palettes, following the system appearance. Dracula is built in too;
   // every config/palettes/*.json becomes a selectable theme.

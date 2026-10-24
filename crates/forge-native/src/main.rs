@@ -1,7 +1,8 @@
 //! Forge native shell: a GPUI application built on Zed's workspace, editor and terminal.
 //!
 //! This is deliberately a *slim* subset of Zed's own `main`: no collaboration, Zed AI,
-//! telemetry, auto-update or extension marketplace. Forge-specific surfaces (ACP agent
+//! telemetry or extension marketplace (Forge updates itself from its own releases:
+//! `forge_update`). Forge-specific surfaces (ACP agent
 //! panel, React extension host) are added as workspace panels.
 
 mod branding;
@@ -241,16 +242,16 @@ fn main() {
     });
 }
 
-/// Reopens the windows that were open when Forge last ended (quit, or the last window
-/// closed), each with its tabs, splits and docks; `restore_on_startup` in settings.json
-/// chooses that, only the last project ("last_workspace") or nothing ("empty_tab"). Returns
-/// whether any window opened.
 /// Opening folders or files from outside (the command line, the Dock, Open With): in a window
 /// of their own, or the one that already shows them; never added to another window's sidebar.
 fn own_window() -> OpenOptions {
     OpenOptions { add_dirs_to_sidebar: false, ..OpenOptions::default() }
 }
 
+/// Reopens the windows that were open when Forge last ended (quit, or the last window
+/// closed), each with its tabs, splits and docks; `restore_on_startup` in settings.json
+/// chooses that, only the last project ("last_workspace") or nothing ("empty_tab"). Returns
+/// whether any window opened.
 async fn restore_last_session(app_state: &Arc<AppState>, cx: &mut gpui::AsyncApp) -> bool {
     use settings::Settings as _;
     use workspace::{RestoreOnStartupBehavior, WorkspaceSettings};

@@ -54,7 +54,8 @@ Without the patches applied, the build fails on the missing APIs (e.g. `editor::
    - `crates/forge-extension-host/src/{panel,api}.rs`: `ui` components; editor selections, highlights and buffer events;
    - `crates/forge-http` and `crates/forge-github`: editor blocks and the HTTP client;
    - `crates/forge-run` and `crates/forge-tests`: tasks, the DAP store and debug locators.
-4. Run the tests, then commit the submodule pointer together with `Cargo.toml` and `Cargo.lock`.
+4. Set `rust-toolchain.toml` to the channel in `vendor/zed/rust-toolchain.toml`: CI and releases build with it.
+5. Run the tests, then commit the submodule pointer together with `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`.
 
 
 ## Notes
@@ -62,5 +63,5 @@ Without the patches applied, the build fails on the missing APIs (e.g. `editor::
 - **Shaders:** builds use `gpui_platform/runtime_shaders` by default, so Xcode isn't needed. `FORGE_PRECOMPILED_SHADERS=1 scripts/bundle-macos.sh` turns it off for releases (the release workflow does, on runners with Xcode).
 - **Run indicators:** two hooks share the gutter's run buttons: `RunIndicatorStatus` (forge-tests sets it) and `RunIndicatorClick` (forge-http sets it, passing clicks on other files' buttons to whoever set it before).
 - **`--printenv`:** Zed captures the login-shell environment by re-running its own executable with `--printenv`. Forge's `main` must keep answering that flag.
-- **Separate state:** Forge calls `paths::set_custom_data_dir` with `~/Library/Application Support/Forge`, so it never shares settings or databases with an installed Zed.
+- **Separate state:** Forge calls `paths::set_custom_data_dir` with `~/Library/Application Support/Forge` (on Linux, `$XDG_DATA_HOME/forge`, usually `~/.local/share/forge`), so it never shares settings or databases with an installed Zed.
 - **License:** Zed's crates are GPL-3.0, so Forge is GPL-3.0-or-later.

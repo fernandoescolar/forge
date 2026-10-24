@@ -423,7 +423,7 @@ npx forge-ext pack .          # → hello-0.1.0.forgeext
 
 *Export as Package…* in an extension's ⋯ menu (Extensions panel) does the same from Forge.
 
-To install a package, use **Extensions › Install from Package…** (or *Install* in the Extensions panel). Forge checks it is a built extension with its sidecars for this Mac, unpacks it into `~/Library/Application Support/Forge/extensions/<name>`, keeping Unix permissions so sidecars stay executable, and loads it, replacing an installed copy.
+To install a package, use **Extensions › Install from Package…** (or *Install* in the Extensions panel). Forge checks it is a built extension with its sidecars for this computer, unpacks it into `~/Library/Application Support/Forge/extensions/<name>` (on Linux, `~/.local/share/forge/extensions/<name>`), keeping Unix permissions so sidecars stay executable, and loads it, replacing an installed copy.
 
 Extensions run with the user's rights: they can read files and run programs. Say what yours does in its description.
 
