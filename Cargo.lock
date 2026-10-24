@@ -3826,6 +3826,7 @@ name = "forge-update"
 version = "0.0.1-beta"
 dependencies = [
  "anyhow",
+ "base64",
  "editor",
  "forge-process",
  "futures",
@@ -3833,6 +3834,7 @@ dependencies = [
  "http_client",
  "log",
  "project",
+ "ring",
  "serde_json",
  "settings",
  "sha2",

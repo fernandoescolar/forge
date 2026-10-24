@@ -84,6 +84,30 @@ pub struct Release {
     pub notes_url: String,
     /// The asset's SHA-256 as GitHub lists it (hex), when it does.
     pub sha256: Option<String>,
+    /// Where its signature (`<asset>.sig`) is, when the release has one.
+    pub signature: Option<String>,
+}
+
+/// Forge's release key (Ed25519: base64 of its 32 bytes), built in from
+/// `FORGE_UPDATE_PUBLIC_KEY` (scripts/create-update-key.sh makes one). With it, updates
+/// install only downloads signed with the matching private key, which only the release
+/// workflow holds: a release asset swapped on GitHub, or a stolen token, isn't enough.
+const RELEASE_KEY: Option<&str> = option_env!("FORGE_UPDATE_PUBLIC_KEY");
+
+/// Checks that `signature` is `public_key`'s Ed25519 signature of `data`.
+pub fn verify_signature(public_key: &str, data: &[u8], signature: &[u8]) -> Result<()> {
+    use base64::Engine as _;
+    let key = base64::engine::general_purpose::STANDARD.decode(public_key.trim()).context("the release key isn't base64")?;
+    anyhow::ensure!(key.len() == 32, "the release key isn't an Ed25519 public key");
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(data, signature)
+        .map_err(|_| anyhow::anyhow!("the download isn't signed with Forge's release key"))
+}
+
+/// The SHA-256 of `data`, in hex.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The release asset for this kind of machine.
@@ -159,7 +183,15 @@ pub fn newer_release(json: &str, current: &str, os: &str, arch: &str) -> Result<
         .with_context(|| format!("release {tag} has no {wanted}"))?;
     let download = asset.get("browser_download_url").and_then(Value::as_str).with_context(|| format!("release {tag} has no {wanted}"))?;
     let sha256 = asset.get("digest").and_then(Value::as_str).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase);
-    Ok(Some(Release { version, download: download.to_string(), notes_url: release.get("html_url").and_then(Value::as_str).unwrap_or_default().to_string(), sha256 }))
+    let signature = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(format!("{wanted}.sig").as_str()))
+        .and_then(|asset| asset.get("browser_download_url").and_then(Value::as_str))
+        .map(str::to_string);
+    Ok(Some(Release { version, download: download.to_string(), notes_url: release.get("html_url").and_then(Value::as_str).unwrap_or_default().to_string(), sha256, signature }))
 }
 
 async fn get(client: &Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>> {
@@ -202,6 +234,12 @@ pub fn install(zip: &Path, app: &Path) -> Result<()> {
     run("ditto", &["-x".as_ref(), "-k".as_ref(), zip.as_os_str(), staging.path().as_os_str()])?;
     let new_app = std::fs::read_dir(staging.path())?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "app")).context("the download has no app in it")?;
     run("codesign", &["--verify".as_ref(), "--deep".as_ref(), "--strict".as_ref(), new_app.as_os_str()]).context("the downloaded app isn't validly signed")?;
+    // Signed like this one: the same certificate (any valid signature, ad-hoc included,
+    // would pass the check above). An ad-hoc signed Forge has no certificate to compare.
+    if let Some(requirement) = designated_requirement(app).filter(|r| !r.contains("cdhash")) {
+        let requirement = format!("-R={requirement}");
+        run("codesign", &["--verify".as_ref(), "--deep".as_ref(), "--strict".as_ref(), requirement.as_ref(), new_app.as_os_str()]).context("the downloaded app isn't signed with this Forge's certificate")?;
+    }
     let plist = std::fs::read_to_string(new_app.join("Contents/Info.plist")).context("the downloaded app has no Info.plist")?;
     if !plist.contains(&format!("<string>{BUNDLE_ID}</string>")) {
         bail!("the downloaded app isn't Forge");
@@ -215,13 +253,20 @@ pub fn install(zip: &Path, app: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The designated requirement of the app at `app` (`codesign -d -r-`): what a signature
+/// of the same app must satisfy.
+fn designated_requirement(app: &Path) -> Option<String> {
+    let output = std::process::Command::new("codesign").args(["-d", "-r-"]).arg(app).output().ok()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    text.lines().find_map(|l| l.strip_prefix("designated => ")).map(|r| r.trim().to_string())
+}
+
 /// Unpacks the Linux tarball `tarball` (a `forge/` folder) and puts it in place of the
 /// installation at `prefix`, once its SHA-256 is `sha256`. The old one is kept until the
 /// new one is in place.
 pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
-    use sha2::{Digest as _, Sha256};
     let expected = sha256.context("the release doesn't list the download's SHA-256")?;
-    let actual: String = Sha256::digest(std::fs::read(tarball)?).iter().map(|b| format!("{b:02x}")).collect();
+    let actual = sha256_hex(&std::fs::read(tarball)?);
     if actual != expected {
         bail!("the download's SHA-256 isn't the one the release lists");
     }
@@ -353,6 +398,13 @@ pub fn check(asked: bool, cx: &mut App) {
             let Some(release) = find_update(&client, repository, current).await? else { return Ok(None) };
             let target = current_install().context("Forge isn't running from an installed copy (an app bundle, or the folder of its tarball)")?;
             let bytes = get(&client, &release.download).await?;
+            if let Some(expected) = &release.sha256 {
+                anyhow::ensure!(sha256_hex(&bytes) == *expected, "the download's SHA-256 isn't the one the release lists");
+            }
+            if let Some(key) = RELEASE_KEY.filter(|k| !k.trim().is_empty()) {
+                let url = release.signature.as_deref().context("the release isn't signed, and this Forge only installs signed updates")?;
+                verify_signature(key, &bytes, &get(&client, url).await?)?;
+            }
             let version = release.version.clone();
             let restart_path = if cfg!(target_os = "macos") { target.clone() } else { target.join("bin/forge") };
             cx.background_spawn(async move {
@@ -416,6 +468,49 @@ mod tests {
             {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz", "digest": "sha256:ABC123"}]}"#;
         let release = newer_release(linux, "0.2.0", "linux", "x86_64").unwrap().unwrap();
         assert_eq!((release.download.as_str(), release.sha256.as_deref()), ("https://x/linux.tar.gz", Some("abc123")));
+        assert_eq!(release.signature, None);
+
+        let signed = r#"{"tag_name": "v0.3.0", "assets": [
+            {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz"},
+            {"name": "Forge-0.3.0-linux-x86_64.tar.gz.sig", "browser_download_url": "https://x/linux.tar.gz.sig"}]}"#;
+        assert_eq!(newer_release(signed, "0.2.0", "linux", "x86_64").unwrap().unwrap().signature.as_deref(), Some("https://x/linux.tar.gz.sig"));
+    }
+
+    /// Only the release key's signature of exactly these bytes passes.
+    #[test]
+    fn verifies_release_signatures() {
+        use base64::Engine as _;
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+        let random = ring::rand::SystemRandom::new();
+        let keys = |random| Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(random).unwrap().as_ref()).unwrap();
+        let (release_key, other_key) = (keys(&random), keys(&random));
+        let public = base64::engine::general_purpose::STANDARD.encode(release_key.public_key().as_ref());
+        let data = b"the tarball";
+        let signature = release_key.sign(data);
+        verify_signature(&public, data, signature.as_ref()).unwrap();
+        assert!(verify_signature(&public, b"another tarball", signature.as_ref()).is_err());
+        assert!(verify_signature(&public, data, other_key.sign(data).as_ref()).is_err());
+        assert!(verify_signature("not base64!", data, signature.as_ref()).is_err());
+    }
+
+    /// What the release workflow does (`openssl pkeyutl -sign -rawin`) verifies here, with
+    /// the public key as scripts/create-update-key.sh prints it.
+    #[test]
+    fn verifies_signatures_made_with_openssl() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("key.pem");
+        let openssl = |args: &[&str]| std::process::Command::new("openssl").args(args).current_dir(dir.path()).output();
+        let Ok(out) = openssl(&["genpkey", "-algorithm", "ed25519", "-out", key.to_str().unwrap()]) else { return }; // no openssl
+        if !out.status.success() {
+            return;
+        }
+        std::fs::write(dir.path().join("asset"), b"the zip").unwrap();
+        assert!(openssl(&["pkeyutl", "-sign", "-inkey", "key.pem", "-rawin", "-in", "asset", "-out", "asset.sig"]).unwrap().status.success());
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/create-update-key.sh");
+        let public = std::process::Command::new("bash").arg(&script).arg("--public-of").arg(&key).output().unwrap();
+        assert!(public.status.success(), "{}", String::from_utf8_lossy(&public.stderr));
+        let public = String::from_utf8(public.stdout).unwrap();
+        verify_signature(&public, b"the zip", &std::fs::read(dir.path().join("asset.sig")).unwrap()).unwrap();
     }
 
     /// The Linux tarball replaces the folder it made before, when its SHA-256 matches.

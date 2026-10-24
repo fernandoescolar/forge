@@ -8,6 +8,8 @@
 #                               --github sets both secrets)
 #   MACOS_CERTIFICATE_PASSWORD  its password
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool (Developer ID only)
+# and signs every download for Forge's updates when UPDATE_SIGNING_KEY (secret) and
+# UPDATE_PUBLIC_KEY (variable) are set (scripts/create-update-key.sh --github sets both).
 # Signed with one certificate, every release is the same app to the keychain: "Always Allow"
 # for a saved password survives updates. Only a Developer ID satisfies Gatekeeper for a zip
 # downloaded by hand. Without the secrets the app is ad-hoc signed.
@@ -71,6 +73,8 @@ jobs:
     env:
       FORGE_TARGET: ${{ matrix.target }}
       FORGE_UPDATE_REPOSITORY: ${{ github.repository }}
+      # Updates install only downloads signed with the matching private key (forge-update).
+      FORGE_UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
       FORGE_PRECOMPILED_SHADERS: "1"
       # No debug info in release builds made here: much less to compile, link and cache.
       CARGO_PROFILE_RELEASE_DEBUG: "false"
@@ -162,6 +166,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       FORGE_UPDATE_REPOSITORY: ${{ github.repository }}
+      FORGE_UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
       CARGO_PROFILE_RELEASE_DEBUG: "false"
     steps:
       - uses: actions/checkout@v4
@@ -231,11 +236,34 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Sign the downloads
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
+        run: |
+          if [[ -z "$UPDATE_SIGNING_KEY" ]]; then
+            if [[ -n "$UPDATE_PUBLIC_KEY" ]]; then
+              echo "UPDATE_PUBLIC_KEY is set but UPDATE_SIGNING_KEY isn't: this release's Forge would refuse every update" >&2
+              exit 1
+            fi
+            echo "No UPDATE_SIGNING_KEY: the downloads aren't signed (updates check their SHA-256 only)."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/update-key.pem"
+          [[ "$(scripts/create-update-key.sh --public-of "$RUNNER_TEMP/update-key.pem")" == "$UPDATE_PUBLIC_KEY" ]] || { echo "UPDATE_SIGNING_KEY doesn't match UPDATE_PUBLIC_KEY" >&2; exit 1; }
+          for asset in dist/Forge-*.zip dist/Forge-*.tar.gz; do
+            openssl pkeyutl -sign -inkey "$RUNNER_TEMP/update-key.pem" -rawin -in "$asset" -out "$asset.sig"
+          done
+          rm "$RUNNER_TEMP/update-key.pem"
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/Forge-*.zip dist/Forge-*.tar.gz --repo "$GITHUB_REPOSITORY" --title "Forge ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          shopt -s nullglob
+          gh release create "$GITHUB_REF_NAME" dist/Forge-*.zip dist/Forge-*.tar.gz dist/Forge-*.sig --repo "$GITHUB_REPOSITORY" --title "Forge ${GITHUB_REF_NAME#v}" --generate-notes

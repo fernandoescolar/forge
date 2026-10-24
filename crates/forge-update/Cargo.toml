@@ -15,6 +15,8 @@ http_client = { path = "../../vendor/zed/crates/http_client" }
 log = "0.4"
 serde_json.workspace = true
 sha2 = "0.10"
+ring = "0.17"
+base64 = "0.22"
 tempfile.workspace = true
 workspace = { path = "../../vendor/zed/crates/workspace" }
 
