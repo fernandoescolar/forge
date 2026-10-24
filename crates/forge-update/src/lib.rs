@@ -189,11 +189,9 @@ pub async fn find_update(client: &Arc<dyn HttpClient>, repository: &str, current
 }
 
 fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<()> {
-    let output = std::process::Command::new(program).args(args).output().with_context(|| format!("cannot run {program}"))?;
-    if !output.status.success() {
-        bail!("{program} failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    forge_process::output(command).map(drop)
 }
 
 /// Unpacks `zip` and replaces the app at `app` with the Forge.app in it, once that one is a

@@ -192,6 +192,20 @@ pub fn output(mut command: std::process::Command) -> anyhow::Result<Output> {
     Ok(output)
 }
 
+/// `git -C dir args…`: its standard output, or what it said went wrong (its standard
+/// error, else its output, without git's `fatal: ` / `error: `).
+pub fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let mut command = std::process::Command::new("git");
+    command.arg("-C").arg(dir).args(args);
+    let output = command.output().context("cannot run git; is it installed?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() { String::from_utf8_lossy(&output.stdout).trim().to_string() } else { stderr };
+        bail!("{}", message.trim_start_matches("fatal: ").trim_start_matches("error: "));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -257,5 +271,14 @@ mod tests {
         assert_eq!(output(fails).unwrap_err().to_string(), "sh failed: nope");
         let missing = command("forge-no-such-program", &[]);
         assert!(output(missing).unwrap_err().to_string().contains("is it installed?"));
+    }
+
+    #[test]
+    fn git_says_what_went_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = git(dir.path(), &["rev-parse", "HEAD"]).unwrap_err().to_string();
+        assert!(!error.starts_with("fatal: ") && error.contains("not a git repository"), "{error}");
+        git(dir.path(), &["init", "-q"]).unwrap();
+        assert!(git(dir.path(), &["status", "--short"]).unwrap().is_empty());
     }
 }

@@ -7,6 +7,7 @@ publish = false
 description = "Native ACP agent panel for Forge"
 
 [dependencies]
+forge-process = { path = "../forge-process" }
 askpass = { path = "../../vendor/zed/crates/askpass" }
 base64 = "0.22"
 forge-http = { path = "../forge-http" }

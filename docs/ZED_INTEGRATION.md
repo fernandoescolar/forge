@@ -40,7 +40,7 @@ Keep each patch small and generic (a hook, not Forge logic), one concern per fil
 Things Forge does without patches, so they don't come back as patches:
 
 - **Restoring the last window:** `"on_last_window_closed": "quit_app"` in Forge's defaults; Zed then keeps the last window in the session.
-- **Children that wait for their own children** (`dotnet test`, `dotnet restore`): `forge_ui::process::spawn_unblocked` starts them from a thread with an empty signal mask. GPUI's executor threads block SIGCHLD, and neither std nor `util::command` reset the mask.
+- **Children that wait for their own children** (`dotnet test`, `dotnet restore`): `forge_process::spawn_unblocked` starts them from a thread with an empty signal mask. GPUI's executor threads block SIGCHLD, and neither std nor `util::command` reset the mask.
 
 Without the patches applied, the build fails on the missing APIs (e.g. `editor::RunIndicatorStatus`).
 

@@ -26,12 +26,15 @@ forge-native (binary `forge`): bootstrap, menus, title & status bars, settings t
  └─ forge-extension-host ── Extensions panel, slot panels and tabs (GPUI), extension API
        ├─ QuickJS thread: runtime.js (React + reconciler) + every extension's bundle
        └─ child processes: process.spawn and sidecars (bin/<platform>/ in the extension)
-forge-ui: what several of these share (panel drag & drop, pickers, settings registry, processes)
+forge-ui: what several of these share (panel drag & drop, pickers, settings registry)
+forge-process: how every one of them starts programs (no GPUI): PATH lookup in the project's
+  environment, own process group, unblocked signals, stopping a group (SIGTERM → SIGKILL)
 ```
 
 ## Boundaries
 
-- **`ide-api`** holds the only contract between the ACP runtime and its host: `WorkspaceEngine` (agent file access), `TerminalHost` (agent commands), `AgentService` and events. `acp-client` depends on nothing else, so it is tested without GPUI against `tools/mock-acp-agent.py`.
+- **`ide-api`** holds the only contract between the ACP runtime and its host: `WorkspaceEngine` (agent file access), `TerminalHost` (agent commands), `AgentService` and events. `acp-client` depends on nothing else but `jsonrpc` and `forge-process`, so it is tested without GPUI against `tools/mock-acp-agent.py`.
+- **Processes:** everything Forge starts goes through `forge-process`. Agents, test runs, extension programs and the debugged test host each lead a process group, so stopping them (or closing their thread, cancelling the run, unloading the extension) stops what they started too, wrappers like `npx` included.
 - **Threading:** ACP runs on tokio (`gpui_tokio`), extensions run on their own QuickJS thread, and everything that touches Zed entities runs on the GPUI thread. The adapters (`ProjectFs`, `ZedTerminals`, `JsHost`) cross these boundaries with channels, so no lock is ever shared with the UI. Slow work (test runs, `git`, `gh`, HTTP, discovery) runs on the background executor and reports back.
 - **Agents act through the editor, not around it.** Reads see unsaved buffers. Writes update open buffers and save them. Commands run in Zed terminals that the user watches live. Paths outside the project's worktrees are refused, so a thread in a git worktree works inside `.forge/worktrees/` within the project. Tool calls go through the user's approval.
 - **Extensions are trusted code with a narrow UI surface.** They never get a DOM: they render through the reconciler's op stream. What they can do outside their panels goes through `@forge/api` calls, each implemented explicitly in `forge-extension-host`: files, the active editor, events, settings, storage, keychain secrets, dialogs, and, through `process.*` and `terminal.run`, programs with the user's rights (sidecars included). Everything an extension registers or starts is tracked per extension and undone when it unloads. Install only extensions you trust, as with any editor.

@@ -7,6 +7,7 @@ publish = false
 description = "Languages Forge ships built in on top of Zed's: C# with OmniSharp"
 
 [dependencies]
+forge-process = { path = "../forge-process" }
 forge-ui = { path = "../forge-ui" }
 anyhow.workspace = true
 async-trait.workspace = true

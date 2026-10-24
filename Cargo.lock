@@ -3382,6 +3382,7 @@ dependencies = [
  "editor",
  "file_icons",
  "forge-http",
+ "forge-process",
  "forge-run",
  "forge-tests",
  "forge-ui",
@@ -3543,6 +3544,7 @@ version = "0.0.1-beta"
 dependencies = [
  "anyhow",
  "editor",
+ "forge-process",
  "forge-ui",
  "futures",
  "gpui",
@@ -3600,6 +3602,7 @@ dependencies = [
  "collections",
  "dap",
  "editor",
+ "forge-process",
  "forge-ui",
  "futures",
  "gpui",
@@ -3825,6 +3828,7 @@ version = "0.0.1-beta"
 dependencies = [
  "anyhow",
  "editor",
+ "forge-process",
  "futures",
  "gpui",
  "http_client",

@@ -2,7 +2,7 @@
 //! the repository's remote, so Forge never handles tokens.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
@@ -143,10 +143,7 @@ pub fn threads(comments: &[ReviewComment]) -> Vec<Vec<ReviewComment>> {
 /// Runs `gh` in `dir` with `env` (the project's shell environment, so `gh` is found when
 /// Forge was started from the Dock).
 pub async fn run(dir: &Path, args: &[&str], env: &HashMap<String, String>) -> Result<String> {
-    let program = env
-        .get("PATH")
-        .and_then(|path| std::env::split_paths(path).map(|d| d.join("gh")).find(|p| p.is_file()))
-        .unwrap_or_else(|| PathBuf::from("gh"));
+    let program = forge_process::resolve("gh", env.get("PATH").map(std::ffi::OsStr::new));
     let mut command = util::command::new_command(&program);
     command.args(args).envs(env.iter()).env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1").current_dir(dir);
     let output = command.output().await.context("cannot run `gh`, the GitHub CLI; install it from https://cli.github.com")?;

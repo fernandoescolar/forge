@@ -56,6 +56,7 @@ A project's own settings, tasks and debug scenarios live in its `.forge/` folder
 crates/
   forge-native/          the app: Zed bootstrap, menus, title and status bars, settings tab, themes
   forge-ui/              pieces shared by Forge crates: panel drag & drop, pickers, settings registry
+  forge-process/         starting programs: PATH lookup, process groups, unblocked signals, git
   forge-extension-host/  QuickJS runtime, UI trees, GPUI rendering, Extensions panel, extension API
   forge-agents/          agent threads (tab, anchored, follow, worktrees) + Zed-project file adapter
   forge-run/             run targets and the run / debug / hot reload controls

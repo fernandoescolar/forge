@@ -39,12 +39,7 @@ pub enum Applied {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    forge_process::git(dir, args).map_err(|e| anyhow::anyhow!("git {} failed: {e}", args.join(" ")))
 }
 
 /// The repository that holds `dir`.

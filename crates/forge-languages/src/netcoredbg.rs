@@ -23,7 +23,7 @@ use http_client::github::latest_github_release;
 use language::LanguageName;
 use serde_json::{Value, json};
 use task::{AttachRequest, BuildTaskDefinition, DebugScenario, SpawnInTerminal, TaskTemplate, ZedDebugConfig};
-use util::command::{Stdio, new_command};
+use util::command::new_command;
 
 pub const ADAPTER_NAME: &str = "netcoredbg";
 const REPO: &str = "Samsung/netcoredbg";
@@ -251,18 +251,17 @@ impl DapLocator for DotnetTestLocator {
         }
         log::info!("debugging tests: dotnet {}", args.join(" "));
 
-        let mut command = new_command("dotnet");
-        command
-            .args(&args)
-            .envs(build_config.env.iter().filter(|(key, _)| *key != FILTER_ENV))
-            .env("VSTEST_HOST_DEBUG", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        // In a process group of its own: should finding the test host fail, the test host
+        // (waiting for a debugger that never comes) is stopped with `dotnet test`.
+        let env: Vec<(String, String)> = build_config.env.iter().filter(|(key, _)| *key != FILTER_ENV).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut command = smol::process::Command::from(forge_process::command("dotnet", &env));
+        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         if let Some(cwd) = &build_config.cwd {
             command.current_dir(cwd);
         }
-        // With SIGCHLD blocked, dotnet would never see its test host exit (see forge_ui::process).
-        let mut child = forge_ui::process::spawn_unblocked(command).context("failed to start `dotnet test`")?;
+        // With SIGCHLD blocked, dotnet would never see its test host exit (see forge_process).
+        let mut child = forge_process::spawn_unblocked(move || command.spawn()).context("failed to start `dotnet test`")?;
+        let mut group = forge_process::GroupGuard::new(Some(child.id()));
         let stdout = child.stdout.take().context("no stdout from `dotnet test`")?;
         let mut lines = BufReader::new(stdout).lines();
 
@@ -283,6 +282,8 @@ impl DapLocator for DotnetTestLocator {
             },
         )
         .await?;
+        // The debugger attaches to the test host now; the run ends when debugging does.
+        group.disarm();
 
         // Keep draining the test run's output so it never blocks on a full pipe, and
         // reap the process once the tests finish.

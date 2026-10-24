@@ -62,9 +62,7 @@ pub(crate) fn short(sha: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().context("cannot run git; is it installed?")?;
-    anyhow::ensure!(out.status.success(), "{}", stderr(&out));
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    forge_process::git(dir, args)
 }
 
 fn stderr(out: &std::process::Output) -> String {
