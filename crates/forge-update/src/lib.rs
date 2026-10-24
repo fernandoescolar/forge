@@ -66,6 +66,9 @@ struct UpdateState {
     busy: bool,
     /// A version already installed, waiting for a restart.
     installed: Option<String>,
+    /// What to start on restart: the update's app bundle or `bin/forge`. The running
+    /// executable's own path no longer works then, as the old copy is gone.
+    restart_path: Option<PathBuf>,
     /// The restart dialog for `installed` couldn't be shown yet (no window was open).
     unanswered: bool,
     /// The restart dialog is on screen.
@@ -321,7 +324,12 @@ fn ask_to_restart(version: &str, cx: &mut App) {
 async fn restart_forge(cx: &mut gpui::AsyncApp) {
     let windows = cx.update(|cx| windows(cx));
     if workspace::prepare_windows_to_quit(&windows, cx).await {
-        cx.update(|cx| cx.restart());
+        cx.update(|cx| {
+            if let Some(path) = cx.global::<UpdateState>().restart_path.clone() {
+                cx.set_restart_path(path);
+            }
+            cx.restart();
+        });
     }
 }
 
@@ -343,26 +351,28 @@ pub fn check(asked: bool, cx: &mut App) {
     let client = cx.http_client();
     let current = env!("CARGO_PKG_VERSION");
     cx.spawn(async move |cx| {
-        let result: Result<Option<String>> = async {
+        let result: Result<Option<(String, PathBuf)>> = async {
             let Some(release) = find_update(&client, repository, current).await? else { return Ok(None) };
             let target = current_install().context("Forge isn't running from an installed copy (an app bundle, or the folder of its tarball)")?;
             let bytes = get(&client, &release.download).await?;
             let version = release.version.clone();
+            let restart_path = if cfg!(target_os = "macos") { target.clone() } else { target.join("bin/forge") };
             cx.background_spawn(async move {
                 let download = tempfile::Builder::new().suffix(if cfg!(target_os = "macos") { ".zip" } else { ".tar.gz" }).tempfile()?;
                 std::fs::write(download.path(), &bytes)?;
                 if cfg!(target_os = "macos") { install(download.path(), &target) } else { install_tree(download.path(), release.sha256.as_deref(), &target) }
             })
             .await?;
-            Ok(Some(version))
+            Ok(Some((version, restart_path)))
         }
         .await;
         cx.update(|cx| {
             let state = cx.global_mut::<UpdateState>();
             state.busy = false;
             match result {
-                Ok(Some(version)) => {
+                Ok(Some((version, restart_path))) => {
                     state.installed = Some(version.clone());
+                    state.restart_path = Some(restart_path);
                     offer_restart(&version, cx);
                 }
                 Ok(None) if asked => notify(format!("Forge {current} is the latest version."), cx),
@@ -478,6 +488,7 @@ mod tests {
             editor::init(cx);
             init(cx);
             cx.global_mut::<UpdateState>().installed = Some("9.9.9".into());
+            cx.global_mut::<UpdateState>().restart_path = Some(PathBuf::from("/opt/forge/bin/forge"));
             offer_restart("9.9.9", cx);
         });
         cx.run_until_parked();
@@ -502,7 +513,8 @@ mod tests {
         cx.simulate_prompt_answer("Restart Now");
         cx.run_until_parked();
         let (path, args) = restarted.await.expect("Forge restarts");
-        assert!(path.is_none() && args.is_empty(), "the new Forge starts plain, restoring the last session");
+        assert_eq!(path, Some(PathBuf::from("/opt/forge/bin/forge")), "the updated copy starts, not the running one (gone by now)");
+        assert!(args.is_empty(), "the new Forge starts plain, restoring the last session");
     }
 
     #[test]

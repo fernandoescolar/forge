@@ -34,9 +34,15 @@ use std::path::PathBuf;
 
 /// Where the extensions that ship with Forge are: `Forge.app/Contents/Resources/extensions`
 /// on macOS, `<prefix>/share/forge/extensions` next to `<prefix>/bin/forge` elsewhere.
+/// Found once: after an update replaces the installation, the running executable's path
+/// points into the old copy, which is gone.
 pub fn bundled_extensions_dir() -> Option<PathBuf> {
-    let prefix = std::env::current_exe().ok()?.parent()?.parent()?.to_path_buf();
-    Some(if cfg!(target_os = "macos") { prefix.join("Resources/extensions") } else { prefix.join("share/forge/extensions") })
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let prefix = std::env::current_exe().ok()?.parent()?.parent()?.to_path_buf();
+        Some(if cfg!(target_os = "macos") { prefix.join("Resources/extensions") } else { prefix.join("share/forge/extensions") })
+    })
+    .clone()
 }
 
 /// Directories searched for extensions: `<data>/extensions`, the bundled ones
