@@ -176,6 +176,7 @@ pub async fn unpack(package: &Path, parent: &Path) -> Result<Unpacked> {
         }
     }
     let info = inspect(&unpacked.root)?;
+    folder_name(&info.name)?;
     for sidecar in &info.sidecars {
         if !sidecar_path(&unpacked.root, sidecar).is_file() {
             let built: Vec<String> = info.platforms.iter().find(|(s, _)| s == sidecar).map(|(_, p)| p.clone()).unwrap_or_default();
@@ -187,10 +188,21 @@ pub async fn unpack(package: &Path, parent: &Path) -> Result<Unpacked> {
     Ok(unpacked)
 }
 
+/// The folder an extension named `name` (its package.json `name`) installs into: the
+/// name without its scope's `@`, `/` made `-`. Only letters, digits, `.`, `_` and `-`, not
+/// starting with a dot: a name like `..` would point at the folder above (and replacing
+/// "the installed copy" there would delete it).
+pub fn folder_name(name: &str) -> Result<String> {
+    let folder = name.trim_start_matches('@').replace('/', "-");
+    let valid = !folder.is_empty() && !folder.starts_with('.') && folder.len() <= 214 && folder.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    anyhow::ensure!(valid, "`{name}` isn't a valid extension name (letters, digits, `.`, `_` and `-`, as npm names packages)");
+    Ok(folder)
+}
+
 /// Moves an unpacked extension into `extensions_dir/<name>`, replacing an installed copy.
 pub fn place(unpacked: Unpacked, extensions_dir: &Path) -> Result<PathBuf> {
-    let folder = unpacked.info.name.trim_start_matches('@').replace(['/', '\\'], "-");
-    let destination = extensions_dir.join(folder);
+    let destination = extensions_dir.join(folder_name(&unpacked.info.name)?);
+    anyhow::ensure!(destination.parent() == Some(extensions_dir), "{} isn't in {}", destination.display(), extensions_dir.display());
     if destination.exists() {
         std::fs::remove_dir_all(&destination).with_context(|| format!("cannot replace {}", destination.display()))?;
     }
@@ -210,6 +222,30 @@ pub fn file_name(info: &PackageInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_that_leave_the_extensions_folder_are_refused() {
+        assert_eq!(folder_name("@acme/db-tools").unwrap(), "acme-db-tools");
+        assert_eq!(folder_name("db.explorer_2").unwrap(), "db.explorer_2");
+        for bad in ["..", ".", "", ".hidden", "a\\b", "x y", "../x"] {
+            assert!(folder_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A package named `..` is refused before anything is replaced.
+    #[test]
+    fn a_package_named_dot_dot_installs_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        extension(&source);
+        std::fs::write(source.join("package.json"), r#"{"name":"..","version":"1.0.0","forge":{"sidecars":["tool"]}}"#).unwrap();
+        let package = tmp.path().join("evil.forgeext");
+        smol::block_on(pack(&source, &package)).unwrap();
+        let extensions = tmp.path().join("data/extensions");
+        let error = smol::block_on(unpack(&package, &extensions)).err().expect("refused");
+        assert!(error.to_string().contains("isn't a valid extension name"), "{error:#}");
+        assert!(tmp.path().join("data").is_dir() && tmp.path().join("source/package.json").is_file(), "nothing was deleted");
+    }
 
     /// A platform other than this machine's, whose sidecar build the package also carries.
     fn other_platform() -> &'static str {
