@@ -90,6 +90,9 @@ pub struct NuGetManager {
     updates_task: Option<Task<()>>,
     list_scroll: ScrollHandle,
     details_scroll: ScrollHandle,
+    /// `installed` for a model generation: drawing asks for it several times a frame, and
+    /// working it out copies every project.
+    installed_cache: std::cell::RefCell<Option<(usize, Vec<InstalledPackage>)>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -155,6 +158,7 @@ impl NuGetManager {
             updates_task: None,
             list_scroll: ScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
+            installed_cache: Default::default(),
             _subscriptions: vec![search_subscription, model_subscription],
         };
         manager.sources = manager.load_sources(cx);
@@ -191,7 +195,15 @@ impl NuGetManager {
     }
 
     fn installed(&self, cx: &App) -> Vec<InstalledPackage> {
-        solution_packages::installed(&self.projects(cx))
+        let generation = self.model.read(cx).generation;
+        if let Some((cached, installed)) = &*self.installed_cache.borrow() {
+            if *cached == generation {
+                return installed.clone();
+            }
+        }
+        let installed = solution_packages::installed(&self.projects(cx));
+        *self.installed_cache.borrow_mut() = Some((generation, installed.clone()));
+        installed
     }
 
     /// Looks up the newest version of every installed package.

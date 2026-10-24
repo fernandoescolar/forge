@@ -254,11 +254,14 @@ impl VersionHints {
 
     fn refresh(&mut self, delay: Duration, cx: &mut Context<Self>) {
         let Some(client) = crate::fetch::client(cx) else { return };
-        let text = self.buffer.read(cx).text();
-        let sources = sources(&self.path);
         let prerelease = include_prerelease(cx);
+        let path = self.path.clone();
+        // Typing restarts the wait: the text and the NuGet.config files (read from disk)
+        // are taken once it ends, off the UI thread for the files.
         self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
+            let Ok(text) = this.update(cx, |this, cx| this.buffer.read(cx).text()) else { return };
+            let sources = cx.background_spawn(async move { sources(&path) }).await;
             let references: Vec<_> = project_text::package_references(&text).into_iter().filter(|r| r.version.as_deref().is_some_and(|v| version::NuGetVersion::parse(v).is_some())).collect();
             let lookups = references.iter().map(|r| {
                 let (client, sources) = (client.clone(), sources.clone());

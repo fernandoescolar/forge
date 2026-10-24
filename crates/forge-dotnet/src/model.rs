@@ -53,6 +53,9 @@ pub struct DotnetModel {
     pub projects: Arc<LoadedProjects>,
     children: ProjectChildren,
     pub tree: Option<Arc<Node>>,
+    /// The projects each file makes evaluate again when it changes (project files,
+    /// imports, restore output): looked up for every changed file.
+    watched: HashMap<PathBuf, Vec<PathBuf>>,
     pub loading: bool,
     pub error: Option<String>,
     /// Bumped on every reload, so views can cache derived data.
@@ -98,6 +101,7 @@ impl DotnetModel {
             projects: Arc::new(HashMap::new()),
             children: HashMap::new(),
             tree: None,
+            watched: HashMap::new(),
             loading: false,
             error: None,
             generation: 0,
@@ -137,11 +141,9 @@ impl DotnetModel {
             }
             // Project files, imports and restore output re-evaluate the projects that read them.
             let mut evaluated = false;
-            for project in self.projects.values().filter_map(|p| p.as_ref().ok()) {
-                if project.watched_files().iter().any(|f| f == path) || project.assets_file() == *path {
-                    self.pending.evaluate.insert(project.path.clone());
-                    evaluated = true;
-                }
+            for project in self.watched.get(path).into_iter().flatten() {
+                self.pending.evaluate.insert(project.clone());
+                evaluated = true;
             }
             if evaluated || !added_or_removed {
                 continue;
@@ -216,7 +218,7 @@ impl DotnetModel {
             // Changes come in bursts; gather them before loading.
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let Ok(job) = this.update(cx, |this, cx| this.take_job(cx)) else { return };
-            let result = cx.background_spawn(async move { job() }).await;
+            let result = cx.background_spawn(async move { job().finish() }).await;
             this.update(cx, |this, cx| {
                 this.apply(result, cx);
                 this.load_task = None;
@@ -232,9 +234,10 @@ impl DotnetModel {
         let config = config::get(cx);
         let roots = self.roots(cx);
         let chosen = self.chosen.take().or_else(|| self.solution.as_ref().map(|s| s.path.clone()));
-        let saved = KeyValueStore::global(cx).read_kvp(&Self::selection_key(&roots)).ok().flatten().map(PathBuf::from);
+        let kvp = KeyValueStore::global(cx);
         let current = (self.solution.clone(), self.projects.clone(), self.children.clone());
         Box::new(move || {
+            let saved = kvp.read_kvp(&Self::selection_key(&roots)).ok().flatten().map(PathBuf::from);
             if pending.full {
                 load_everything(roots, chosen, saved, &config)
             } else {
@@ -250,7 +253,8 @@ impl DotnetModel {
         self.solution = result.solution.map(Arc::new);
         self.projects = Arc::new(result.projects);
         self.children = result.children;
-        self.tree = self.solution.as_ref().map(|s| Arc::new(explorer::build_with(s, &self.projects, &self.children)));
+        self.tree = result.tree.map(Arc::new);
+        self.watched = result.watched;
         self.error = result.error;
         self.loading = !self.pending.is_empty();
         self.generation += 1;
@@ -301,6 +305,26 @@ struct LoadResult {
     projects: LoadedProjects,
     children: ProjectChildren,
     error: Option<String>,
+    /// Made by `finish`, off the UI thread like the rest.
+    tree: Option<Node>,
+    watched: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl LoadResult {
+    fn new(solutions: Option<Vec<PathBuf>>, solution: Option<Solution>, projects: LoadedProjects, children: ProjectChildren, error: Option<String>) -> Self {
+        Self { solutions, solution, projects, children, error, tree: None, watched: HashMap::new() }
+    }
+
+    /// Builds the explorer's tree and the index of watched files.
+    fn finish(mut self) -> Self {
+        self.tree = self.solution.as_ref().map(|s| explorer::build_with(s, &self.projects, &self.children));
+        for project in self.projects.values().filter_map(|p| p.as_ref().ok()) {
+            for file in project.watched_files().into_iter().chain([project.assets_file()]) {
+                self.watched.entry(file).or_default().push(project.path.clone());
+            }
+        }
+        self
+    }
 }
 
 /// Evaluates projects and lists their files on every core.
@@ -364,7 +388,7 @@ fn load_everything(roots: Vec<PathBuf>, chosen: Option<PathBuf>, saved: Option<P
             projects.insert(path, project);
         }
     }
-    LoadResult { solutions: Some(solutions), solution, projects, children, error }
+    LoadResult::new(Some(solutions), solution, projects, children, error)
 }
 
 fn load_some(current: (Option<Arc<Solution>>, Arc<LoadedProjects>, ProjectChildren), pending: Pending, config: &DotnetConfig) -> LoadResult {
@@ -379,5 +403,5 @@ fn load_some(current: (Option<Arc<Solution>>, Arc<LoadedProjects>, ProjectChildr
         };
         projects.insert(path, project);
     }
-    LoadResult { solutions: None, solution: solution.map(|s| (*s).clone()), projects, children, error: None }
+    LoadResult::new(None, solution.map(|s| (*s).clone()), projects, children, None)
 }
