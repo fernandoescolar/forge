@@ -19,9 +19,20 @@ pub enum Instance {
     Forwarded,
 }
 
+/// The socket's name. Development builds (`cargo run`) have their own: they run next to an
+/// installed Forge instead of handing their paths to it.
+const SOCKET: &str = if cfg!(debug_assertions) { "forge-dev.sock" } else { "forge.sock" };
+
+/// A request is one short line: anything longer, or slower, is dropped. Well within how
+/// long a new Forge waits for the answer (`ANSWER_TIMEOUT`), after which it takes the
+/// socket over as left behind.
+const MAX_REQUEST: u64 = 64 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Where the socket is: the session's runtime folder, else `data_dir`.
 pub fn socket_path(data_dir: &Path) -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(|| data_dir.to_path_buf()).join("forge.sock")
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(|| data_dir.to_path_buf()).join(SOCKET)
 }
 
 /// Hands `paths` to a running Forge, or becomes the one that runs.
@@ -40,7 +51,7 @@ pub fn claim(socket: &Path, paths: &[PathBuf]) -> std::io::Result<Instance> {
 }
 
 fn forward(mut stream: UnixStream, paths: &[PathBuf]) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_read_timeout(Some(ANSWER_TIMEOUT))?;
     let line = serde_json::to_string(paths).map_err(std::io::Error::other)?;
     stream.write_all(format!("{line}\n").as_bytes())?;
     let mut answer = String::new();
@@ -54,9 +65,14 @@ pub fn serve(listener: UnixListener, open: impl Fn(Vec<PathBuf>) + Send + 'stati
         .name("forge-instance".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
+                // One client at a time: one that never finishes its line mustn't hold up
+                // every later `forge .`.
+                if stream.set_read_timeout(Some(REQUEST_TIMEOUT)).is_err() {
+                    continue;
+                }
                 let mut line = String::new();
-                let mut reader = BufReader::new(&stream);
-                if reader.read_line(&mut line).is_err() {
+                let mut reader = BufReader::new(std::io::Read::take(&stream, MAX_REQUEST));
+                if reader.read_line(&mut line).is_err() || !line.ends_with('\n') {
                     continue;
                 }
                 let Ok(paths) = serde_json::from_str::<Vec<PathBuf>>(line.trim()) else { continue };
@@ -71,6 +87,21 @@ pub fn serve(listener: UnixListener, open: impl Fn(Vec<PathBuf>) + Send + 'stati
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// A client that connects and says nothing doesn't keep the next Forge from getting
+    /// through.
+    #[test]
+    fn a_silent_client_doesnt_block_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("forge.sock");
+        let Instance::First(listener) = claim(&socket, &[]).unwrap() else { panic!("the first Forge runs") };
+        let (tx, rx) = mpsc::channel();
+        serve(listener, move |paths| tx.send(paths).unwrap());
+        let _silent = UnixStream::connect(&socket).unwrap();
+        let paths = vec![PathBuf::from("/work/app")];
+        assert!(matches!(claim(&socket, &paths).unwrap(), Instance::Forwarded), "the next Forge got through");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), paths);
+    }
 
     #[test]
     fn a_second_forge_hands_its_paths_to_the_first() {
