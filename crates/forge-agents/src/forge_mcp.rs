@@ -323,6 +323,14 @@ fn all_tools(root: &Path) -> Value {
                 "annotations": { "readOnlyHint": true },
             }));
         }
+        // The tools Forge's other crates register (Tests, Run, the HTTP client).
+        for tool in forge_ui::ide_tools::ide_tools().list() {
+            let mut entry = json!({ "name": tool.name, "title": tool.title, "description": tool.description, "inputSchema": tool.input_schema });
+            if tool.effect == forge_ui::ide_tools::ToolEffect::Reads {
+                entry["annotations"] = json!({ "readOnlyHint": true });
+            }
+            list.push(entry);
+        }
         for tool in forge_ui::agent_tools::agent_tools().list() {
             let mut description = format!("{} (from the {} extension", tool.description, tool.extension);
             description.push_str(if tool.read_only { ")" } else { "; the user may be asked first)" });
@@ -398,19 +406,6 @@ Waits for that decision and returns the result.",
             }
         }
     }, {
-        "name": "run_tests",
-        "title": "Run tests",
-        "description": "Run tests in Forge's Tests panel (.NET, Go, Rust, Jest, Vitest, pytest), where the user sees them run and their results in the editor. \
-Returns how many passed, failed and were skipped, and each failure with its file, line, message and stack; or the build output when nothing could run. \
-With no arguments it runs every test. Waits for the run to end.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Only the tests in this file, or in the files under this folder (relative to the project root)." },
-                "name": { "type": "string", "description": "Only the tests whose name (with its class and namespace) contains this, ignoring case." }
-            }
-        }
-    }, {
         "name": "diagnostics",
         "title": "Errors and warnings",
         "description": "The errors and warnings the language servers report, as the user sees them in the editor (unsaved edits included): \
@@ -459,40 +454,6 @@ into the conversation's changes; the user may be asked first. Returns the files 
         "title": "Format a file",
         "description": "Format a file with the project's formatter (as the editor's Format does). The change joins the conversation's changes.",
         "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file, relative to the project root (or absolute)." } }, "required": ["path"] }
-    }, {
-        "name": "run_app",
-        "title": "Run the app",
-        "description": "Start one of the project's run targets as the title bar's Run button does (a .NET app or Aspire host, a Cargo binary, a Go main package, \
-a package.json script, a Python program), in a terminal the user sees. Returns its first seconds of output; then use `app_output` and `stop_app`. \
-One thing runs at a time.",
-        "inputSchema": { "type": "object", "properties": { "target": { "type": "string", "description": "The target's name. Leave it out for the one selected in the title bar; a wrong name lists them." } } }
-    }, {
-        "name": "app_output",
-        "title": "App output",
-        "description": "The latest output of what `run_app` (or the user's Run button) started, and whether it still runs.",
-        "inputSchema": { "type": "object", "properties": { "lines": { "type": "integer", "minimum": 1, "description": "How many of the last lines (default 80)." } } }
-    }, {
-        "name": "stop_app",
-        "title": "Stop the app",
-        "description": "Stop what `run_app` (or the user's Run button) started.",
-        "inputSchema": none
-    }, {
-        "name": "http_request",
-        "title": "Send an HTTP request",
-        "description": "Send an HTTP request through Forge's .http support, instead of curl: the user sees it and its response in Forge. \
-Either the request at `line` of a `.http` file, or an ad-hoc one (`method`, `url`, `headers`, `body`). `{{variables}}` resolve with the project's \
-http-client.env.json environment the user selected. Returns status, headers, timing and body.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "A .http file with the request (relative to the project root)." },
-                "line": { "type": "integer", "minimum": 1, "description": "A line of the request in that file (1-based)." },
-                "method": { "type": "string", "description": "For an ad-hoc request; default GET." },
-                "url": { "type": "string", "description": "For an ad-hoc request; may use {{variables}}." },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": { "description": "Text, or JSON to send as is." }
-            }
-        }
     }, {
         "name": "set_breakpoint",
         "title": "Set a breakpoint",
@@ -582,6 +543,9 @@ pub fn tool_title(name: &str) -> Option<String> {
     }
     if let Some(tool) = forge_ui::agent_tools::agent_tools().get(name) {
         return Some(tool.title);
+    }
+    if let Some(tool) = forge_ui::ide_tools::ide_tools().get(name) {
+        return Some(tool.title.to_string());
     }
     tools().as_array()?.iter().find(|t| t["name"] == name)?["title"].as_str().map(str::to_string)
 }
@@ -737,14 +701,22 @@ mod tests {
 
         let (_, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
         let tools = &serde_json::from_str::<Value>(&body).unwrap()["result"]["tools"];
-        // Forge's own (tests elsewhere may register extensions' tools, named `<extension>__<tool>`).
-        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !n.contains("__") && !n.starts_with("skill_")).collect();
+        // This crate's own (tests elsewhere may register extensions' tools, named
+        // `<extension>__<tool>`, and the tools of Forge's other crates).
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .filter(|n| !n.contains("__") && !n.starts_with("skill_") && forge_ui::ide_tools::ide_tools().get(n).is_none())
+            .collect();
         assert_eq!(names, [
-            "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "run_tests", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
-            "workspace_symbols", "code_actions", "apply_code_action", "format_file", "run_app", "app_output", "stop_app", "http_request", "set_breakpoint", "remove_breakpoint",
+            "user_context", "remember", "ask_user", "notify", "propose_commit", "propose_push", "diagnostics", "go_to_definition", "find_references", "rename_symbol", "hover",
+            "workspace_symbols", "code_actions", "apply_code_action", "format_file", "set_breakpoint", "remove_breakpoint",
             "start_debugging", "debug_step", "debug_evaluate", "stop_debugging", "show_file", "show_changes",
         ]);
-        assert_eq!(tools[10]["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
+        let rename = tools.as_array().unwrap().iter().find(|t| t["name"] == "rename_symbol").unwrap();
+        assert_eq!(rename["inputSchema"]["required"], json!(["path", "line", "symbol", "new_name"]));
         let skill = tools.as_array().unwrap().iter().find(|t| t["name"] == "skill_migrations").expect("the project's skill");
         assert_eq!(skill["title"], "Skill: migrations");
 

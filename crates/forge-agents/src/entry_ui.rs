@@ -228,7 +228,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
         Entry::ExtensionTool { tool, args, state, .. } => render_tool_card(handle, ix, &tool.title, Some(format!("from the {} extension", tool.extension)), args, state, Thread::answer_extension_tool, cx),
-        Entry::ForgeTool { name, args, state, .. } => render_tool_card(handle, ix, crate::forge_tools::title(name), None, args, state, Thread::answer_forge_tool, cx),
+        Entry::ForgeTool { name, args, state, .. } => render_tool_card(handle, ix, &crate::thread::forge_tool_title(name), None, args, state, Thread::answer_forge_tool, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()

@@ -5,9 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{AsyncWindowContext, Entity, WeakEntity};
+use gpui::{AsyncWindowContext, Entity};
 use language::{Buffer, Point, ToPoint as _};
-use project::Project;
 use serde_json::Value;
 use workspace::Workspace;
 
@@ -17,32 +16,9 @@ use crate::forge_mcp::ToolReply;
 const MAX_RESULTS: usize = 100;
 
 /// What a tool works on.
-#[derive(Clone)]
-pub(crate) struct Ide {
-    pub project: WeakEntity<Project>,
-    pub workspace: WeakEntity<Workspace>,
-    /// The thread's folder: relative paths start there, and paths are shown from it.
-    pub root: PathBuf,
-}
+pub(crate) type Ide = forge_ui::ide_tools::ToolContext;
 
-impl Ide {
-    pub fn resolve(&self, path: &str) -> PathBuf {
-        self.root.join(path)
-    }
-
-    pub fn show(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
-    }
-}
-
-pub(crate) fn str_arg(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
-}
-
-/// A 1-based line argument.
-pub(crate) fn line_arg(args: &Value, key: &str) -> Option<u32> {
-    args.get(key).and_then(Value::as_u64).filter(|l| *l >= 1).map(|l| l as u32)
-}
+pub(crate) use forge_ui::ide_tools::{line_arg, str_arg, tail};
 
 /// Where `symbol` starts in `line` (bytes): its first occurrence as a whole word.
 pub(crate) fn column_of(line: &str, symbol: &str) -> Option<usize> {
@@ -393,122 +369,6 @@ pub(crate) async fn workspace_symbols(ide: Ide, args: Value, cx: &mut AsyncWindo
     Ok(format!("{}{more}", lines.join("\n")))
 }
 
-/// Lines of a log or a terminal kept when quoting it to the agent: the last ones.
-const TAIL_LINES: usize = 80;
-
-fn tail(text: &str, lines: usize) -> String {
-    let all: Vec<&str> = text.trim_end().lines().collect();
-    match all.len().checked_sub(lines) {
-        Some(cut) if cut > 0 => format!("… {cut} earlier lines\n{}", all[cut..].join("\n")),
-        _ => all.join("\n"),
-    }
-}
-
-/// Which tests of `projects` a `run_tests` call means: `None` for all of them, else the
-/// method FQNs per project manifest. `path` is a test file or a folder of them; `name` a part
-/// of the test's name (or of its class and namespace).
-pub(crate) fn select_tests(projects: &[forge_tests::discovery::TestProject], path: Option<&Path>, name: Option<&str>) -> Option<Vec<(PathBuf, Vec<String>)>> {
-    if path.is_none() && name.is_none() {
-        return None;
-    }
-    let name = name.map(str::to_lowercase);
-    let mut jobs = Vec::new();
-    for project in projects {
-        let methods: Vec<String> = project
-            .classes
-            .iter()
-            .flat_map(|c| &c.tests)
-            .filter(|t| path.is_none_or(|p| t.file.starts_with(p)))
-            .filter(|t| name.as_ref().is_none_or(|n| t.fqn.to_lowercase().contains(n.as_str())))
-            .map(|t| t.fqn.clone())
-            .collect();
-        if !methods.is_empty() {
-            jobs.push((project.path.clone(), methods));
-        }
-    }
-    Some(jobs)
-}
-
-/// Runs tests in the Tests panel (shown, with its progress and the gutter results) and
-/// reports how they went: counts, and each failure with its place and message.
-pub(crate) async fn run_tests(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    use forge_tests::{TestPanel, runner::Scope, trx::Outcome};
-    let path = str_arg(&args, "path").map(|p| ide.resolve(&p));
-    let name = str_arg(&args, "name");
-    let panel = ide
-        .workspace
-        .update_in(cx, |ws, window, cx| {
-            ws.open_panel::<TestPanel>(window, cx);
-            ws.panel::<TestPanel>(cx)
-        })
-        .map_err(|_| "The window is closed.".to_string())?
-        .ok_or("The Tests panel isn't ready yet; try again in a moment.")?;
-    let (started, scope) = panel
-        .update_in(cx, |panel, window, cx| {
-            if panel.is_running() {
-                return Err("Tests are already running in the Tests panel; try again when they finish.".to_string());
-            }
-            if panel.projects().is_empty() {
-                return Err("Forge found no test projects here.".to_string());
-            }
-            let selection = select_tests(panel.projects(), path.as_deref(), name.as_deref());
-            match &selection {
-                Some(jobs) if jobs.is_empty() => return Err("No test matches that path or name.".to_string()),
-                Some(jobs) => panel.run_scopes(jobs.iter().map(|(m, fqns)| (m.clone(), Scope::Methods(fqns.clone()))).collect(), window, cx),
-                None => panel.run_all(window, cx),
-            }
-            Ok((panel.is_running(), selection))
-        })
-        .map_err(|_| "The window is closed.".to_string())??;
-    if !started {
-        return Err("The Tests panel didn't start the run.".into());
-    }
-    while panel.read_with(cx, |p, _| p.is_running()) {
-        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
-    }
-    Ok(panel.read_with(cx, |panel, _| {
-            let in_scope = |fqn: &str| scope.as_ref().is_none_or(|jobs| jobs.iter().any(|(_, fqns)| fqns.iter().any(|f| f == fqn)));
-            let (mut passed, mut skipped, mut not_run) = (0, 0, 0);
-            let mut failures = Vec::new();
-            for project in panel.projects() {
-                for test in project.classes.iter().flat_map(|c| &c.tests).filter(|t| in_scope(&t.fqn)) {
-                    let results = panel.results_for(&test.fqn);
-                    if results.is_empty() {
-                        not_run += 1;
-                    } else if let Some(failed) = results.iter().find(|r| r.outcome == Outcome::Failed) {
-                        let place = if test.row == forge_tests::discovery::NO_ROW { ide.show(&test.file) } else { format!("{}:{}", ide.show(&test.file), test.row + 1) };
-                        let mut text = format!("FAILED {} ({place})", failed.display_name);
-                        if let Some(message) = &failed.message {
-                            text.push_str(&format!("\n  {}", tail(message, 15).replace('\n', "\n  ")));
-                        }
-                        if let Some(stack) = &failed.stack_trace {
-                            text.push_str(&format!("\n  {}", stack.lines().take(6).collect::<Vec<_>>().join("\n  ")));
-                        }
-                        failures.push(text);
-                    } else if results.iter().all(|r| r.outcome == Outcome::Skipped) {
-                        skipped += 1;
-                    } else {
-                        passed += 1;
-                    }
-                }
-            }
-            let mut report = format!("{passed} passed, {} failed, {skipped} skipped, {not_run} not run.", failures.len());
-            if !failures.is_empty() {
-                report.push_str(&format!("\n\n{}", failures.join("\n\n")));
-            }
-            // Nothing ran: the build (or the runner) failed; its output says why.
-            if passed + failures.len() + skipped == 0 {
-                if let Some(error) = panel.error() {
-                    report.push_str(&format!("\n\n{error}"));
-                }
-                if let Some(log) = panel.last_log() {
-                    report.push_str(&format!("\n\nOutput:\n{}", tail(log, TAIL_LINES)));
-                }
-            }
-            report
-        }))
-}
-
 /// The file editor the user activated last, in any pane (when the agent asks, the active
 /// item is usually its own thread, often in the same pane).
 fn last_editor(workspace: &Workspace, cx: &gpui::App) -> Option<Entity<editor::Editor>> {
@@ -561,19 +421,9 @@ pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolR
             if let Some(output) = crate::context::terminal_output(ws, cx) {
                 text.push_str(&format!("\nThe end of the terminal they last used:\n```\n{}\n```\n", tail(&output, 30)));
             }
-            if let Some(panel) = ws.panel::<forge_tests::TestPanel>(cx) {
-                let panel = panel.read(cx);
-                let failed: Vec<String> = panel
-                    .projects()
-                    .iter()
-                    .flat_map(|p| p.classes.iter().flat_map(|c| &c.tests))
-                    .filter(|t| panel.results_for(&t.fqn).iter().any(|r| r.outcome == forge_tests::trx::Outcome::Failed))
-                    .map(|t| format!("{} ({})", t.fqn, ide.show(&t.file)))
-                    .take(10)
-                    .collect();
-                if !failed.is_empty() {
-                    text.push_str(&format!("\nTests that failed in their last run: {}\n", failed.join(", ")));
-                }
+            // What other parts of Forge add (the tests that failed in the last run).
+            for section in forge_ui::ide_tools::ide_tools().context(&ide, ws, cx) {
+                text.push_str(&format!("\n{section}\n"));
             }
             (text, at)
         })
@@ -596,144 +446,6 @@ pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolR
     Ok(text)
 }
 
-/// What a call to Forge's tool `name` does, for the card that asks the user.
-pub(crate) fn title(name: &str) -> &'static str {
-    match name {
-        "http_request" => "Send an HTTP request",
-        "run_tests" => "Run tests",
-        "run_app" => "Run the app",
-        "start_debugging" => "Start debugging",
-        "debug_evaluate" => "Evaluate in the debugger",
-        _ => "Use a Forge tool",
-    }
-}
-
-/// Response bodies quoted to the agent, at most (bytes).
-const BODY_BYTES: usize = 8_000;
-
-/// Sends an HTTP request through Forge's `.http` support (the response tab shows it): the
-/// request at `line` of a `.http` file, or an ad-hoc one resolved with the project's
-/// environments. Returns the status, headers and body.
-pub(crate) async fn http_request(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    let receiver = match str_arg(&args, "path") {
-        Some(path) => {
-            let file = ide.resolve(&path);
-            let line = line_arg(&args, "line").ok_or("`line` (1-based) of the request in the .http file is missing.")?;
-            ide.workspace.update_in(cx, |ws, window, cx| forge_http::send_request_at(ws, &file, line - 1, window, cx)).map_err(|_| "The window is closed.".to_string())?
-        }
-        None => {
-            let url = str_arg(&args, "url").ok_or("Give `url` (and `method`), or `path` and `line` of a request in a .http file.")?;
-            let method = str_arg(&args, "method").unwrap_or_else(|| "GET".into());
-            let headers: Vec<(String, String)> = args.get("headers").and_then(Value::as_object).map(|h| h.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect()).unwrap_or_default();
-            let body = args.get("body").map(|b| b.as_str().map(str::to_string).unwrap_or_else(|| b.to_string()));
-            // Resolved as if in a .http file at the root: the project's environments apply.
-            let file = ide.root.join("agent.http");
-            ide.workspace.update_in(cx, |ws, window, cx| forge_http::send_adhoc(ws, &file, &method, &url, headers, body, window, cx)).map_err(|_| "The window is closed.".to_string())?
-        }
-    }
-    .map_err(|e| format!("Can't send it: {e:#}"))?;
-    let outcome = receiver.await.map_err(|_| "The request was cancelled.".to_string())?;
-    let request = &outcome.request;
-    let environment = outcome.environment.as_deref().map(|e| format!(" (environment {e})")).unwrap_or_default();
-    let exchange = outcome.response.map_err(|e| format!("{} {}{environment} failed: {e}", request.method, request.url))?;
-    let headers: Vec<String> = exchange.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-    let body = if exchange.is_binary() {
-        format!("({} bytes of binary content)", exchange.body.len())
-    } else {
-        let text = String::from_utf8_lossy(&exchange.body);
-        if text.len() > BODY_BYTES {
-            let mut cut = BODY_BYTES;
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            format!("{}\n… ({} more bytes)", &text[..cut], text.len() - cut)
-        } else {
-            text.into_owned()
-        }
-    };
-    Ok(format!(
-        "{} {}{environment} → {} {} in {} ms (the user sees it in the response tab)\n\n{}\n\n{body}",
-        request.method,
-        request.url,
-        exchange.status,
-        exchange.reason,
-        exchange.elapsed.as_millis(),
-        headers.join("\n")
-    ))
-}
-
-fn run_controller(ide: &Ide, cx: &mut AsyncWindowContext) -> Result<Entity<forge_run::RunController>, String> {
-    let workspace = ide.workspace.upgrade().ok_or("The window is closed.")?;
-    cx.update(|_, cx| forge_run::RunController::for_workspace(&workspace, cx)).ok().flatten().ok_or_else(|| "Run isn't set up for this window.".to_string())
-}
-
-/// The run target's output so far (its terminal), the last `lines`.
-fn app_output_text(controller: &Entity<forge_run::RunController>, lines: usize, cx: &gpui::App) -> Option<String> {
-    let content = controller.read(cx).terminal()?.read(cx).get_content();
-    Some(tail(&content, lines))
-}
-
-/// Starts a run target (the title bar's Run) and reports its first output.
-pub(crate) async fn run_app(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    use forge_run::State;
-    let controller = run_controller(&ide, cx)?;
-    let wanted = str_arg(&args, "target").map(|t| t.to_lowercase());
-    let picked = cx
-        .update(|_, cx| {
-            let c = controller.read(cx);
-            let names = || c.targets().iter().map(|t| format!("{} ({})", t.name, t.kind.label())).collect::<Vec<_>>().join(", ");
-            if c.targets().is_empty() {
-                return Err("Forge found nothing to run in this project.".to_string());
-            }
-            if c.state(cx) != State::Idle {
-                return Err("Something is already running (title bar Run); stop it first with `stop_app`.".to_string());
-            }
-            let target = match &wanted {
-                Some(w) => c.targets().iter().find(|t| t.name.to_lowercase() == *w || t.id().to_lowercase() == *w).ok_or_else(|| format!("No run target is called that. The targets are: {}", names()))?,
-                None => c.selected().or(c.targets().first()).unwrap(),
-            };
-            Ok((target.id(), target.name.clone()))
-        })
-        .map_err(|_| "The window is closed.".to_string())??;
-    let (id, name) = picked;
-    cx.update(|window, cx| {
-        controller.update(cx, |c, cx| c.select(id, cx));
-        let controller = controller.clone();
-        // As the Run action does: starting a task updates the workspace.
-        window.defer(cx, move |window, cx| controller.update(cx, |c, cx| c.run(window, cx)));
-    })
-    .map_err(|_| "The window is closed.".to_string())?;
-    // Its first output: startup errors, the address it listens on…
-    cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
-    let (state, output) = cx.update(|_, cx| (controller.read(cx).state(cx), app_output_text(&controller, 40, cx))).map_err(|_| "The window is closed.".to_string())?;
-    let status = if state == State::Idle { "It already ended." } else { "It is running; `app_output` reads more of its output, `stop_app` stops it." };
-    Ok(format!("Started {name} in a terminal the user can see. {status}\n\nOutput so far:\n{}", output.unwrap_or_default()))
-}
-
-/// The output of the run target, while it runs or after.
-pub(crate) async fn app_output(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    let controller = run_controller(&ide, cx)?;
-    let lines = args.get("lines").and_then(Value::as_u64).map(|l| l.clamp(1, 1000) as usize).unwrap_or(TAIL_LINES);
-    cx.update(|_, cx| {
-        let running = controller.read(cx).state(cx) != forge_run::State::Idle;
-        let output = app_output_text(&controller, lines, cx).ok_or("Nothing has run yet.")?;
-        Ok(format!("{}\n\n{output}", if running { "Running." } else { "Not running anymore." }))
-    })
-    .map_err(|_| "The window is closed.".to_string())?
-}
-
-pub(crate) async fn stop_app(ide: Ide, cx: &mut AsyncWindowContext) -> ToolReply {
-    let controller = run_controller(&ide, cx)?;
-    cx.update(|_, cx| {
-        if controller.read(cx).state(cx) == forge_run::State::Idle {
-            return Ok("Nothing is running.".to_string());
-        }
-        controller.update(cx, |c, cx| c.stop(cx));
-        Ok("Stopping it (Ctrl+C).".to_string())
-    })
-    .map_err(|_| "The window is closed.".to_string())?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,24 +456,5 @@ mod tests {
         assert_eq!(column_of("fn parse_args() {}", "parse_args"), Some(3));
         assert_eq!(column_of("subtotal", "total"), None);
         assert_eq!(column_of("    self.total()", "total"), Some(9));
-    }
-
-    #[test]
-    fn selects_tests_by_file_folder_and_name() {
-        use forge_tests::discovery::{Kind, TestClass, TestMethod, TestProject};
-        let method = |fqn: &str, file: &str| TestMethod { fqn: fqn.into(), name: fqn.rsplit('.').next().unwrap().into(), file: file.into(), row: 1 };
-        let project = TestProject {
-            name: "app".into(),
-            path: "/p/Cargo.toml".into(),
-            kind: Kind::Rust { package: "app".into() },
-            classes: vec![TestClass { fqn: "parser".into(), name: "parser".into(), file: "/p/src/parser.rs".into(), row: 0, tests: vec![method("parser.reads_tabs", "/p/src/parser.rs"), method("parser.reads_spaces", "/p/src/parser.rs"), method("lexer.reads_tabs", "/p/src/lexer.rs")] }],
-        };
-        let projects = [project];
-        assert_eq!(select_tests(&projects, None, None), None, "all of them");
-        let by_file = select_tests(&projects, Some(Path::new("/p/src/parser.rs")), None).unwrap();
-        assert_eq!(by_file, vec![(PathBuf::from("/p/Cargo.toml"), vec!["parser.reads_tabs".to_string(), "parser.reads_spaces".to_string()])]);
-        assert_eq!(select_tests(&projects, Some(Path::new("/p/src")), Some("TABS")).unwrap()[0].1, ["parser.reads_tabs", "lexer.reads_tabs"]);
-        assert!(select_tests(&projects, None, Some("nothing")).unwrap().is_empty());
-        assert_eq!(tail("1\n2\n3\n4", 2), "… 2 earlier lines\n3\n4");
     }
 }

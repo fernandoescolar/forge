@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::forge_mcp::ToolReply;
 use crate::forge_tools::{Ide, line_arg, str_arg};
+use forge_ui::ide_tools::DebugWhat;
 
 /// How long a session may take to start (it builds first), and to reach a breakpoint.
 const START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -219,11 +220,10 @@ pub(crate) async fn start_debugging(ide: Ide, args: Value, cx: &mut AsyncWindowC
     }
     let test_path = str_arg(&args, "test_path").map(|p| ide.resolve(&p));
     let test_name = str_arg(&args, "test_name");
-    if test_path.is_some() || test_name.is_some() {
-        start_test_session(&ide, test_path.as_deref(), test_name.as_deref(), cx)?;
-    } else {
-        start_target_session(&ide, str_arg(&args, "target"), cx)?;
-    }
+    let what = if test_path.is_some() || test_name.is_some() { DebugWhat::Tests { path: test_path, name: test_name } } else { DebugWhat::Target(str_arg(&args, "target")) };
+    // Run registers how to start sessions (of run targets, and of tests through the Tests panel).
+    let launch = forge_ui::ide_tools::ide_tools().debug_launcher().ok_or("Run isn't set up in this Forge.")?;
+    launch(&ide, what, cx)?;
     // It builds first: wait for the new session.
     let started = Instant::now();
     let session = loop {
@@ -237,52 +237,6 @@ pub(crate) async fn start_debugging(ide: Ide, args: Value, cx: &mut AsyncWindowC
     };
     let pause = wait_for_pause(&session, PAUSE_TIMEOUT, true, |_| {}, cx).await?;
     report(&ide, &session, pause, PAUSE_TIMEOUT, cx).await
-}
-
-fn start_test_session(ide: &Ide, path: Option<&std::path::Path>, name: Option<&str>, cx: &mut AsyncWindowContext) -> Result<(), String> {
-    use forge_tests::{TestPanel, runner::Scope};
-    let panel = ide
-        .workspace
-        .update_in(cx, |ws, window, cx| {
-            ws.open_panel::<TestPanel>(window, cx);
-            ws.panel::<TestPanel>(cx)
-        })
-        .map_err(|_| closed())?
-        .ok_or("The Tests panel isn't ready yet; try again in a moment.")?;
-    panel
-        .update_in(cx, |panel, window, cx| {
-            let jobs = crate::forge_tools::select_tests(panel.projects(), path, name).unwrap_or_default();
-            let Some((manifest, fqns)) = jobs.into_iter().next() else { return Err("No test matches that path or name.".to_string()) };
-            let label = format!("Debug {}", name.unwrap_or("tests"));
-            if panel.debug_scope(&manifest, Scope::Methods(fqns), label.into(), window, cx) { Ok(()) } else { Err("Forge can't debug those tests (Jest and Vitest tests aren't supported).".to_string()) }
-        })
-        .map_err(|_| closed())?
-}
-
-fn start_target_session(ide: &Ide, target: Option<String>, cx: &mut AsyncWindowContext) -> Result<(), String> {
-    let workspace = ide.workspace.upgrade().ok_or_else(closed)?;
-    let controller = cx.update(|_, cx| forge_run::RunController::for_workspace(&workspace, cx)).ok().flatten().ok_or("Run isn't set up for this window.")?;
-    let wanted = target.map(|t| t.to_lowercase());
-    let id = cx
-        .update(|_, cx| {
-            let c = controller.read(cx);
-            if c.state(cx) != forge_run::State::Idle {
-                return Err("Something is already running (title bar Run); stop it first.".to_string());
-            }
-            let names = || c.targets().iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ");
-            let target = match &wanted {
-                Some(w) => c.targets().iter().find(|t| t.name.to_lowercase() == *w || t.id().to_lowercase() == *w).ok_or_else(|| format!("No run target is called that. The targets are: {}", names()))?,
-                None => c.selected().or(c.targets().first()).ok_or("Forge found nothing to run in this project.")?,
-            };
-            Ok(target.id())
-        })
-        .map_err(|_| closed())??;
-    cx.update(|window, cx| {
-        controller.update(cx, |c, cx| c.select(id, cx));
-        let controller = controller.clone();
-        window.defer(cx, move |window, cx| controller.update(cx, |c, cx| c.debug(window, cx)));
-    })
-    .map_err(|_| closed())
 }
 
 /// Continues, steps or pauses the session, and reports where it stops next.

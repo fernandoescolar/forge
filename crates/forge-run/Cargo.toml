@@ -7,6 +7,7 @@ publish = false
 description = "Run targets and run/debug/stop controls for Forge"
 
 [dependencies]
+forge-ui = { path = "../forge-ui" }
 anyhow.workspace = true
 async-net = "2"
 async-tungstenite = "0.33"

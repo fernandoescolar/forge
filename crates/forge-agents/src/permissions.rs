@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use forge_ui::ide_tools::ToolEffect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -136,14 +137,24 @@ pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf]) -
     Decision::Ask
 }
 
-/// Whether a call to Forge's own tool `name` waits for the user: requests leave the
+/// What a call to Forge's own tool `name` does: what its crate registered
+/// (`forge_ui::ide_tools`), or, for the tools of this crate, whether it runs code.
+pub fn forge_tool_effect(name: &str) -> ToolEffect {
+    match forge_ui::ide_tools::ide_tools().get(name) {
+        Some(tool) => tool.effect,
+        None if matches!(name, "start_debugging" | "debug_evaluate") => ToolEffect::RunsCode,
+        None => ToolEffect::Reads,
+    }
+}
+
+/// Whether a call to one of Forge's own tools waits for the user: requests leave the
 /// computer (and can carry secrets) so they ask unless the user lets everything run; tests,
 /// apps and the debugger run the project's code, so they ask where commands do.
-pub fn forge_tool_asks(permissions: &Permissions, name: &str) -> bool {
-    match name {
-        "http_request" => permissions.mode != PermissionMode::SuperUser,
-        "run_tests" | "run_app" | "start_debugging" | "debug_evaluate" => permissions.mode < PermissionMode::Auto,
-        _ => false,
+pub fn forge_tool_asks(permissions: &Permissions, effect: ToolEffect) -> bool {
+    match effect {
+        ToolEffect::Network => permissions.mode != PermissionMode::SuperUser,
+        ToolEffect::RunsCode => permissions.mode < PermissionMode::Auto,
+        ToolEffect::Reads => false,
     }
 }
 
@@ -399,13 +410,13 @@ mod tests {
     #[test]
     fn forge_tools_that_run_code_or_reach_the_network_ask() {
         for mode in [PermissionMode::Ask, PermissionMode::AllowEdits, PermissionMode::Auto, PermissionMode::AllowWorkspace] {
-            assert!(forge_tool_asks(&perms(mode), "http_request"), "{mode:?}");
+            assert!(forge_tool_asks(&perms(mode), ToolEffect::Network), "{mode:?}");
         }
-        assert!(!forge_tool_asks(&perms(PermissionMode::SuperUser), "http_request"));
-        assert!(forge_tool_asks(&perms(PermissionMode::AllowEdits), "run_tests"));
-        assert!(forge_tool_asks(&perms(PermissionMode::Ask), "debug_evaluate"));
-        assert!(!forge_tool_asks(&perms(PermissionMode::Auto), "run_app"));
-        assert!(!forge_tool_asks(&perms(PermissionMode::Ask), "diagnostics"));
+        assert!(!forge_tool_asks(&perms(PermissionMode::SuperUser), ToolEffect::Network));
+        assert!(forge_tool_asks(&perms(PermissionMode::AllowEdits), ToolEffect::RunsCode));
+        assert!(forge_tool_asks(&perms(PermissionMode::Ask), forge_tool_effect("debug_evaluate")));
+        assert!(!forge_tool_asks(&perms(PermissionMode::Auto), ToolEffect::RunsCode));
+        assert!(!forge_tool_asks(&perms(PermissionMode::Ask), forge_tool_effect("diagnostics")));
     }
 
     #[test]

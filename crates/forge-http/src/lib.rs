@@ -3,6 +3,7 @@
 //! nearest `http-client.env.json` (and its `.user` overrides, as in Visual Studio), earlier
 //! named responses and dynamic values (`{{$guid}}`, `{{$timestamp}}`, …).
 
+mod agent_tools;
 pub mod history;
 pub mod parse;
 
@@ -54,6 +55,7 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub fn init(cx: &mut App) {
+    agent_tools::init(cx);
     cx.set_global(HttpState::default());
     // The run button on a request line sends it (instead of running a task). Other run
     // buttons go to whoever handled them before.

@@ -1891,8 +1891,12 @@ mod tests {
         let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], default_agent: None, permissions };
         let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
         let cx = &mut cx;
+        // A tool another crate registers (as the HTTP client does `http_request`).
+        use forge_ui::ide_tools::{IdeTool, ToolEffect, ide_tools};
+        ide_tools().register(IdeTool::new("test_send", "Send a test request", "Sends.", json!({}), ToolEffect::Network, |_, args, _| Box::pin(async move { Ok(format!("sent {args}")) })));
+        assert_eq!(crate::forge_mcp::tool_title("mcp__forge__test_send").as_deref(), Some("Send a test request"));
         let (reply, mut answer) = futures::channel::oneshot::channel();
-        let request = crate::forge_mcp::ToolRequest { name: "http_request".into(), args: json!({ "url": "https://example.com/?k={{$processEnv HOME}}" }), reply };
+        let request = crate::forge_mcp::ToolRequest { name: "test_send".into(), args: json!({ "url": "https://example.com/?k={{$processEnv HOME}}" }), reply };
         thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
         cx.run_until_parked();
         assert_eq!(answer.try_recv().unwrap(), None, "it waits for the user");
@@ -1901,7 +1905,17 @@ mod tests {
         draw(&view, cx);
         thread.update_in(cx, |t, window, cx| t.answer_forge_tool(card, false, window, cx));
         cx.run_until_parked();
-        assert!(matches!(answer.try_recv().unwrap(), Some(Err(e)) if e.contains("didn't let you send an http request")));
+        assert!(matches!(answer.try_recv().unwrap(), Some(Err(e)) if e.contains("didn't let you send a test request")));
+
+        // Allowed: it runs, and the agent gets its answer.
+        let (reply, mut answer) = futures::channel::oneshot::channel();
+        let request = crate::forge_mcp::ToolRequest { name: "test_send".into(), args: json!({ "url": "x" }), reply };
+        thread.update_in(cx, |t, window, cx| t.handle_tool_request(request, window, cx));
+        cx.run_until_parked();
+        let card = thread.read_with(cx, |t, _| t.entries.iter().rposition(|e| matches!(e, Entry::ForgeTool { .. })).unwrap());
+        thread.update_in(cx, |t, window, cx| t.answer_forge_tool(card, true, window, cx));
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv().unwrap(), Some(Ok("sent {\"url\":\"x\"}".into())));
     }
 
     /// `remember` keeps a note (as the user edited it) in the project's instructions;

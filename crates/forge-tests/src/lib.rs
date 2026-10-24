@@ -2,6 +2,7 @@
 //! Rust, Jest, Vitest and pytest), runs them with each one's tool, and shows results per test in
 //! a dock panel.
 
+pub mod agent_tools;
 pub mod discovery;
 mod go;
 mod gutter;
@@ -17,4 +18,5 @@ pub use panel::TestPanel;
 pub fn init(cx: &mut gpui::App) {
     panel::init(cx);
     gutter::init(cx);
+    agent_tools::init(cx);
 }

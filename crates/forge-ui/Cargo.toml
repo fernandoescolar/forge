@@ -29,6 +29,7 @@ ui = { path = "../../vendor/zed/crates/ui" }
 # `cargo run` working. Every Forge crate depends on forge-ui, so the feature applies to all.
 util = { path = "../../vendor/zed/crates/util", features = ["debug-embed"] }
 workspace = { path = "../../vendor/zed/crates/workspace" }
+project = { path = "../../vendor/zed/crates/project" }
 
 
 [dev-dependencies]

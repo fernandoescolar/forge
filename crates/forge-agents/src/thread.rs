@@ -1230,7 +1230,7 @@ impl Thread {
                     Entry::Question { question, answer, .. } => RecordEntry::System { text: format!("Asked: {question} → {}", answer.as_deref().map(|a| if a.is_empty() { "skipped" } else { a }).unwrap_or("not answered")) },
                     Entry::Remember { note, state, .. } => RecordEntry::System { text: format!("Note \"{}\": {}", note.read(cx).text(cx).trim(), state.outcome()) },
                     Entry::ExtensionTool { tool, state, .. } => RecordEntry::System { text: format!("{} ({}): {}", tool.title, tool.extension, state.outcome()) },
-                    Entry::ForgeTool { name, state, .. } => RecordEntry::System { text: format!("{}: {}", crate::forge_tools::title(name), state.outcome()) },
+                    Entry::ForgeTool { name, state, .. } => RecordEntry::System { text: format!("{}: {}", forge_tool_title(name), state.outcome()) },
                     Entry::LspEdit { plan, state, .. } => RecordEntry::System { text: format!("Asked to {}: {}", plan.summary(), state.outcome()) },
                     Entry::System(..) | Entry::Auth { .. } | Entry::Check(_) => return None,
                 })
@@ -1565,7 +1565,7 @@ impl Thread {
             Entry::Push { reply: Some(_), .. } => Some("the proposed push".to_string()),
             Entry::LspEdit { plan, reply: Some(_), .. } => Some(plan.summary()),
             Entry::ExtensionTool { tool, reply: Some(_), .. } => Some(format!("let {} run", tool.title)),
-            Entry::ForgeTool { name, reply: Some(_), .. } => Some(format!("let it {}", crate::forge_tools::title(name).to_lowercase())),
+            Entry::ForgeTool { name, reply: Some(_), .. } => Some(format!("let it {}", forge_tool_title(name).to_lowercase())),
             Entry::Remember { reply: Some(_), .. } => Some("keep a note".to_string()),
             Entry::Question { question, answer: None, .. } => Some(format!("answer \"{question}\"")),
             _ => None,
@@ -2017,7 +2017,7 @@ impl Thread {
 
     /// What Forge's tools work on, for this thread.
     fn ide(&self) -> crate::forge_tools::Ide {
-        crate::forge_tools::Ide { project: self.project.clone(), workspace: self.workspace.clone(), root: self.root.clone() }
+        forge_ui::ide_tools::ToolContext { project: self.project.clone(), workspace: self.workspace.clone(), root: self.root.clone() }
     }
 
     /// A call to a tool of Forge's MCP server (see `forge_mcp`).
@@ -2089,7 +2089,7 @@ impl Thread {
                 let _ = reply.send(answer);
             }
             _ if forge_ui::agent_tools::agent_tools().get(&name).is_some() => self.extension_tool(name, args, reply, window, cx),
-            _ if crate::permissions::forge_tool_asks(&self.permissions.get(), &name) => {
+            _ if crate::permissions::forge_tool_asks(&self.permissions.get(), crate::permissions::forge_tool_effect(&name)) => {
                 self.entries.push(Entry::ForgeTool { name, args, state: crate::forge_tools::EditState::Waiting, reply: Some(reply) });
                 self.changed(cx);
             }
@@ -2113,7 +2113,7 @@ impl Thread {
         let Some(reply) = reply.take() else { return };
         if !allow {
             *state = EditState::Declined;
-            let _ = reply.send(Err(format!("The user didn't let you {}. Nothing was done.", crate::forge_tools::title(name).to_lowercase())));
+            let _ = reply.send(Err(format!("The user didn't let you {}. Nothing was done.", forge_tool_title(name).to_lowercase())));
             self.changed(cx);
             return;
         }
@@ -2913,29 +2913,33 @@ impl Thread {
 }
 
 /// The last of a tool call's `locations`; lines are zero-based, as Zed reads them.
-/// Runs one of Forge's tools that answer from the project (no card of their own).
+/// What the thread calls one of Forge's tools ("Run tests").
+pub(crate) fn forge_tool_title(name: &str) -> String {
+    crate::forge_mcp::tool_title(name).unwrap_or_else(|| "Use a Forge tool".into())
+}
+
+/// Runs one of Forge's tools that answer from the project (no card of their own): this
+/// crate's, or one another crate registered (`forge_ui::ide_tools`).
 async fn run_forge_tool(ide: crate::forge_tools::Ide, name: &str, args: Value, cx: &mut gpui::AsyncWindowContext) -> crate::forge_mcp::ToolReply {
     use crate::forge_tools as tools;
     match name {
-        "run_tests" => tools::run_tests(ide, args, cx).await,
         "diagnostics" => tools::diagnostics(ide, args, cx).await,
         "go_to_definition" => tools::definition(ide, args, cx).await,
         "find_references" => tools::references(ide, args, cx).await,
         "hover" => tools::hover(ide, args, cx).await,
         "workspace_symbols" => tools::workspace_symbols(ide, args, cx).await,
         "code_actions" => tools::code_actions(ide, args, cx).await,
-        "run_app" => tools::run_app(ide, args, cx).await,
-        "app_output" => tools::app_output(ide, args, cx).await,
-        "stop_app" => tools::stop_app(ide, cx).await,
         "show_file" => tools::show_file(ide, args, cx).await,
-        "http_request" => tools::http_request(ide, args, cx).await,
         "set_breakpoint" => crate::forge_debug::set_breakpoint(ide, args, cx).await,
         "remove_breakpoint" => crate::forge_debug::remove_breakpoint(ide, args, cx).await,
         "start_debugging" => crate::forge_debug::start_debugging(ide, args, cx).await,
         "debug_step" => crate::forge_debug::debug_step(ide, args, cx).await,
         "debug_evaluate" => crate::forge_debug::debug_evaluate(ide, args, cx).await,
         "stop_debugging" => crate::forge_debug::stop_debugging(ide, cx).await,
-        other => Err(format!("Unknown tool: {other}")),
+        other => match forge_ui::ide_tools::ide_tools().get(other) {
+            Some(tool) => (tool.run)(ide, args, cx.clone()).await,
+            None => Err(format!("Unknown tool: {other}")),
+        },
     }
 }
 

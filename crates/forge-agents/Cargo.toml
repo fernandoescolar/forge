@@ -10,9 +10,6 @@ description = "Native ACP agent panel for Forge"
 forge-process = { path = "../forge-process" }
 askpass = { path = "../../vendor/zed/crates/askpass" }
 base64 = "0.22"
-forge-http = { path = "../forge-http" }
-forge-run = { path = "../forge-run" }
-forge-tests = { path = "../forge-tests" }
 forge-ui = { path = "../forge-ui" }
 settings = { path = "../../vendor/zed/crates/settings" }
 dap = { path = "../../vendor/zed/crates/dap" }
