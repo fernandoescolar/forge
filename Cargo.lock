@@ -90,6 +90,7 @@ dependencies = [
  "dashmap",
  "ide-api",
  "jsonrpc",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",

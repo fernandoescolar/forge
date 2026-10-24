@@ -469,6 +469,9 @@ impl Thread {
         let terminals = TerminalRegistry::default();
         let terminal_host = Arc::new(ZedTerminals::new(&project, terminals.clone(), cx));
         let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host).with_terminal_auth().with_display_terminals());
+        // Closing the window or the thread stops its agents: tasks still waiting on them
+        // would otherwise keep them (and what they started) running until Forge quits.
+        cx.on_release(|this: &mut Self, _| this.runtime.kill_all()).detach();
 
         // broadcast (tokio) → unbounded (GPUI): the thread consumes events on the UI thread.
         let (tx, mut rx) = mpsc::unbounded();

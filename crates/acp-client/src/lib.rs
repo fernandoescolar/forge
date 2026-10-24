@@ -32,6 +32,25 @@ type PermissionWaiters = DashMap<(String, String), oneshot::Sender<PermissionOut
 struct AgentProcess {
     peer: Arc<Peer>,
     child: Mutex<Child>,
+    /// Its process id, which is also its process group's: what it starts (`npx` runs the
+    /// agent as a grandchild, agents run MCP servers) goes when it does.
+    pid: Option<u32>,
+}
+
+/// How long an agent has to exit after SIGTERM before its whole group gets SIGKILL.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// Stops the process group `pid` leads: SIGTERM now, SIGKILL after `GRACE` to whatever is
+/// left. Synchronous, so it works while dropping.
+#[cfg(unix)]
+fn terminate_group(pid: u32) {
+    let group = -(pid as i32);
+    // SAFETY: kill(2) only sends a signal; a group that is gone answers ESRCH.
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    std::thread::spawn(move || {
+        std::thread::sleep(GRACE);
+        unsafe { libc::kill(group, libc::SIGKILL) };
+    });
 }
 
 struct AcpHandler {
@@ -197,6 +216,37 @@ impl AcpRuntime {
             let _ = self.stop(&id).await;
         }
     }
+
+    /// Stops every agent and what it started, without waiting: for when the thread that
+    /// owns them goes away.
+    pub fn kill_all(&self) {
+        for agent in self.agents.iter() {
+            agent.terminate(agent.key());
+        }
+    }
+}
+
+impl AgentProcess {
+    fn terminate(&self, agent_id: &str) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            return terminate_group(pid);
+        }
+        match self.child.try_lock() {
+            Ok(mut child) => {
+                if let Err(e) = child.start_kill() {
+                    warn!(agent = %agent_id, "kill failed: {e}");
+                }
+            }
+            Err(_) => warn!(agent = %agent_id, "kill skipped: the process is being reaped"),
+        }
+    }
+}
+
+impl Drop for AcpRuntime {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
 }
 
 #[async_trait]
@@ -212,6 +262,9 @@ impl AgentService for AcpRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group, so stopping it stops what it started too.
+        #[cfg(unix)]
+        cmd.process_group(0);
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
@@ -230,7 +283,8 @@ impl AgentService for AcpRuntime {
 
         let handler = Arc::new(AcpHandler { agent_id: spec.id.clone(), events: self.events.clone(), workspace: self.workspace.clone(), terminals: self.terminals.clone(), permissions: self.permissions.clone() });
         let (peer, reader) = Peer::start(stdout, stdin, Framing::Newline, handler, Duration::from_secs(120));
-        let process = Arc::new(AgentProcess { peer, child: Mutex::new(child) });
+        let pid = child.id();
+        let process = Arc::new(AgentProcess { peer, child: Mutex::new(child), pid });
         self.agents.insert(spec.id.clone(), process.clone());
         info!(agent = %spec.id, "agent started");
         let _ = self.events.send(IdeEvent::Agent(AgentEvent::Started { agent_id: spec.id.clone() }));
@@ -258,10 +312,7 @@ impl AgentService for AcpRuntime {
     }
 
     async fn stop(&self, agent_id: &str) -> IdeResult<()> {
-        let agent = self.agent(agent_id)?;
-        if let Err(e) = agent.child.lock().await.start_kill() {
-            warn!(agent = %agent_id, "kill failed: {e}");
-        }
+        self.agent(agent_id)?.terminate(agent_id);
         Ok(())
     }
 
@@ -554,6 +605,46 @@ mod tests {
         let spec = AgentSpec { id: "shim".into(), command: "forge-test-agent".into(), args: vec![], env: vec![("PATH".into(), path)], cwd: None };
         acp.start(spec).await.unwrap();
         assert_eq!(acp.initialize("shim", PROTOCOL_VERSION).await.unwrap()["protocolVersion"], 1);
+    }
+
+    /// An agent started through a wrapper (`npx` runs it as a grandchild) goes with
+    /// everything it started: on `stop`, and when the runtime is dropped.
+    #[tokio::test]
+    async fn stopping_an_agent_stops_what_it_started() {
+        let alive = |pid: &str| std::process::Command::new("kill").args(["-0", pid]).status().unwrap().success();
+        async fn start(acp: &AcpRuntime, dir: &Path, id: &str) -> String {
+            let pidfile = dir.join(format!("{id}.pid"));
+            // The grandchild holds stdout open, as an `npx`-launched agent does.
+            let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
+            let spec = AgentSpec { id: id.into(), command: "sh".into(), args: vec!["-c".into(), script], env: vec![], cwd: None };
+            {
+                acp.start(spec).await.unwrap();
+                for _ in 0..100 {
+                    if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+                        if !pid.trim().is_empty() {
+                            return pid.trim().to_string();
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                panic!("the grandchild didn't start");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
+        let acp = AcpRuntime::new(events, ws);
+
+        let grandchild = start(&acp, dir.path(), "a").await;
+        assert!(alive(&grandchild));
+        acp.stop("a").await.unwrap();
+        next_agent_event(&mut rx, |e| matches!(e, AgentEvent::Exited { .. })).await;
+        assert!(!alive(&grandchild), "the grandchild went with the agent");
+
+        let grandchild = start(&acp, dir.path(), "b").await;
+        drop(acp);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!alive(&grandchild), "dropping the runtime stops its agents");
     }
 
     #[tokio::test]
