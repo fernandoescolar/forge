@@ -107,47 +107,92 @@ fn start(runtime: &tokio::runtime::Handle) -> anyhow::Result<Server> {
                         }
                     });
                 }
-                Err(e) => log::warn!("Forge's MCP server: {e}"),
+                Err(e) => {
+                    // Out of file descriptors and the like: wait instead of spinning.
+                    log::warn!("Forge's MCP server: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
             }
         }
     });
     Ok(Server { port, sessions })
 }
 
-/// One connection: HTTP/1.1 requests one after another (keep-alive).
+/// A request line or header longer than this ends the connection (bytes).
+const MAX_LINE: u64 = 8 * 1024;
+/// Headers a request may have, at most.
+const MAX_HEADERS: usize = 100;
+/// Bodies above this are refused (bytes): tool calls are small JSON.
+const MAX_BODY: usize = 16 * 1024 * 1024;
+
+/// The head of an HTTP request: its method, path and body length.
+#[derive(Debug, PartialEq)]
+struct Head {
+    method: String,
+    path: String,
+    length: usize,
+}
+
+/// One line, without letting it grow past `MAX_LINE`; `None` at the end of the stream.
+async fn read_line(read: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    if (&mut *read).take(MAX_LINE).read_line(&mut line).await? == 0 {
+        return Ok(None);
+    }
+    if !line.ends_with('\n') {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
+    }
+    Ok(Some(line))
+}
+
+/// Reads a request's head; `None` once the client closed the connection.
+async fn read_head(read: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> std::io::Result<Option<Head>> {
+    let Some(request_line) = read_line(read).await? else { return Ok(None) };
+    let mut parts = request_line.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or_default().to_string(), parts.next().unwrap_or_default().to_string());
+    let mut length = 0usize;
+    for _ in 0..=MAX_HEADERS {
+        let Some(header) = read_line(read).await? else { return Ok(None) };
+        let header = header.trim_end();
+        if header.is_empty() {
+            return Ok(Some(Head { method, path, length }));
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad Content-Length"))?;
+            }
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "too many headers"))
+}
+
+async fn respond(write: &mut (impl tokio::io::AsyncWrite + Unpin), status: &str, answer: Option<Value>) -> std::io::Result<()> {
+    let body = answer.map(|a| a.to_string()).unwrap_or_default();
+    let content_type = if body.is_empty() { "" } else { "Content-Type: application/json\r\n" };
+    let head = format!("HTTP/1.1 {status}\r\n{content_type}Content-Length: {}\r\n\r\n", body.len());
+    write.write_all(head.as_bytes()).await?;
+    write.write_all(body.as_bytes()).await?;
+    write.flush().await
+}
+
+/// One connection: HTTP/1.1 requests one after another (keep-alive). Requests for an
+/// unknown token, or too large, are answered without reading their body, and end it.
 async fn serve(stream: tokio::net::TcpStream, sessions: Sessions) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
-    loop {
-        let mut request_line = String::new();
-        if read.read_line(&mut request_line).await? == 0 {
-            return Ok(());
-        }
-        let mut parts = request_line.split_whitespace();
-        let (method, path) = (parts.next().unwrap_or_default().to_string(), parts.next().unwrap_or_default().to_string());
-        let mut length = 0usize;
-        loop {
-            let mut header = String::new();
-            if read.read_line(&mut header).await? == 0 {
-                return Ok(());
-            }
-            let header = header.trim_end();
-            if header.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = header.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("content-length") {
-                    length = value.trim().parse().unwrap_or(0);
-                }
-            }
+    while let Some(Head { method, path, length }) = read_head(&mut read).await? {
+        let session = path.strip_prefix("/mcp/").and_then(|token| sessions.lock().unwrap().get(token).cloned());
+        let Some(session) = session else {
+            return respond(&mut write, "404 Not Found", None).await;
+        };
+        if length > MAX_BODY {
+            return respond(&mut write, "413 Content Too Large", None).await;
         }
         let mut body = vec![0; length];
         read.read_exact(&mut body).await?;
 
-        let session = path.strip_prefix("/mcp/").and_then(|token| sessions.lock().unwrap().get(token).cloned());
-        let (status, answer) = match (method.as_str(), session) {
-            (_, None) => ("404 Not Found", None),
-            ("POST", Some(session)) => match serde_json::from_slice::<Value>(&body) {
+        let (status, answer) = match method.as_str() {
+            "POST" => match serde_json::from_slice::<Value>(&body) {
                 Ok(message) => match handle(message, &session).await {
                     Some(answer) => ("200 OK", Some(answer)),
                     None => ("202 Accepted", None),
@@ -155,16 +200,12 @@ async fn serve(stream: tokio::net::TcpStream, sessions: Sessions) -> std::io::Re
                 Err(_) => ("400 Bad Request", Some(error(Value::Null, -32700, "parse error"))),
             },
             // No server-sent stream to open, and sessions end with the thread.
-            ("DELETE", Some(_)) => ("200 OK", None),
+            "DELETE" => ("200 OK", None),
             _ => ("405 Method Not Allowed", None),
         };
-        let body = answer.map(|a| a.to_string()).unwrap_or_default();
-        let content_type = if body.is_empty() { "" } else { "Content-Type: application/json\r\n" };
-        let head = format!("HTTP/1.1 {status}\r\n{content_type}Content-Length: {}\r\n\r\n", body.len());
-        write.write_all(head.as_bytes()).await?;
-        write.write_all(body.as_bytes()).await?;
-        write.flush().await?;
+        respond(&mut write, status, answer).await?;
     }
+    Ok(())
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
@@ -601,6 +642,53 @@ async fn call(params: &Value, session: &Session) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn head(raw: &[u8]) -> std::io::Result<Option<Head>> {
+        read_head(&mut BufReader::new(raw)).await
+    }
+
+    #[tokio::test]
+    async fn reads_request_heads_within_limits() {
+        let ok = head(b"POST /mcp/abc HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\n{}").await.unwrap();
+        assert_eq!(ok, Some(Head { method: "POST".into(), path: "/mcp/abc".into(), length: 12 }));
+        assert_eq!(head(b"").await.unwrap(), None, "the client closed");
+        assert!(head(b"POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n").await.is_err());
+        let long = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_LINE as usize));
+        assert!(head(long.as_bytes()).await.is_err(), "lines can't grow without end");
+        let many = format!("GET / HTTP/1.1\r\n{}\r\n", "X: y\r\n".repeat(MAX_HEADERS + 1));
+        assert!(head(many.as_bytes()).await.is_err());
+        // The length is only read: nothing is allocated for it here.
+        let huge = head(b"POST /mcp/x HTTP/1.1\r\nContent-Length: 99999999999999\r\n\r\n").await.unwrap().unwrap();
+        assert!(huge.length > MAX_BODY);
+    }
+
+    /// Unknown tokens and huge bodies are answered at once, before any body is read.
+    #[tokio::test]
+    async fn refuses_strangers_and_huge_bodies_before_reading_them() {
+        let sessions: Sessions = Default::default();
+        let (tx, _rx) = mpsc::unbounded();
+        sessions.lock().unwrap().insert("good".into(), Session { tx, root: PathBuf::from("/p") });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let sessions = served.clone();
+                tokio::spawn(async move { serve(stream, sessions).await.ok() });
+            }
+        });
+        let ask = |request: &'static str| async move {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer).await.unwrap();
+            answer
+        };
+        assert!(ask("POST /mcp/bad HTTP/1.1\r\nContent-Length: 99999999999999\r\n\r\n").await.starts_with("HTTP/1.1 404"));
+        assert!(ask("POST /mcp/good HTTP/1.1\r\nContent-Length: 99999999999999\r\n\r\n").await.starts_with("HTTP/1.1 413"));
+    }
+
     use futures::StreamExt as _;
 
     async fn post(url: &str, body: Value) -> (String, String) {

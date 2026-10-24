@@ -203,14 +203,22 @@ impl Peer {
     }
 }
 
+/// `Content-Length` bodies above this are refused (bytes), before anything is allocated.
+pub const MAX_MESSAGE: usize = 64 * 1024 * 1024;
+
 /// Reads one framed message. `Ok(None)` means clean end of stream.
 pub async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R, framing: Framing) -> anyhow::Result<Option<Value>> {
     match framing {
         Framing::Newline => loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await? == 0 {
+            let mut bytes = Vec::new();
+            if reader.read_until(b'\n', &mut bytes).await? == 0 {
                 return Ok(None);
             }
+            // A stray non-UTF-8 byte in an agent's output is skipped, not the end of it.
+            let Ok(line) = std::str::from_utf8(&bytes) else {
+                debug!("skipping a line that isn't UTF-8");
+                continue;
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -239,7 +247,9 @@ pub async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R, framing: Fram
                         content_length = Some(v.trim().parse::<usize>()?);
                     }
             }
-            let mut body = vec![0; content_length.unwrap_or_default()];
+            let length = content_length.unwrap_or_default();
+            anyhow::ensure!(length <= MAX_MESSAGE, "message of {length} bytes is too large");
+            let mut body = vec![0; length];
             reader.read_exact(&mut body).await?;
             Ok(Some(serde_json::from_slice(&body)?))
         }
@@ -250,6 +260,14 @@ pub async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R, framing: Fram
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn skips_bad_lines_and_refuses_huge_bodies() {
+        let mut lines: &[u8] = b"log line\n\xff\xfe\n{\"a\":1}\n";
+        assert_eq!(read_message(&mut lines, Framing::Newline).await.unwrap(), Some(serde_json::json!({ "a": 1 })));
+        let mut huge: &[u8] = b"Content-Length: 99999999999999\r\n\r\n";
+        assert!(read_message(&mut huge, Framing::ContentLength).await.is_err());
+    }
 
     struct Echo;
     #[async_trait]
