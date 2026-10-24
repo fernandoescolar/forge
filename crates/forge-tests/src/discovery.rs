@@ -81,6 +81,69 @@ pub(crate) const SKIPPED_DIRS: &[&str] = &["bin", "obj", ".git", ".vs", ".idea",
 /// Test projects under `root` (every kind), sorted by name; projects without tests are
 /// left out.
 pub fn discover(root: &Path) -> Vec<TestProject> {
+    // Every kind of project looks for its files: list the folders once for all of them.
+    LISTING.with(|l| *l.borrow_mut() = Some(std::rc::Rc::new(Listing::new(root))));
+    let projects = discover_listed(root);
+    LISTING.with(|l| l.borrow_mut().take());
+    projects
+}
+
+/// The files under a root, listed once by `discover` (skipping `SKIPPED_DIRS` and hidden
+/// folders, as the walks below do).
+struct Listing {
+    root: PathBuf,
+    files: Vec<PathBuf>,
+    all: std::collections::HashSet<PathBuf>,
+    /// Folders that hold a `.csproj`.
+    projects: std::collections::HashSet<PathBuf>,
+}
+
+thread_local! {
+    static LISTING: std::cell::RefCell<Option<std::rc::Rc<Listing>>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Listing {
+    fn new(root: &Path) -> Self {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) || (entry.file_type().is_ok_and(|t| t.is_symlink()) && path.is_dir()) {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    if !SKIPPED_DIRS.contains(&name) && !name.starts_with('.') {
+                        pending.push(path);
+                    }
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        let projects = files.iter().filter(|f| f.extension().is_some_and(|e| e == "csproj")).filter_map(|f| f.parent().map(Path::to_path_buf)).collect();
+        let all = files.iter().cloned().collect();
+        Self { root: root.to_path_buf(), files, all, projects }
+    }
+
+    /// `find_where` over the listing: files under `dir` for which `wanted` holds, leaving
+    /// out folders below `dir` that hold a file named `stop_at`.
+    fn find(&self, dir: &Path, wanted: impl Fn(&Path) -> bool, blocked: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.files
+            .iter()
+            .filter(|f| f.starts_with(dir) && wanted(f))
+            .filter(|f| !f.parent().into_iter().flat_map(Path::ancestors).take_while(|a| *a != dir && a.starts_with(dir)).any(&blocked))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The listing `discover` made, when `dir` is in it.
+fn listing_for(dir: &Path) -> Option<std::rc::Rc<Listing>> {
+    LISTING.with(|l| l.borrow().clone()).filter(|l| dir.starts_with(&l.root))
+}
+
+fn discover_listed(root: &Path) -> Vec<TestProject> {
     let mut projects: Vec<_> = find_files(root, "csproj", false)
         .into_iter()
         .filter(|project| is_test_project(project))
@@ -98,6 +161,9 @@ pub fn discover(root: &Path) -> Vec<TestProject> {
 /// Files under `dir` for which `wanted` holds. Folders holding a file named `stop_at`
 /// (another project's manifest) are skipped, except `dir` itself.
 pub(crate) fn find_where(dir: &Path, wanted: impl Fn(&Path) -> bool, stop_at: Option<&str>) -> Vec<PathBuf> {
+    if let Some(listing) = listing_for(dir) {
+        return listing.find(dir, wanted, |folder| stop_at.is_some_and(|marker| listing.all.contains(&folder.join(marker))));
+    }
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(current) = pending.pop() {
@@ -165,6 +231,9 @@ fn load_project(project: &Path) -> TestProject {
 /// Files with `extension` under `dir`. With `stop_at_projects`, subfolders that hold their
 /// own `.csproj` belong to that project and are skipped.
 fn find_files(dir: &Path, extension: &str, stop_at_projects: bool) -> Vec<PathBuf> {
+    if let Some(listing) = listing_for(dir) {
+        return listing.find(dir, |f| f.extension().is_some_and(|e| e == extension), |folder| stop_at_projects && listing.projects.contains(folder));
+    }
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -197,6 +266,35 @@ fn has_project(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One listing for every kind finds what each kind's own walk found, nested projects
+    /// and skipped folders included.
+    #[test]
+    fn the_shared_listing_finds_what_walking_finds() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Outer.Tests/Outer.Tests.csproj", "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
+        write("Outer.Tests/A.cs", "namespace O; public class A { [Fact] public void T() {} }");
+        write("Outer.Tests/Inner/Inner.Tests.csproj", "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
+        write("Outer.Tests/Inner/B.cs", "namespace I; public class B { [Fact] public void T() {} }");
+        write("go/go.mod", "module example.com/m\n");
+        write("go/a_test.go", "package m\nimport \"testing\"\nfunc TestA(t *testing.T) {}\n");
+        write("go/sub/go.mod", "module example.com/sub\n");
+        write("go/sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestB(t *testing.T) {}\n");
+        write("web/package.json", "{\"devDependencies\":{\"vitest\":\"1\"}}");
+        write("web/src/a.test.ts", "test('works', () => {});");
+        write("web/node_modules/x/b.test.ts", "test('no', () => {});");
+        write("py/pyproject.toml", "[tool.pytest.ini_options]\n");
+        write("py/test_a.py", "def test_a():\n    pass\n");
+        let listed = discover(root.path());
+        let walked = discover_listed(root.path());
+        assert_eq!(listed, walked);
+        assert!(listed.len() >= 5, "{listed:#?}");
+    }
 
     #[test]
     fn finds_test_projects_and_their_tests() {
