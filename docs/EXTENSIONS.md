@@ -311,6 +311,8 @@ Colours: `accent`, `error`, `warning`, `success`, `muted`. Forge only sends the 
 const { code, stdout, stderr } = await forge.process.exec('git', { args: ['log', '--oneline', '-5'], cwd: '.', env: { GIT_PAGER: 'cat' } });
 ```
 
+`stdin` is written while the output is read, so a program may answer as it reads. `timeout` (milliseconds) stops a program that takes too long, and the call fails. A program still running when your extension unloads is stopped.
+
 **Keep one running** and talk to it:
 
 ```ts
@@ -321,6 +323,8 @@ child.write(JSON.stringify({ op: 'ping' }) + '\n');
 child.onExit((code) => console.log('exited', code));
 // child.end() closes its input; child.kill() stops it; await child.exited
 ```
+
+Each program runs in a process group of its own: `kill()`, and unloading the extension, stop what it started too (a server's workers, the real program behind a wrapper script).
 
 **Sidecars** are programs your extension ships, built for each platform. List them in `package.json`, and put each build at `bin/<platform>/<name>`, where the platform is `darwin-arm64`, `darwin-x64`, `linux-x64`, `win32-x64`…:
 

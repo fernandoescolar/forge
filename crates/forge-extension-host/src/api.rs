@@ -214,11 +214,15 @@ impl ExtensionHost {
     }
 
     /// `process.exec`: runs a program to completion with the project's shell environment
-    /// and replies with its exit code and output.
+    /// and replies with its exit code and output. Like `process.spawn`'s, the run belongs to
+    /// the extension (unloading it stops the program and what it started) and can be given
+    /// a `timeout` in milliseconds.
     fn exec(&mut self, args: &Value, id: u64, cx: &mut Context<Self>) {
         let Some(command) = args.get("command").and_then(Value::as_str).map(str::to_string) else {
             return self.reply(id, Err(anyhow!("missing command")));
         };
+        let owner = args.get("extension").and_then(Value::as_str).unwrap_or_default().to_string();
+        let timeout = args.get("timeout").and_then(Value::as_u64).map(std::time::Duration::from_millis);
         let arguments: Vec<String> = args.get("args").and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
         let cwd = self.resolve_path(args.get("cwd").and_then(Value::as_str).unwrap_or("."), cx);
         let extra_env: Vec<(String, String)> = args.get("env").and_then(Value::as_object).into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
@@ -228,44 +232,66 @@ impl ExtensionHost {
             let project = ws.read(cx).project().clone();
             project.update(cx, |p, cx| p.environment().update(cx, |env, cx| env.directory_environment(dir, cx)))
         });
+        let run = self.next_process;
+        self.next_process += 1;
+        let (kill_tx, kill_rx) = futures::channel::oneshot::channel::<()>();
+        self.processes.insert(run, crate::process::Process::run(owner, kill_tx));
         let js = self.js.clone();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let env: Vec<(String, String)> = match env_task {
                 Some(task) => task.await.map(|env| env.into_iter().collect()).unwrap_or_default(),
                 None => Vec::new(),
             };
             let result = cx
                 .background_spawn(async move {
+                    use futures::FutureExt as _;
                     use smol::io::AsyncWriteExt as _;
-                    let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone());
-                    let program = path
-                        .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(&command)).find(|p| p.is_file()))
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or(command.clone());
-                    let mut process = util::command::new_command(&program);
+                    let env: Vec<(String, String)> = env.into_iter().chain(extra_env).collect();
+                    let mut process = smol::process::Command::from(forge_process::command(&command, &env));
                     process
                         .args(&arguments)
-                        .envs(env)
-                        .envs(extra_env)
                         .current_dir(&cwd)
-                        .stdin(util::command::Stdio::piped())
-                        .stdout(util::command::Stdio::piped())
-                        .stderr(util::command::Stdio::piped())
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
                         .kill_on_drop(true);
-                    let mut child = process.spawn().with_context(|| format!("cannot start {command}"))?;
-                    if let Some(mut input) = child.stdin.take() {
-                        if let Some(stdin) = stdin {
+                    let mut child = forge_process::spawn_unblocked(move || process.spawn()).with_context(|| format!("cannot start {command}"))?;
+                    // Stopped early (killed, timed out): what it started goes too.
+                    let mut group = forge_process::GroupGuard::new(Some(child.id()));
+                    let input = child.stdin.take();
+                    // Input and output at once: a program that answers as it reads would
+                    // otherwise fill its output pipe and wait forever.
+                    let write = async move {
+                        if let (Some(mut input), Some(stdin)) = (input, stdin) {
                             input.write_all(stdin.as_bytes()).await.ok();
+                            input.close().await.ok();
                         }
+                    };
+                    let finished = futures::future::join(write, child.output()).map(|(_, output)| output);
+                    let deadline = async {
+                        match timeout {
+                            Some(after) => {
+                                smol::Timer::after(after).await;
+                            }
+                            None => futures::future::pending::<()>().await,
+                        }
+                    };
+                    futures::select_biased! {
+                        output = finished.fuse() => {
+                            let output = output?;
+                            group.disarm();
+                            anyhow::Ok(json!({
+                                "code": output.status.code(),
+                                "stdout": String::from_utf8_lossy(&output.stdout),
+                                "stderr": String::from_utf8_lossy(&output.stderr),
+                            }))
+                        }
+                        _ = kill_rx.fuse() => Err(anyhow!("{command} was stopped: its extension unloaded")),
+                        _ = deadline.fuse() => Err(anyhow!("{command} took longer than {} ms and was stopped", timeout.unwrap_or_default().as_millis())),
                     }
-                    let output = child.output().await?;
-                    anyhow::Ok(json!({
-                        "code": output.status.code(),
-                        "stdout": String::from_utf8_lossy(&output.stdout),
-                        "stderr": String::from_utf8_lossy(&output.stderr),
-                    }))
                 })
                 .await;
+            this.update(cx, |this, _| this.processes.remove(&run)).ok();
             let (ok, json) = match result {
                 Ok(value) => (true, value.to_string()),
                 Err(e) => (false, json!(format!("{e:#}")).to_string()),

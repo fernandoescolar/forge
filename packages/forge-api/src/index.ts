@@ -412,6 +412,8 @@ export type ExecOptions = {
   env?: Record<string, string>;
   /** Written to the process's standard input. */
   stdin?: string;
+  /** Milliseconds after which the program (and what it started) is stopped, and the call fails. */
+  timeout?: number;
 };
 
 export type ExecResult = { code: number | null; stdout: string; stderr: string };
@@ -752,8 +754,8 @@ export function forgeFor(extension: string | null) {
     onDidChangeSelection: (listener: (state: EditorState | null) => void) => own(on('editor.selectionChanged', listener)),
   },
   process: {
-    /** Runs a program to completion with the project's shell environment (`PATH` included). */
-    exec: (command: string, options: ExecOptions = {}) => call<ExecResult>('process.exec', { command, ...options }),
+    /** Runs a program to completion with the project's shell environment (`PATH` included). It is stopped if the extension unloads first. */
+    exec: (command: string, options: ExecOptions = {}) => call<ExecResult>('process.exec', { command, extension, ...options }),
     /** Starts a program that keeps running; talk to it through its input and output. It is killed when the extension unloads. */
     spawn: (command: string, options: SpawnOptions = {}) => call<number>('process.spawn', { command, extension, ...options }).then(childProcess),
     /**

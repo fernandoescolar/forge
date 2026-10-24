@@ -804,4 +804,54 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].info.name, "OK");
     }
+
+    /// `process.exec` writes its input while reading the output (a megabyte through `cat`
+    /// would deadlock otherwise) and stops at its timeout; what `process.spawn` started,
+    /// grandchildren included, goes when the extension unloads.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn extension_processes_end_with_their_extension(cx: &mut gpui::TestAppContext) {
+        use std::time::{Duration, Instant};
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext-p");
+        std::fs::create_dir_all(ext.join("dist")).unwrap();
+        std::fs::write(ext.join("package.json"), r#"{"name":"ext-p","forge":{}}"#).unwrap();
+        let code = "var __forgeExtension = { activate() { const f = __forge.modules['@forge-ide/api'].forge; \
+            const big = 'x'.repeat(1 << 20); \
+            f.process.exec('cat', { stdin: big }).then(r => f.commands.register('exec-' + r.stdout.length, 'exec', () => {})); \
+            f.process.exec('sleep', { args: ['30'], timeout: 200 }).catch(e => f.commands.register('timed-out', String(e), () => {})); \
+            f.process.spawn('sh', { args: ['-c', 'sleep 300 & echo $!; wait'] }).then(p => p.onLine(pid => f.commands.register('grandchild-' + pid, 'pid', () => {}))); \
+        } };";
+        std::fs::write(ext.join("dist/extension.js"), code).unwrap();
+        let host = cx.update(|cx| ExtensionHost::init(vec![tmp.path().to_path_buf()], cx)).unwrap();
+
+        let wait_for = |prefix: &'static str, cx: &mut gpui::TestAppContext| -> String {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(id) = host.read_with(cx, |h, _| h.commands.iter().find(|c| c.id.starts_with(prefix)).map(|c| c.id.clone())) {
+                    return id;
+                }
+                assert!(Instant::now() < deadline, "no command {prefix}…");
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        assert_eq!(wait_for("exec-", cx), format!("exec-{}", 1 << 20));
+        wait_for("timed-out", cx);
+        let grandchild = wait_for("grandchild-", cx).trim_start_matches("grandchild-").to_string();
+        let alive = |pid: &str| std::process::Command::new("kill").args(["-0", pid]).status().unwrap().success();
+        assert!(alive(&grandchild));
+        host.update(cx, |h, cx| h.unload("ext-p", cx));
+        let deadline = Instant::now() + forge_process::GRACE + Duration::from_secs(3);
+        while alive(&grandchild) {
+            assert!(Instant::now() < deadline, "the grandchild outlived its extension");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

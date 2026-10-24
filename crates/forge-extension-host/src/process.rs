@@ -21,6 +21,13 @@ pub(crate) struct Process {
     kill: Option<oneshot::Sender<()>>,
 }
 
+impl Process {
+    /// A `process.exec` run: only killed (its input is given up front).
+    pub(crate) fn run(owner: String, kill: oneshot::Sender<()>) -> Self {
+        Self { owner, stdin: mpsc::unbounded().0, kill: Some(kill) }
+    }
+}
+
 /// The folder of an extension's sidecars for this machine, as `forge-ext pack` names it
 /// (`bin/<platform>/`).
 pub fn platform() -> String {
@@ -85,23 +92,18 @@ impl ExtensionHost {
                 Some(task) => task.await.map(|env| env.into_iter().collect()).unwrap_or_default(),
                 None => std::env::vars().collect(),
             };
-            let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone());
-            let program = if command.contains('/') {
-                command.clone()
-            } else {
-                path.and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(&command)).find(|p| p.is_file())).map(|p| p.to_string_lossy().into_owned()).unwrap_or(command.clone())
-            };
-            let mut process = util::command::new_command(&program);
+            // In a process group of its own, started with no signals blocked: killing it
+            // stops what it started too, and tools that wait for their children work.
+            let env: Vec<(String, String)> = env.into_iter().chain(extra_env).collect();
+            let mut process = smol::process::Command::from(forge_process::command(&command, &env));
             process
                 .args(&arguments)
-                .envs(env)
-                .envs(extra_env)
                 .current_dir(&cwd)
-                .stdin(util::command::Stdio::piped())
-                .stdout(util::command::Stdio::piped())
-                .stderr(util::command::Stdio::piped())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = match process.spawn() {
+            let mut child = match forge_process::spawn_unblocked(move || process.spawn()) {
                 Ok(child) => child,
                 Err(e) => {
                     this.update(cx, |this, _| this.processes.remove(&pid)).ok();
@@ -122,7 +124,7 @@ impl ExtensionHost {
                 drop(stdin);
             })
             .detach();
-            // The pipes' types differ by platform (`Async<File>` on macOS, `ChildStdout` on Linux).
+            let group = forge_process::Group(child.id());
             type Pipe = Box<dyn futures::AsyncRead + Unpin + Send>;
             let pump = |reader: Option<Pipe>, stream: &'static str| {
                 let js = js.clone();
@@ -158,7 +160,8 @@ impl ExtensionHost {
             let status = match futures::future::select(Box::pin(status), kill_rx).await {
                 futures::future::Either::Left((status, _)) => status.ok(),
                 futures::future::Either::Right((_, status)) => {
-                    child.kill().ok();
+                    // Its children too: one holding the output open would keep it going.
+                    group.terminate();
                     status.await.ok()
                 }
             };
