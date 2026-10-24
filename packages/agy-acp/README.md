@@ -30,11 +30,11 @@ agy's print mode can't ask for permission: it denies what needs one. So permissi
 
 | Mode | agy | What happens |
 | --- | --- | --- |
-| `bypassPermissions` (default) | `--dangerously-skip-permissions` | Edits and runs commands without asking. |
-| `editsOnly` | `--mode accept-edits` | Reads and edits files; commands are denied, and the adapter says so. |
+| `bypassPermissions` | `--dangerously-skip-permissions` | Edits and runs commands without asking. |
+| `editsOnly` (default) | `--mode accept-edits` | Reads and edits files; commands are denied, and the adapter says so. |
 | `plan` | `--mode plan` | Plans without changing anything. |
 
-A new mode, model or effort applies from the next prompt. `FORGE_AGY_ACP_MODE=editsOnly` (or `plan`) makes new sessions start in that mode instead.
+A new mode, model or effort applies from the next prompt. `FORGE_AGY_ACP_MODE=bypassPermissions` (or `plan`) makes new sessions start in that mode instead. Forge switches sessions to `bypassPermissions` under its *Super user* permissions.
 
 ## Limits
 

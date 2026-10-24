@@ -12,9 +12,12 @@ import { FileMemory, diffs, mcpCall, outputContent, toolKind, toolPaths, toolTit
 
 const START_TIMEOUT_MS = 90_000;
 
-// agy's print mode can't ask for permission, so the default lets it work: it edits and
-// runs commands without asking. `editsOnly` isn't named `acceptEdits` on purpose: clients
-// that pick an agent's `acceptEdits` mode by policy (Forge does) would switch to it.
+// agy's print mode can't ask for permission, so whatever it may do, it does without asking.
+// Sessions start in `editsOnly`: edits, but no commands until the user picks Full access
+// (or the client does, for a policy that lets everything run: Forge's Super user picks
+// `bypassPermissions`). `editsOnly` isn't named `acceptEdits` on purpose: clients that pick
+// an agent's `acceptEdits` mode by policy (Forge does) would take it for one that asks
+// about commands.
 const MODES: acp.SessionMode[] = [
   { id: "bypassPermissions", name: "Full access", description: "Edits files and runs commands without asking." },
   { id: "editsOnly", name: "Edit files", description: "Reads and edits files without asking; runs no commands (agy can't ask for permission here)." },
@@ -23,10 +26,10 @@ const MODES: acp.SessionMode[] = [
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
-/** The mode new sessions start in: `FORGE_AGY_ACP_MODE` when it names one, else full access. */
+/** The mode new sessions start in: `FORGE_AGY_ACP_MODE` when it names one, else Edit files. */
 export function defaultMode(): PermissionMode {
   const wanted = process.env.FORGE_AGY_ACP_MODE;
-  return MODES.some((m) => m.id === wanted) ? (wanted as PermissionMode) : "bypassPermissions";
+  return MODES.some((m) => m.id === wanted) ? (wanted as PermissionMode) : "editsOnly";
 }
 
 interface Turn {

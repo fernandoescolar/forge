@@ -87,7 +87,7 @@ test("a session answers, edits files with whole-file diffs, and keeps its conver
 
     const session = await connection.newSession({ cwd, mcpServers: [] });
     assert.match(session.sessionId, /^conv-/);
-    assert.equal(session.modes?.currentModeId, "bypassPermissions");
+    assert.equal(session.modes?.currentModeId, "editsOnly", "no commands until the user lets them run");
     assert.deepEqual(session.configOptions?.find((o) => o.id === "model")?.type === "select" && (session.configOptions.find((o) => o.id === "model") as { options: { value: string }[] }).options.map((o) => o.value), ["default", "fast-1", "smart-2"]);
 
     const answer = await connection.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "hello" }] });
