@@ -70,8 +70,11 @@ impl Origin {
 }
 
 pub enum HostEvent {
-    /// Panels, commands or a tree changed; panels re-render.
+    /// Panels, commands or the layout changed (observers are notified too).
     Changed,
+    /// Extension panel `panel`'s tree changed: only its surface redraws, so observers
+    /// aren't notified (an extension refreshing a panel every second redrew them all).
+    Committed { panel: String },
     /// Extension panel `panel` should be the visible tab of its slot.
     Reveal { panel: String },
 }
@@ -308,6 +311,7 @@ impl ExtensionHost {
             self.layout_changed(cx);
         } else {
             cx.emit(HostEvent::Changed);
+            cx.notify();
         }
     }
 
@@ -385,9 +389,8 @@ impl ExtensionHost {
                 if !self.trees.contains_key(&panel) && ops.iter().all(|op| matches!(op, crate::tree::Op::Remove { .. })) {
                     return;
                 }
-                self.trees.entry(panel).or_default().apply(ops);
-                cx.emit(HostEvent::Changed);
-                cx.notify();
+                self.trees.entry(panel.clone()).or_default().apply(ops);
+                cx.emit(HostEvent::Committed { panel });
             }
             FromJs::Log { level, message } => {
                 let level = match level.as_str() {
@@ -400,6 +403,7 @@ impl ExtensionHost {
                 if level == log::Level::Error {
                     self.errors.push(message);
                     cx.emit(HostEvent::Changed);
+                    cx.notify();
                 }
             }
             FromJs::Call { method, args, id } => self.call(method, args, id, cx),
@@ -444,6 +448,7 @@ impl ExtensionHost {
                 self.panels.retain(|p| p.id != pid);
                 self.trees.remove(&pid);
                 cx.emit(HostEvent::Changed);
+                cx.notify();
                 self.reply(id, Ok(Value::Null));
             }
             "commands.register" => {
@@ -451,6 +456,7 @@ impl ExtensionHost {
                 self.commands.retain(|c| c.id != cmd.id);
                 self.commands.push(cmd);
                 cx.emit(HostEvent::Changed);
+                cx.notify();
                 self.reply(id, Ok(Value::Null));
             }
             "agents.registerTool" => {
@@ -469,6 +475,7 @@ impl ExtensionHost {
                 let cid = str_arg("id").unwrap_or_default();
                 self.commands.retain(|c| c.id != cid);
                 cx.emit(HostEvent::Changed);
+                cx.notify();
                 self.reply(id, Ok(Value::Null));
             }
             "settings.get" => {

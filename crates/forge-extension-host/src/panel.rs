@@ -167,6 +167,9 @@ pub struct ExtensionSlotView {
 impl ExtensionSlotView {
     fn new(slot: usize, host: Entity<ExtensionHost>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.subscribe(&host, |this, host, event: &HostEvent, cx| {
+            if matches!(event, HostEvent::Committed { .. }) {
+                return;
+            }
             if let HostEvent::Reveal { panel } = event {
                 if host.read(cx).slot_panels(this.slot).iter().any(|p| &p.id == panel) {
                     this.active = Some(panel.clone());

@@ -69,6 +69,8 @@ struct InputState {
     /// What was typed and sent to the extension (`onChange`) and not yet echoed back as
     /// its value: an echo is not a change to apply. Shared with the editor subscription.
     sent: Rc<RefCell<VecDeque<String>>>,
+    /// The placeholder set last: setting one builds a new editor for it.
+    placeholder: String,
     _subscription: Subscription,
 }
 
@@ -106,12 +108,17 @@ pub struct Surface {
     pub(crate) chart_hover: RefCell<HashMap<NodeId, usize>>,
     pub(crate) chart_bounds: Rc<RefCell<HashMap<NodeId, gpui::Bounds<Pixels>>>>,
     menu: Option<OpenMenu>,
+    /// The tree generation `sync` last ran for.
+    synced: Option<u64>,
     _subscription: Subscription,
 }
 
 impl Surface {
     pub fn new(host: Entity<ExtensionHost>, panel: String, fill: bool, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&host, |_, _, cx| cx.notify());
+        let subscription = cx.subscribe(&host, |this, _, event: &crate::host::HostEvent, cx| match event {
+            crate::host::HostEvent::Committed { panel } if *panel != this.panel => {}
+            _ => cx.notify(),
+        });
         Self {
             host,
             panel,
@@ -124,6 +131,7 @@ impl Surface {
             chart_hover: RefCell::default(),
             chart_bounds: Rc::default(),
             menu: None,
+            synced: None,
             _subscription: subscription,
         }
     }
@@ -220,7 +228,7 @@ impl Surface {
                 });
                 editor.update(cx, |e, cx| e.set_text(value.as_str(), window, cx));
                 sent.borrow_mut().clear();
-                self.inputs.insert(id, InputState { editor, kind: (multiline, password), language: None, value: known, sent, _subscription: subscription });
+                self.inputs.insert(id, InputState { editor, kind: (multiline, password), language: None, value: known, sent, placeholder: String::new(), _subscription: subscription });
             }
             if self.inputs[&id].language != language {
                 self.inputs.get_mut(&id).unwrap().language = language.clone();
@@ -243,6 +251,8 @@ impl Surface {
                 }
             };
             *state.value.borrow_mut() = value.clone();
+            let new_placeholder = (state.placeholder != placeholder).then(|| placeholder.clone());
+            state.placeholder = placeholder;
             let editor = state.editor.clone();
             let sent = state.sent.clone();
             editor.update(cx, |e, cx| {
@@ -254,7 +264,9 @@ impl Surface {
                     // Caught up: nothing typed is waiting for its echo.
                     sent.borrow_mut().clear();
                 }
-                e.set_placeholder_text(&placeholder, window, cx);
+                if let Some(placeholder) = &new_placeholder {
+                    e.set_placeholder_text(placeholder, window, cx);
+                }
             });
             if created && auto_focus {
                 editor.focus_handle(cx).focus(window, cx);
@@ -918,7 +930,12 @@ impl Surface {
 
 impl Render for Surface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync(window, cx);
+        // Inputs, grids, Markdown and images follow the tree: redo them when it changed.
+        let generation = self.tree(cx).map(|t| t.generation());
+        if generation != self.synced {
+            self.sync(window, cx);
+            self.synced = generation;
+        }
         let menu = self.menu.as_ref().map(|m| deferred(anchored().position(m.position).child(m.menu.clone())).with_priority(1));
         let content = match self.tree(cx) {
             Some(tree) => {
