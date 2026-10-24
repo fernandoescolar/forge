@@ -88,9 +88,9 @@ version = "0.0.1-beta"
 dependencies = [
  "async-trait",
  "dashmap",
+ "forge-process",
  "ide-api",
  "jsonrpc",
- "libc",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3724,6 +3724,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-process"
+version = "0.0.1-beta"
+dependencies = [
+ "anyhow",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "forge-run"
 version = "0.0.1-beta"
 dependencies = [
@@ -3763,6 +3772,7 @@ dependencies = [
  "dap",
  "editor",
  "forge-languages",
+ "forge-process",
  "forge-ui",
  "fs",
  "futures",
@@ -3790,11 +3800,11 @@ version = "0.0.1-beta"
 dependencies = [
  "anyhow",
  "db",
+ "forge-process",
  "futures",
  "fuzzy",
  "gpui",
  "log",
- "nix",
  "paths",
  "picker",
  "schemars",

@@ -5,7 +5,7 @@ use std::{path::Path, pin::pin, sync::atomic::{AtomicBool, Ordering}, time::Dura
 
 use anyhow::{Context as _, Result};
 use smol::io::{AsyncRead, AsyncReadExt as _};
-use util::command::Stdio;
+use std::process::Stdio;
 
 use crate::discovery::{Kind, TestProject};
 use crate::trx::{self, CaseResult};
@@ -142,16 +142,11 @@ pub fn debug_task(project: &TestProject, scope: &Scope) -> Option<(task::TaskTem
 /// Environment variables for the test command (empty: Forge's own).
 pub type Env = std::collections::HashMap<String, String>;
 
-/// A command for `program`, with `env` applied (its `PATH` finds `program`).
-pub fn command(program: &str, env: &Env) -> util::command::Command {
-    let program = env
-        .get("PATH")
-        .and_then(|path| std::env::split_paths(path).map(|dir| dir.join(program)).find(|candidate| candidate.is_file()))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| program.to_string());
-    let mut command = util::command::new_command(program);
-    command.envs(env.iter());
-    command
+/// A command for `program`, with `env` applied (its `PATH` finds `program`), in a
+/// process group of its own: stopping a run stops the test hosts it started too.
+pub fn command(program: &str, env: &Env) -> smol::process::Command {
+    let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    smol::process::Command::from(forge_process::command(program, &env))
 }
 
 /// Builds and runs `dotnet test` for `scope`, reading the TRX files it writes.
@@ -195,15 +190,17 @@ pub struct Executed {
 
 /// Runs `command`, copying its output into `live` as it comes (stdout lines through
 /// `show`, when given: tools whose stdout is JSON show its readable part). Dropping the
-/// future kills the process.
+/// future kills the process and what it started (its process group).
 ///
-/// Processes start with no blocked signals (`forge_ui::process`): `dotnet` hangs after its
+/// Processes start with no blocked signals (`forge_process`): `dotnet` hangs after its
 /// last test otherwise. The run ends when the process exits, not when its output closes:
 /// build servers that outlive it can keep the pipes open for minutes.
-pub async fn execute(mut command: util::command::Command, live: LiveLog, show: Option<fn(&str) -> Option<String>>) -> Result<Executed> {
+pub async fn execute(mut command: smol::process::Command, live: LiveLog, show: Option<fn(&str) -> Option<String>>) -> Result<Executed> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     live.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    let mut child = forge_ui::process::spawn_unblocked(command)?;
+    let mut child = forge_process::spawn_unblocked(move || command.spawn())?;
+    // Cancelling (dropping this future) stops the test hosts too, not only `dotnet`.
+    let mut group = forge_process::GroupGuard::new(Some(child.id()));
     let stdout_text = LiveLog::default();
     let stderr_text = LiveLog::default();
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -227,6 +224,8 @@ pub async fn execute(mut command: util::command::Command, live: LiveLog, show: O
         unreachable!()
     })
     .await?;
+    // It ended on its own: build servers it left behind stay for the next build.
+    group.disarm();
     // Give the pipes a moment to deliver what the process printed last.
     smol::future::or(drain.as_mut(), async {
         for _ in 0..20 {
@@ -335,5 +334,36 @@ mod tests {
 
         let one = futures::executor::block_on(run_dotnet(&project, &Scope::Methods(vec!["Demo.Tests.MathTests.Doubles".into()]), Default::default(), &Env::default())).unwrap();
         assert_eq!(one.results.len(), 2, "both theory rows, nothing else: {}", one.log);
+    }
+
+    /// Stopping a run stops the test host `dotnet test` started, not only `dotnet`:
+    /// `FORGE_TESTS_DOTNET_SLOW=/path/Slow.Tests.csproj cargo test -p forge-tests -- --ignored`
+    /// with a test that sleeps for minutes.
+    #[test]
+    #[ignore]
+    fn stopping_a_run_stops_the_test_host() {
+        let Ok(project) = std::env::var("FORGE_TESTS_DOTNET_SLOW") else {
+            return;
+        };
+        let project = std::path::PathBuf::from(project);
+        let host = format!("{}.runtimeconfig.json", project.file_stem().unwrap().to_string_lossy());
+        let running = || std::process::Command::new("pgrep").args(["-f", &host]).output().is_ok_and(|o| o.status.success());
+        let live = LiveLog::default();
+        smol::block_on(smol::future::or(
+            async {
+                run_dotnet(&project, &Scope::Project, live.clone(), &Env::default()).await.ok();
+                panic!("the slow test finished");
+            },
+            async {
+                // Until the test host runs the test, then a moment more.
+                while !live.lock().unwrap().contains("test files matched") {
+                    smol::Timer::after(Duration::from_millis(100)).await;
+                }
+                smol::Timer::after(Duration::from_secs(2)).await;
+                assert!(running(), "the test host runs while the test does");
+            },
+        ));
+        std::thread::sleep(forge_process::GRACE + Duration::from_secs(1));
+        assert!(!running(), "the test host went with the run");
     }
 }

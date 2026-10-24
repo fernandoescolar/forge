@@ -7,6 +7,7 @@ publish = false
 description = "UI pieces shared by Forge crates: panel drag & drop, dock persistence"
 
 [dependencies]
+forge-process = { path = "../forge-process" }
 fuzzy = { path = "../../vendor/zed/crates/fuzzy" }
 picker = { path = "../../vendor/zed/crates/picker" }
 db = { path = "../../vendor/zed/crates/db" }
@@ -29,8 +30,6 @@ ui = { path = "../../vendor/zed/crates/ui" }
 util = { path = "../../vendor/zed/crates/util", features = ["debug-embed"] }
 workspace = { path = "../../vendor/zed/crates/workspace" }
 
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"] }
 
 [dev-dependencies]
 futures = "0.3"

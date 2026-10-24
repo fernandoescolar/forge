@@ -37,21 +37,7 @@ struct AgentProcess {
     pid: Option<u32>,
 }
 
-/// How long an agent has to exit after SIGTERM before its whole group gets SIGKILL.
-const GRACE: Duration = Duration::from_secs(2);
 
-/// Stops the process group `pid` leads: SIGTERM now, SIGKILL after `GRACE` to whatever is
-/// left. Synchronous, so it works while dropping.
-#[cfg(unix)]
-fn terminate_group(pid: u32) {
-    let group = -(pid as i32);
-    // SAFETY: kill(2) only sends a signal; a group that is gone answers ESRCH.
-    unsafe { libc::kill(group, libc::SIGTERM) };
-    std::thread::spawn(move || {
-        std::thread::sleep(GRACE);
-        unsafe { libc::kill(group, libc::SIGKILL) };
-    });
-}
 
 struct AcpHandler {
     agent_id: String,
@@ -230,7 +216,7 @@ impl AgentProcess {
     fn terminate(&self, agent_id: &str) {
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            return terminate_group(pid);
+            return forge_process::Group(pid).terminate();
         }
         match self.child.try_lock() {
             Ok(mut child) => {
@@ -255,19 +241,14 @@ impl AgentService for AcpRuntime {
         if self.agents.contains_key(&spec.id) {
             return Err(IdeError::InvalidInput(format!("agent {} already started", spec.id)));
         }
-        let mut cmd = Command::new(&spec.command);
+        // In its own process group, so stopping it stops what it started too.
+        let mut cmd = Command::from(forge_process::command(&spec.command, &spec.env));
         cmd.args(&spec.args)
             .current_dir(spec.cwd.as_deref().unwrap_or(self.workspace.root()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        // Its own process group, so stopping it stops what it started too.
-        #[cfg(unix)]
-        cmd.process_group(0);
-        for (k, v) in &spec.env {
-            cmd.env(k, v);
-        }
         let mut child = cmd.spawn().map_err(|e| IdeError::Unavailable(format!("failed to start agent {} ({}): {e}", spec.id, spec.command)))?;
         let stdin = child.stdin.take().ok_or_else(|| IdeError::Internal("agent stdin unavailable".into()))?;
         let stdout = child.stdout.take().ok_or_else(|| IdeError::Internal("agent stdout unavailable".into()))?;
