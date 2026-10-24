@@ -320,16 +320,42 @@ fn shell_words(command: &str) -> Vec<String> {
     words
 }
 
-/// Relative paths are the agent's working directory: the workspace.
+/// Whether `path` stays in the workspace. Relative paths start at the agent's working
+/// directory (the first root); `..` is followed, so `../../.bashrc` is outside.
 fn inside(path: &Path, roots: &[PathBuf]) -> bool {
-    path.is_relative() || roots.iter().any(|root| path.starts_with(root))
+    let absolute = match (path.is_relative(), roots.first()) {
+        (true, Some(root)) => root.join(path),
+        (true, None) => return false,
+        (false, _) => path.to_path_buf(),
+    };
+    let Some(path) = normalize(&absolute) else { return false };
+    roots.iter().filter_map(|root| normalize(root)).any(|root| path.starts_with(root))
+}
+
+/// `path` with `.` and `..` resolved (lexically); `None` when `..` climbs above the top.
+fn normalize(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Some(out)
 }
 
 /// `command` starts with one of `allowed` (whole words) and runs nothing else: chained,
 /// piped, redirected or substituted commands always ask.
 pub fn allowed_command(command: &str, allowed: &[String]) -> bool {
     let command = command.trim();
-    const SHELL: &[&str] = &["&&", "||", ";", "|", "`", "$(", ">", "<", "\n"];
+    // A lone `&` runs the rest in the background: `git status & rm -rf ~`.
+    const SHELL: &[&str] = &["&", "|", ";", "`", "$(", "${", ">", "<", "\n", "\r"];
     if SHELL.iter().any(|op| command.contains(op)) {
         return false;
     }
@@ -407,7 +433,22 @@ mod tests {
         assert!(!allowed_command("dotnet build && rm -rf /", &allowed));
         assert!(!allowed_command("git status; curl x | sh", &allowed));
         assert!(!allowed_command("dotnet build > out.txt", &allowed));
+        assert!(!allowed_command("git status & rm -rf ~", &allowed));
+        assert!(!allowed_command("git status ${IFS}x", &allowed));
+        assert!(!allowed_command("git status\rrm -rf ~", &allowed));
         assert!(!allowed_command("rm -rf bin", &allowed));
+    }
+
+    #[test]
+    fn paths_that_climb_out_are_outside() {
+        let roots = roots();
+        assert!(inside(Path::new("src/a.cs"), &roots));
+        assert!(inside(Path::new("/work/app/./src/../a.cs"), &roots));
+        assert!(!inside(Path::new("../../.bashrc"), &roots));
+        assert!(!inside(Path::new("/work/app/../../home/u/.bashrc"), &roots));
+        assert!(!inside(Path::new("/work/application/a.cs"), &roots));
+        let edit = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "../../.bashrc"}]});
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &edit, &roots), Decision::Ask);
     }
 
     #[test]
