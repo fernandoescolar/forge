@@ -28,6 +28,16 @@ actions!(forge_output, [ToggleFocus, ClearOutput]);
 
 /// Lines kept per language server.
 const SERVER_CAPACITY: usize = 5_000;
+/// Lines of Forge's own log kept (as many as `app_log` keeps).
+const APP_CAPACITY: usize = 10_000;
+
+/// Keeps the last `capacity` lines.
+fn trim(lines: &mut Vec<String>, capacity: usize) {
+    if lines.len() > capacity {
+        let excess = lines.len() - capacity;
+        lines.drain(..excess);
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -54,6 +64,11 @@ pub struct OutputPanel {
     app_lines: Vec<String>,
     app_seen: u64,
     servers: BTreeMap<LanguageServerId, (SharedString, Vec<String>)>,
+    /// Lines of the source on show that haven't reached the editor yet: they go in
+    /// batches (a chatty language server sends hundreds a second).
+    unshown: Vec<String>,
+    /// Lines in the editor; past twice the source's capacity it is filled again from it.
+    editor_lines: usize,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -87,16 +102,18 @@ impl OutputPanel {
         // Forge's own log has no event; check for new lines a few times a second.
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(300)).await;
+                cx.background_executor().timer(Duration::from_millis(150)).await;
                 let Ok(()) = this.update_in(cx, |this, window, cx| {
                     let (lines, seen) = app_log::lines_since(this.app_seen);
                     this.app_seen = seen;
                     if !lines.is_empty() {
                         this.app_lines.extend(lines.iter().cloned());
+                        trim(&mut this.app_lines, APP_CAPACITY);
                         if this.source == Source::Forge {
-                            this.append_to_editor(&lines, window, cx);
+                            this.unshown.extend(lines);
                         }
                     }
+                    this.flush(window, cx);
                 }) else {
                     break;
                 };
@@ -112,6 +129,8 @@ impl OutputPanel {
             app_lines: Vec::new(),
             app_seen: 0,
             servers: BTreeMap::new(),
+            unshown: Vec::new(),
+            editor_lines: 0,
             _poll: poll,
             _subscriptions: vec![subscription],
         };
@@ -128,21 +147,34 @@ impl OutputPanel {
             .unwrap_or_else(|| format!("Server {id}").into())
     }
 
-    fn append_server(&mut self, id: LanguageServerId, lines: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn append_server(&mut self, id: LanguageServerId, lines: Vec<String>, _window: &mut Window, cx: &mut Context<Self>) {
         let name = self.server_name(id, cx);
         let entry = self.servers.entry(id).or_insert_with(|| (name, Vec::new()));
         entry.1.extend(lines.iter().cloned());
-        if entry.1.len() > SERVER_CAPACITY {
-            let excess = entry.1.len() - SERVER_CAPACITY;
-            entry.1.drain(..excess);
-        }
+        trim(&mut entry.1, SERVER_CAPACITY);
         if self.source == Source::Server(id) {
+            self.unshown.extend(lines);
+        }
+    }
+
+    /// Puts the lines waiting for the editor in it, in one edit.
+    fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unshown.is_empty() {
+            return;
+        }
+        let lines = std::mem::take(&mut self.unshown);
+        let capacity = if self.source == Source::Forge { APP_CAPACITY } else { SERVER_CAPACITY };
+        if self.editor_lines + lines.len() > 2 * capacity {
+            // Start again from the kept lines, so the editor doesn't grow without end.
+            self.show(self.source, window, cx);
+        } else {
             self.append_to_editor(&lines, window, cx);
         }
         cx.notify();
     }
 
     fn append_to_editor(&mut self, lines: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        self.editor_lines += lines.len();
         let mut text = lines.join("\n");
         text.push('\n');
         let follow = self.follow;
@@ -160,10 +192,12 @@ impl OutputPanel {
     /// Shows `source` in the editor.
     pub fn show(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
         self.source = source;
+        self.unshown.clear();
         let lines = match source {
             Source::Forge => self.app_lines.clone(),
             Source::Server(id) => self.servers.get(&id).map(|(_, lines)| lines.clone()).unwrap_or_default(),
         };
+        self.editor_lines = lines.len();
         let mut text = lines.join("\n");
         if !text.is_empty() {
             text.push('\n');
