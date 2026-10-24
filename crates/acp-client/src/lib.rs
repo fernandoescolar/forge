@@ -27,7 +27,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-type PermissionWaiters = DashMap<(String, String), oneshot::Sender<PermissionOutcome>>;
+/// Permission requests waiting for the user, by agent and request id, with the session
+/// that asked (cancelling a session's turn answers only its own).
+type PermissionWaiters = DashMap<(String, String), (Option<String>, oneshot::Sender<PermissionOutcome>)>;
 
 struct AgentProcess {
     peer: Arc<Peer>,
@@ -115,7 +117,8 @@ impl AcpHandler {
         let request_id = Uuid::new_v4().to_string();
         let key = (self.agent_id.clone(), request_id.clone());
         let (tx, rx) = oneshot::channel();
-        self.permissions.insert(key.clone(), tx);
+        let session = params.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        self.permissions.insert(key.clone(), (session, tx));
         let _ = self.events.send(IdeEvent::Agent(AgentEvent::PermissionRequested { agent_id: self.agent_id.clone(), request_id, params }));
         let outcome = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
             Ok(Ok(outcome)) => outcome,
@@ -346,9 +349,9 @@ impl AgentService for AcpRuntime {
 
     async fn cancel(&self, agent_id: &str, session_id: &str) -> IdeResult<()> {
         // Per ACP, pending permission requests must resolve as cancelled when the turn is cancelled.
-        let keys: Vec<_> = self.permissions.iter().filter(|e| e.key().0 == agent_id).map(|e| e.key().clone()).collect();
+        let keys: Vec<_> = self.permissions.iter().filter(|e| e.key().0 == agent_id && e.value().0.as_deref().is_none_or(|s| s == session_id)).map(|e| e.key().clone()).collect();
         for key in keys {
-            if let Some((_, tx)) = self.permissions.remove(&key) {
+            if let Some((_, (_, tx))) = self.permissions.remove(&key) {
                 let _ = tx.send(PermissionOutcome::Cancelled);
             }
         }
@@ -356,7 +359,7 @@ impl AgentService for AcpRuntime {
     }
 
     async fn respond_permission(&self, agent_id: &str, request_id: &str, outcome: PermissionOutcome) -> IdeResult<()> {
-        let (_, tx) = self
+        let (_, (_, tx)) = self
             .permissions
             .remove(&(agent_id.to_string(), request_id.to_string()))
             .ok_or_else(|| IdeError::NotFound(format!("permission request {request_id}")))?;
@@ -368,7 +371,7 @@ impl AgentService for AcpRuntime {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use tokio::sync::broadcast::Receiver;
+    use tokio::sync::mpsc::UnboundedReceiver as Receiver;
 
     /// Files on disk under a temp root, plus "open buffers" that shadow them, like an editor.
     struct TestWorkspace {
@@ -470,7 +473,7 @@ mod tests {
     async fn setup() -> Setup {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), "line one\nline two\n").unwrap();
-        let (events, rx) = tokio::sync::broadcast::channel(256);
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
         let ws = Arc::new(TestWorkspace { root: dir.path().canonicalize().unwrap(), buffers: Default::default() });
         let terminals = Arc::new(ProcessTerminals::default());
         let acp = Arc::new(AcpRuntime::new(events, ws.clone()).with_terminals(terminals.clone()));
@@ -559,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_methods_are_refused_without_a_host() {
         let dir = tempfile::tempdir().unwrap();
-        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
         let acp = AcpRuntime::new(events, ws);
         acp.start(mock_agent()).await.unwrap();
@@ -579,7 +582,7 @@ mod tests {
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
         let acp = AcpRuntime::new(events, ws);
         let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
@@ -612,7 +615,7 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
         let acp = AcpRuntime::new(events, ws);
 
@@ -663,7 +666,7 @@ mod tests {
     async fn terminal_auth_is_advertised_only_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
         for enabled in [false, true] {
-            let (events, _rx) = tokio::sync::broadcast::channel(16);
+            let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
             let acp = AcpRuntime::new(events, ws);
             let acp = if enabled { acp.with_terminal_auth().with_display_terminals() } else { acp };
@@ -679,7 +682,7 @@ mod tests {
     async fn agents_that_need_login_offer_terminal_auth() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("auth-marker");
-        let (events, mut rx) = tokio::sync::broadcast::channel(64);
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ws = Arc::new(TestWorkspace { root: dir.path().to_path_buf(), buffers: Default::default() });
         let acp = AcpRuntime::new(events, ws.clone()).with_terminal_auth();
         let mut spec = mock_agent();

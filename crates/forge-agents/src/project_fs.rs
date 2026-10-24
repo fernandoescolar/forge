@@ -94,15 +94,31 @@ impl ProjectFs {
         let (tx, mut rx) = mpsc::unbounded::<Request>();
         let project = project.downgrade();
         let fs = <dyn fs::Fs>::global(cx);
+        // Writes go one after another, in the order the agent sent them; one may wait for
+        // the user's review for minutes. Reads don't wait for them: each runs at once.
+        let (writes_tx, mut writes) = mpsc::unbounded::<(PathBuf, String, oneshot::Sender<IdeResult<()>>)>();
+        cx.spawn({
+            let (project, fs, policy) = (project.clone(), fs.clone(), policy.clone());
+            async move |cx: &mut AsyncApp| {
+                while let Some((path, text, reply)) = writes.next().await {
+                    let _ = reply.send(write(&project, &fs, &path, text, &policy, cx).await);
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(req) = rx.next().await {
                 match req {
                     Request::Read(path, reply) => {
                         let outside_ok = policy.permissions.get().may_touch_outside();
-                        let _ = reply.send(read(&project, &fs, &path, outside_ok, cx).await);
+                        let (project, fs) = (project.clone(), fs.clone());
+                        cx.spawn(async move |cx: &mut AsyncApp| {
+                            let _ = reply.send(read(&project, &fs, &path, outside_ok, cx).await);
+                        })
+                        .detach();
                     }
                     Request::Write(path, text, reply) => {
-                        let _ = reply.send(write(&project, &fs, &path, text, &policy, cx).await);
+                        writes_tx.unbounded_send((path, text, reply)).ok();
                     }
                 }
             }
@@ -336,6 +352,32 @@ mod tests {
         assert!(fs.load(Path::new("/home/.bashrc")).await.is_err(), "nothing was written outside");
         adapter.write_file(Path::new("new/b.txt"), "b".into()).await.unwrap();
         assert_eq!(fs.load(Path::new("/home/root/new/b.txt")).await.unwrap(), "b");
+    }
+
+    /// A write waiting for the user's review doesn't hold up the agent's reads.
+    #[gpui::test]
+    async fn reads_go_ahead_while_a_write_waits_for_review(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/root", json!({ "a.txt": "a", "b.txt": "b" })).await;
+        let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let (tx, mut reviews) = mpsc::unbounded();
+        let policy = ReviewPolicy { reviews: Some(tx), ..Default::default() };
+        let adapter = Arc::new(cx.update(|cx| ProjectFs::new(&project, "/root".into(), policy, cx)));
+        let write = cx.background_spawn({
+            let adapter = adapter.clone();
+            async move { adapter.write_file(Path::new("a.txt"), "new".into()).await }
+        });
+        let review = reviews.next().await.unwrap();
+        assert_eq!(adapter.read_file(Path::new("b.txt")).await.unwrap(), "b", "read while the review waits");
+        review.reply.send(ReviewDecision::Accept).unwrap();
+        write.await.unwrap();
+        assert_eq!(adapter.read_file(Path::new("a.txt")).await.unwrap(), "new");
     }
 
     #[gpui::test]

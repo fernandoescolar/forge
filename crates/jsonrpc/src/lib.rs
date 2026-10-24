@@ -112,6 +112,12 @@ impl Peer {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.insert(id, tx);
+        // The reader may have closed (and failed every pending request) in between: this one
+        // would wait for its whole timeout, an hour for a prompt.
+        if self.is_closed() {
+            self.pending.remove(&id);
+            return Err(IdeError::Unavailable(format!("connection closed, cannot send {method}")));
+        }
         if let Err(e) = self.write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).await {
             self.pending.remove(&id);
             return Err(e);

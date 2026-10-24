@@ -464,7 +464,7 @@ impl Thread {
         };
         let languages = workspace.app_state().languages.clone();
 
-        let (bus, mut bus_rx) = tokio::sync::broadcast::channel::<IdeEvent>(1024);
+        let (bus, mut bus_rx) = tokio::sync::mpsc::unbounded_channel::<IdeEvent>();
         let review_writes = config.as_ref().is_none_or(|c| c.review_writes);
         let approved_edits = ApprovedEdits::default();
         let (review_tx, mut review_rx) = mpsc::unbounded::<WriteReview>();
@@ -485,24 +485,9 @@ impl Thread {
         // would otherwise keep them (and what they started) running until Forge quits.
         cx.on_release(|this: &mut Self, _| this.runtime.kill_all()).detach();
 
-        // broadcast (tokio) → unbounded (GPUI): the thread consumes events on the UI thread.
-        let (tx, mut rx) = mpsc::unbounded();
-        Tokio::spawn(cx, async move {
-            loop {
-                match bus_rx.recv().await {
-                    Ok(ev) => {
-                        if tx.unbounded_send(ev).is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => log::warn!("agent thread dropped {n} events"),
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-        .detach();
+        // The thread consumes the runtime's events on the UI thread, in order.
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
-            while let Some(ev) = rx.next().await {
+            while let Some(ev) = bus_rx.recv().await {
                 if this.update_in(cx, |this, window, cx| this.handle_event(ev, window, cx)).is_err() {
                     break;
                 }

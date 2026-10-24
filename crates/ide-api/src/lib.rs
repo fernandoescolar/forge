@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum IdeError {
@@ -71,7 +71,9 @@ pub enum IdeEvent {
     Agent(AgentEvent),
 }
 
-pub type EventBus = broadcast::Sender<IdeEvent>;
+/// Where the runtime reports to its one consumer (the thread). Unbounded: an event left
+/// out (a permission request, a piece of the transcript) can't be made up later.
+pub type EventBus = mpsc::UnboundedSender<IdeEvent>;
 
 /// File access granted to agents (`fs/read_text_file`, `fs/write_text_file`).
 #[async_trait]
