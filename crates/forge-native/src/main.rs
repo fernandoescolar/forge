@@ -54,7 +54,7 @@ fn main() {
     }
 
     // Same filtering and stderr output as before; the Output panel also gets a copy.
-    forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")));
+    forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn,tracing::span=warn")));
 
     // Keep Forge's settings, database and caches apart from an installed Zed.
     let data_dir = forge_data_dir();

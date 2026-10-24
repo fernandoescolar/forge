@@ -211,18 +211,23 @@ pub fn file_name(info: &PackageInfo) -> String {
 mod tests {
     use super::*;
 
+    /// A platform other than this machine's, whose sidecar build the package also carries.
+    fn other_platform() -> &'static str {
+        if platform() == "linux-x64" { "darwin-arm64" } else { "linux-x64" }
+    }
+
     fn extension(dir: &Path) {
         std::fs::create_dir_all(dir.join("dist")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules/react")).unwrap();
         std::fs::create_dir_all(dir.join(format!("bin/{}", platform()))).unwrap();
-        std::fs::create_dir_all(dir.join("bin/linux-x64")).unwrap();
+        std::fs::create_dir_all(dir.join(format!("bin/{}", other_platform()))).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"name":"db","version":"1.2.0","forge":{"sidecars":["tool"]}}"#).unwrap();
         std::fs::write(dir.join("dist/extension.js"), "var __forgeExtension = {};").unwrap();
         std::fs::write(dir.join("src/extension.tsx"), "source").unwrap();
         std::fs::write(dir.join("node_modules/react/index.js"), "").unwrap();
         std::fs::write(dir.join(format!("bin/{}/tool", platform())), "#!/bin/sh\necho hi\n").unwrap();
-        std::fs::write(dir.join("bin/linux-x64/tool"), "elf").unwrap();
+        std::fs::write(dir.join(format!("bin/{}/tool", other_platform())), "elf").unwrap();
     }
 
     #[test]
@@ -230,7 +235,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         extension(tmp.path());
         let names: Vec<String> = files(tmp.path()).unwrap().into_iter().map(|(n, ..)| n).collect();
-        let mut expected = vec![format!("bin/{}/tool", platform()), "bin/linux-x64/tool".into(), "dist/extension.js".into(), "package.json".into()];
+        let mut expected = vec![format!("bin/{}/tool", platform()), format!("bin/{}/tool", other_platform()), "dist/extension.js".into(), "package.json".into()];
         expected.sort();
         assert_eq!(names, expected, "no sources or dependencies");
         let info = inspect(tmp.path()).unwrap();
@@ -288,7 +293,7 @@ mod tests {
         smol::block_on(pack(&source, &package)).unwrap();
         let extensions = tmp.path().join("extensions");
         let error = smol::block_on(unpack(&package, &extensions)).err().expect("refused");
-        assert!(format!("{error:#}").contains("linux-x64"), "{error:#}");
+        assert!(format!("{error:#}").contains(other_platform()), "{error:#}");
         assert_eq!(std::fs::read_dir(&extensions).unwrap().count(), 0, "the unpacked files are removed");
 
         std::fs::remove_dir_all(source.join("bin")).unwrap();
