@@ -1,10 +1,10 @@
 diff --git a/crates/git_ui/src/commit_context_menu.rs b/crates/git_ui/src/commit_context_menu.rs
-index d7c8142..af6455f 100644
+index f727772..1676574 100644
 --- a/crates/git_ui/src/commit_context_menu.rs
 +++ b/crates/git_ui/src/commit_context_menu.rs
-@@ -22,6 +22,18 @@ actions!(
+@@ -23,6 +23,18 @@ actions!(
  const COMMIT_TAG_LIST_WIDTH_IN_REMS: Rems = rems(10.);
- const CUSTOM_GIT_COMMANDS_DOCS_SLUG: &str = "tasks#custom-git-commands";
+ pub(crate) const CUSTOM_GIT_COMMANDS_DOCS_SLUG: &str = "tasks#custom-git-commands";
  
 +/// Entries an application adds to the commit context menu (Git Graph, Git panel), after
 +/// the built-in ones: called with the menu, the commit, its repository and the workspace,
@@ -21,7 +21,7 @@ index d7c8142..af6455f 100644
  pub(crate) struct CommitContextMenuData {
      pub(crate) sha: Oid,
      pub(crate) tag_names: Vec<SharedString>,
-@@ -55,7 +67,9 @@ pub(crate) fn commit_context_menu(
+@@ -56,7 +68,9 @@ pub(crate) fn commit_context_menu(
          None => format!("Commit {sha_short}"),
      };
  
@@ -32,7 +32,7 @@ index d7c8142..af6455f 100644
          context_menu
              .context(focus_handle)
              .header(header)
-@@ -139,6 +153,12 @@ pub(crate) fn commit_context_menu(
+@@ -154,6 +168,12 @@ pub(crate) fn commit_context_menu(
                      );
                  })
              })
@@ -46,10 +46,10 @@ index d7c8142..af6455f 100644
                  menu = menu.separator().header("Custom Commands");
  
 diff --git a/crates/git_ui/src/git_ui.rs b/crates/git_ui/src/git_ui.rs
-index 9a021d6..4e9eae4 100644
+index e6d29b7..a9856c9 100644
 --- a/crates/git_ui/src/git_ui.rs
 +++ b/crates/git_ui/src/git_ui.rs
-@@ -36,6 +36,7 @@ use crate::{
+@@ -39,6 +39,7 @@ use crate::{
  pub mod branch_diff;
  pub mod branch_picker;
  mod commit_context_menu;

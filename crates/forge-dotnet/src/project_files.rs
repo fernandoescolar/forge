@@ -306,6 +306,7 @@ impl VersionHints {
                         padding_left: false,
                         padding_right: false,
                         tooltip: None,
+                        text_edits: None,
                         resolve_state: ResolveState::Resolved,
                     };
                     Inlay::hint(id, snapshot.anchor_after(MultiBufferOffset(offset)), &hint)

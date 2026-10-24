@@ -58,8 +58,10 @@ fn register_icon_theme(cx: &App) -> Result<()> {
         file_icons: base.file_icons.iter().map(|(k, v)| (k.clone(), IconDefinitionContent { path: v.path.clone() })).collect(),
     };
     let family = IconThemeFamilyContent { name: ICON_THEME.into(), author: "Forge".into(), themes: vec![content] };
-    // Asset paths: an empty root leaves them as they are.
-    ThemeRegistry::global(cx).load_icon_theme(family, Path::new(""))
+    // The registry takes the theme as JSON; the path only identifies it. Asset paths: an
+    // empty root leaves them as they are.
+    let contents = serde_json::to_vec(&family)?;
+    ThemeRegistry::global(cx).load_icon_theme(Path::new(ICON_THEME), Path::new(""), contents)
 }
 
 /// Syntax highlighting maps tree-sitter captures through the active theme. The language

@@ -16,6 +16,7 @@ mod settings_view;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod single_instance;
 mod open_editors;
+mod prompts;
 mod statusbar;
 mod theme;
 mod titlebar;
@@ -177,6 +178,7 @@ fn main() {
         forge_output::init(cx);
         forge_git::init(cx);
         forge_dotnet::init(cx);
+        prompts::init(cx);
         menus::init(cx);
         windows::init(cx);
         open_editors::init(cx);

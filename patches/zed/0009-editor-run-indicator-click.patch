@@ -1,5 +1,5 @@
 diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
-index 5c91431..add6ba1 100644
+index ee77937..90418d9 100644
 --- a/crates/editor/src/editor.rs
 +++ b/crates/editor/src/editor.rs
 @@ -41,7 +41,7 @@ mod mouse_context_menu;

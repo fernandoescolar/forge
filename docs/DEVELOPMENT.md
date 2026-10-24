@@ -15,7 +15,7 @@ sudo apt install libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-d
 
 (`vendor/zed/script/linux` lists them for other distributions.) Forge draws with Vulkan, under Wayland or X11; `FORGE_WINDOW_DECORATIONS=server` asks the desktop to draw the window's frame instead of Forge.
 
-Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.22.0`) and cloned shallowly:
+Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.25.3`) and cloned shallowly:
 
 ```bash
 git clone --recurse-submodules --shallow-submodules https://github.com/fernandoescolar/forge.git forge-ide
@@ -125,9 +125,9 @@ The Linux tarball holds `forge/bin/forge`, the bundled extensions in `forge/shar
 Forge uses Zed's crates by path from `vendor/zed`, with a few small patches in `patches/zed/`. [ZED_INTEGRATION.md](ZED_INTEGRATION.md) explains the patches and how to move to a new Zed release:
 
 ```bash
-scripts/vendor-zed.sh v1.23.0      # fetch and check out the tag, re-apply the patches
+scripts/vendor-zed.sh v1.26.0      # fetch and check out the tag, re-apply the patches
 # refresh [patch]/[profile] in Cargo.toml and Cargo.lock from vendor/zed, then build and test
-git add vendor/zed Cargo.toml Cargo.lock && git commit -m "Update Zed to v1.23.0"
+git add vendor/zed Cargo.toml Cargo.lock && git commit -m "Update Zed to v1.26.0"
 ```
 
 ## Conventions

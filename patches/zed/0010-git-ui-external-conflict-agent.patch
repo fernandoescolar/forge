@@ -47,10 +47,10 @@ index 36b9306..5c70a2b 100644
              || self.conflicted_paths.is_empty()
              || self.dismissed
 diff --git a/crates/git_ui/src/git_ui.rs b/crates/git_ui/src/git_ui.rs
-index 7038a7a..9a021d6 100644
+index 24d2a50..e6d29b7 100644
 --- a/crates/git_ui/src/git_ui.rs
 +++ b/crates/git_ui/src/git_ui.rs
-@@ -58,7 +58,7 @@ pub mod text_diff_view;
+@@ -61,7 +61,7 @@ pub mod text_diff_view;
  pub mod unstaged_diff;
  
  pub use blame_ui::GitBlameStatus;

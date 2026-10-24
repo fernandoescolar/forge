@@ -58,6 +58,7 @@ gpui = { path = "../../vendor/zed/crates/gpui" }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
 gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
 language = { path = "../../vendor/zed/crates/language" }
+markdown = { path = "../../vendor/zed/crates/markdown" }
 languages = { path = "../../vendor/zed/crates/languages", features = ["load-grammars"] }
 menu = { path = "../../vendor/zed/crates/menu" }
 node_runtime = { path = "../../vendor/zed/crates/node_runtime" }

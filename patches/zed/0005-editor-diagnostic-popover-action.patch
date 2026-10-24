@@ -1,8 +1,8 @@
 diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
-index 420da52..4024b5f 100644
+index 326f21d..ee77937 100644
 --- a/crates/editor/src/editor.rs
 +++ b/crates/editor/src/editor.rs
-@@ -118,7 +118,7 @@ pub use git::{
+@@ -119,7 +119,7 @@ pub use git::{
  pub(crate) use git::{DiffHunkKey, StoredReviewComment};
  use git::{DiffReviewDragState, DiffReviewOverlay, InlineBlamePopover};
  pub(crate) use git::{DisplayDiffHunk, PhantomDiffReviewIndicator};
@@ -12,7 +12,7 @@ index 420da52..4024b5f 100644
  pub use inline_input::InlineInputState;
  pub(crate) use inline_input::{InlineInputHistoryDirection, InlineInputPreview};
 diff --git a/crates/editor/src/hover_popover.rs b/crates/editor/src/hover_popover.rs
-index f3d0c6c..32c3489 100644
+index a006d80..6b34cc1 100644
 --- a/crates/editor/src/hover_popover.rs
 +++ b/crates/editor/src/hover_popover.rs
 @@ -27,7 +27,7 @@ use std::{
@@ -24,7 +24,7 @@ index f3d0c6c..32c3489 100644
  use url::Url;
  use util::TryFutureExt;
  use workspace::{OpenOptions, OpenVisible, Workspace};
-@@ -1349,6 +1349,17 @@ impl InfoPopover {
+@@ -1385,6 +1385,17 @@ impl InfoPopover {
      }
  }
  
@@ -42,7 +42,7 @@ index f3d0c6c..32c3489 100644
  pub struct DiagnosticPopover {
      pub(crate) local_diagnostic: DiagnosticEntry<Anchor>,
      markdown: Entity<Markdown>,
-@@ -1452,15 +1463,43 @@ impl DiagnosticPopover {
+@@ -1489,15 +1500,43 @@ impl DiagnosticPopover {
                                  ),
                              ),
                      )

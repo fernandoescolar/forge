@@ -93,7 +93,7 @@ index 0a82a30..3a61ead 100644
                              .child(
                                  v_flex()
 diff --git a/crates/workspace/src/security_modal.rs b/crates/workspace/src/security_modal.rs
-index 928bb59..e4772bb 100644
+index 1017986..42e0a59 100644
 --- a/crates/workspace/src/security_modal.rs
 +++ b/crates/workspace/src/security_modal.rs
 @@ -193,7 +193,7 @@ impl Render for SecurityModal {

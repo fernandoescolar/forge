@@ -1,4 +1,5 @@
-//! The macOS menu bar and the app-level actions behind it.
+//! The menu bar (macOS's global one, or the row in the title bar elsewhere) and the
+//! app-level actions behind it.
 //!
 //! Most items dispatch Zed's own actions (editor, workspace, search…). Actions that Zed's
 //! `zed` crate normally handles (settings files, zoom, window management, About) are
@@ -304,11 +305,11 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
         }
     }
 
-    vec![
-        Menu::new("Forge").items([
-            MenuItem::action("About Forge", About),
-            MenuItem::action("Check for Updates…", forge_update::CheckForUpdates),
-            MenuItem::separator(),
+    // The application menu is a macOS thing. Elsewhere its entries live where Windows and
+    // Linux users expect them: preferences and Quit at the end of File, updates in Help.
+    let macos = cfg!(target_os = "macos");
+    let preferences = || {
+        vec![
             MenuItem::action("Settings…", crate::settings_view::OpenSettings),
             MenuItem::submenu(Menu::new("Settings Files").items([
                 MenuItem::action("Open Settings File", OpenSettingsFile),
@@ -319,16 +320,11 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             ])),
             MenuItem::action("Select Theme…", zed_actions::theme_selector::Toggle::default()),
             MenuItem::action("Colour Palettes…", OpenPalettesFolder),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Hide Forge", Hide),
-            MenuItem::action("Hide Others", HideOthers),
-            MenuItem::action("Show All", ShowAll),
-            MenuItem::separator(),
-            MenuItem::action("Quit Forge", crate::Quit),
-        ]),
-        Menu::new("File").items([
+        ]
+    };
+    let quit_label = if cfg!(target_os = "windows") { "Exit" } else { "Quit Forge" };
+
+    let mut file_menu = vec![
             MenuItem::action("New Window", workspace::NewWindow),
             MenuItem::submenu(Menu::new("New").items([
                 MenuItem::action("File", workspace::NewFile),
@@ -350,7 +346,48 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Close All Editors", workspace::CloseAllItemsAndPanes::default()),
             MenuItem::action("Close Project", workspace::CloseProject),
             MenuItem::action("Close Window", workspace::CloseWindow),
-        ]),
+    ];
+    if !macos {
+        file_menu.push(MenuItem::separator());
+        file_menu.extend(preferences());
+        file_menu.push(MenuItem::separator());
+        file_menu.push(MenuItem::action(quit_label, crate::Quit));
+    }
+
+    let mut help_menu = vec![
+        MenuItem::action("Welcome", ShowWelcome),
+        MenuItem::action("Forge Guide", OpenGuide),
+        MenuItem::action("Command Palette…", zed_actions::command_palette::Toggle),
+        MenuItem::separator(),
+        MenuItem::action("Agent Client Protocol", OpenBrowser { url: "https://agentclientprotocol.com".into() }),
+        MenuItem::action("Editor Features Reference", OpenBrowser { url: "https://zed.dev/docs".into() }),
+        MenuItem::action("Key Bindings Reference", OpenDefaultKeymap),
+        MenuItem::separator(),
+    ];
+    if !macos {
+        help_menu.push(MenuItem::action("Check for Updates…", forge_update::CheckForUpdates));
+    }
+    help_menu.push(MenuItem::action("About Forge", About));
+
+    let mut menus = Vec::new();
+    if macos {
+        menus.push(Menu::new("Forge").items([
+            MenuItem::action("About Forge", About),
+            MenuItem::action("Check for Updates…", forge_update::CheckForUpdates),
+            MenuItem::separator(),
+        ]).items(preferences()).items([
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Forge", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
+            MenuItem::separator(),
+            MenuItem::action("Quit Forge", crate::Quit),
+        ]));
+    }
+    menus.push(Menu::new("File").items(file_menu));
+    menus.extend([
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", ed::Undo, OsAction::Undo),
             MenuItem::os_action("Redo", ed::Redo, OsAction::Redo),
@@ -542,18 +579,9 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("New Window", workspace::NewWindow),
         ]),
-        Menu::new("Help").items([
-            MenuItem::action("Welcome", ShowWelcome),
-            MenuItem::action("Forge Guide", OpenGuide),
-            MenuItem::action("Command Palette…", zed_actions::command_palette::Toggle),
-            MenuItem::separator(),
-            MenuItem::action("Agent Client Protocol", OpenBrowser { url: "https://agentclientprotocol.com".into() }),
-            MenuItem::action("Editor Features Reference", OpenBrowser { url: "https://zed.dev/docs".into() }),
-            MenuItem::action("Key Bindings Reference", OpenDefaultKeymap),
-            MenuItem::separator(),
-            MenuItem::action("About Forge", About),
-        ]),
-    ]
+        Menu::new("Help").items(help_menu),
+    ]);
+    menus
 }
 
 /// Lets you choose what Run and Debug start (like the picker in the title bar).

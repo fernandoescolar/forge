@@ -1,5 +1,5 @@
 diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
-index 420da52..a5029d2 100644
+index dc7cdad..326f21d 100644
 --- a/crates/editor/src/editor.rs
 +++ b/crates/editor/src/editor.rs
 @@ -41,6 +41,7 @@ mod mouse_context_menu;
@@ -20,10 +20,10 @@ index 420da52..a5029d2 100644
      selections_collection::resolve_selections_wrapping_blocks,
      semantic_tokens::SemanticTokenState,
 diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
-index 4e96f08..6cb2346 100644
+index 77aa1db..8fafc52 100644
 --- a/crates/editor/src/element.rs
 +++ b/crates/editor/src/element.rs
-@@ -2815,7 +2815,12 @@ impl EditorElement {
+@@ -2734,7 +2734,12 @@ impl EditorElement {
                          .get((display_row.0.saturating_sub(gutter.range.start.0)) as usize)
                          .and_then(|row_info| Some((row_info.buffer_id?, row_info.buffer_row?)))
                          .and_then(|(buffer_id, buffer_row)| {
