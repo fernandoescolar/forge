@@ -116,13 +116,48 @@ impl ProjectFs {
     }
 }
 
+/// The worktrees' folders, as given (not resolved).
+fn worktree_roots(project: &Project, cx: &App) -> Vec<PathBuf> {
+    project.worktrees(cx).map(|wt| wt.read(cx).abs_path().to_path_buf()).collect()
+}
+
+/// `path` really is inside one of `roots` once symlinks are followed: a link in the
+/// project to `~` must not take the agent out of it. Files that don't exist yet count by
+/// their nearest existing folder.
+async fn resolves_inside(fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, roots: &[PathBuf]) -> bool {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    let real = loop {
+        match fs.canonicalize(existing).await {
+            Ok(real) => break missing.iter().rev().fold(real, |p: PathBuf, name| p.join(name)),
+            Err(_) => {
+                // `..` after a missing folder can't be resolved: refuse it.
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else { return false };
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+        }
+    };
+    for root in roots {
+        let root = fs.canonicalize(root).await.unwrap_or_else(|_| root.clone());
+        if real.starts_with(&root) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn read(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, outside_ok: bool, cx: &mut AsyncApp) -> IdeResult<String> {
-    let open = project
+    let (open, roots) = project
         .update(cx, |project, cx| {
-            let project_path = project.find_project_path(path, cx)?;
-            Some(project.get_open_buffer(&project_path, cx).map(|b| b.read(cx).text()))
+            let open = project.find_project_path(path, cx).map(|project_path| project.get_open_buffer(&project_path, cx).map(|b| b.read(cx).text()));
+            (open, worktree_roots(project, cx))
         })
         .map_err(|_| IdeError::Unavailable("project closed".into()))?;
+    let open = match open {
+        Some(open) if resolves_inside(fs, path, &roots).await => Some(open),
+        _ => None,
+    };
     match open {
         None if outside_ok => fs.load(path).await.map_err(|e| IdeError::Io(format!("{e:#}"))),
         None => Err(IdeError::InvalidInput(format!("{} is outside the project", path.display()))),
@@ -133,17 +168,17 @@ async fn read(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, pa
 
 async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, text: String, policy: &ReviewPolicy, cx: &mut AsyncApp) -> IdeResult<()> {
     let permissions = policy.permissions.get();
-    let target = match project
+    let (target, roots) = project
         .update(cx, |project, cx| {
-            let project_path = project.find_project_path(path, cx)?;
-            Some(project.get_open_buffer(&project_path, cx))
+            let target = project.find_project_path(path, cx).map(|project_path| project.get_open_buffer(&project_path, cx));
+            (target, worktree_roots(project, cx))
         })
-        .map_err(|_| IdeError::Unavailable("project closed".into()))?
-    {
-        Some(target) => target,
+        .map_err(|_| IdeError::Unavailable("project closed".into()))?;
+    let target = match target {
+        Some(target) if resolves_inside(fs, path, &roots).await => target,
         // Outside the project: written straight to disk, when allowed.
-        None if permissions.may_touch_outside() => None,
-        None => return Err(IdeError::InvalidInput(format!("{} is outside the project", path.display()))),
+        _ if permissions.may_touch_outside() => None,
+        _ => return Err(IdeError::InvalidInput(format!("{} is outside the project", path.display()))),
     };
 
     let old_text = match &target {
@@ -278,6 +313,29 @@ mod tests {
         adapter.write_file(Path::new("closed.txt"), "new".into()).await.unwrap();
         assert_eq!(fs.load(Path::new("/root/closed.txt")).await.unwrap(), "new");
         assert!(adapter.write_file(Path::new("/tmp/outside.txt"), "x".into()).await.is_err());
+    }
+
+    /// A symlink in the project to a folder outside it doesn't take agents out of it.
+    #[gpui::test]
+    async fn symlinks_dont_lead_out_of_the_project(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/home", json!({ ".ssh": { "id_rsa": "secret" }, "root": { "a.txt": "a" } })).await;
+        fs.insert_symlink("/home/root/ref", "/home".into()).await;
+        let project = Project::test(fs.clone(), ["/home/root".as_ref()], cx).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let adapter = cx.update(|cx| ProjectFs::new(&project, "/home/root".into(), ReviewPolicy::default(), cx));
+
+        assert_eq!(adapter.read_file(Path::new("a.txt")).await.unwrap(), "a");
+        assert!(matches!(adapter.read_file(Path::new("ref/.ssh/id_rsa")).await, Err(IdeError::InvalidInput(_))));
+        assert!(matches!(adapter.write_file(Path::new("ref/.bashrc"), "x".into()).await, Err(IdeError::InvalidInput(_))));
+        assert!(fs.load(Path::new("/home/.bashrc")).await.is_err(), "nothing was written outside");
+        adapter.write_file(Path::new("new/b.txt"), "b".into()).await.unwrap();
+        assert_eq!(fs.load(Path::new("/home/root/new/b.txt")).await.unwrap(), "b");
     }
 
     #[gpui::test]
