@@ -294,25 +294,31 @@ export function KeyView({ connectionId, db, keyName, keyEscaped, onRenamed, onDe
 
   return (
     <View style={{ grow: true }}>
-      <View style={{ direction: 'row', gap: 6, paddingX: 8, paddingY: 4, borderSide: 'bottom', wrap: true }}>
-        <Text style={{ weight: 'medium', size: 'sm' }}>{TYPE_LABELS[type] ?? type}</Text>
+      {/* The key on its own row, whole (long keys wrap), to select or copy; renaming edits it there. */}
+      <View style={{ direction: 'row', gap: 6, paddingX: 8, paddingY: 6, borderSide: 'bottom' }}>
+        <Text style={{ size: 'sm', color: 'muted' }}>Key</Text>
         {renaming === null ? (
-          <Text style={{ mono: true, size: 'sm', truncate: true }} selectable>
-            {name}
-          </Text>
-        ) : (
-          <View style={{ width: 280 }}>
-            <Input value={renaming} onChange={setRenaming} onSubmit={rename} autoFocus />
-          </View>
-        )}
-        {renaming === null ? (
-          <Button icon="pencil" variant="ghost" tooltip="Rename" onClick={() => setRenaming(name)} />
+          <>
+            <View style={{ grow: true, minWidth: 0 }}>
+              <Text style={{ mono: true, size: 'sm' }} selectable>
+                {name}
+              </Text>
+            </View>
+            <Button icon="copy" variant="ghost" tooltip="Copy Key" onClick={() => forge.clipboard.writeText(name)} />
+            <Button icon="pencil" variant="ghost" tooltip="Rename" onClick={() => setRenaming(name)} />
+          </>
         ) : (
           <>
-            <Button label="Rename" variant="filled" onClick={rename} />
+            <View style={{ grow: true, minWidth: 0 }}>
+              <Input value={renaming} multiline onChange={setRenaming} onSubmit={rename} autoFocus />
+            </View>
+            <Button label="Rename" variant="filled" tooltip={forge.shortcut('secondary-enter')} onClick={rename} />
             <Button label="Cancel" variant="ghost" onClick={() => setRenaming(null)} />
           </>
         )}
+      </View>
+      <View style={{ direction: 'row', gap: 6, paddingX: 8, paddingY: 4, borderSide: 'bottom', wrap: true }}>
+        <Text style={{ weight: 'medium', size: 'sm' }}>{TYPE_LABELS[type] ?? type}</Text>
         <Text style={{ size: 'sm', color: 'muted' }}>
           {type === 'string' ? `${value.length.toLocaleString()} bytes` : `${value.length.toLocaleString()} ${type === 'hash' ? 'fields' : type === 'stream' ? 'entries' : 'items'}`}
         </Text>

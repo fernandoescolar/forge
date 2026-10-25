@@ -35,7 +35,7 @@ http-client.env.json environment the user selected. Returns status, headers, tim
 async fn http_request(ide: ToolContext, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let receiver = match str_arg(&args, "path") {
         Some(path) => {
-            let file = ide.resolve(&path);
+            let file = ide.resolve(&path)?;
             let line = line_arg(&args, "line").ok_or("`line` (1-based) of the request in the .http file is missing.")?;
             ide.workspace.update_in(cx, |ws, window, cx| crate::send_request_at(ws, &file, line - 1, window, cx)).map_err(|_| closed())?
         }

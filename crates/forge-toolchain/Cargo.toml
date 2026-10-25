@@ -11,8 +11,10 @@ db = { path = "../../vendor/zed/crates/db" }
 forge-process = { path = "../forge-process" }
 forge-ui = { path = "../forge-ui" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
+log = "0.4"
 project = { path = "../../vendor/zed/crates/project" }
 serde_json.workspace = true
+serde_json_lenient = "0.2"
 task = { path = "../../vendor/zed/crates/task" }
 util = { path = "../../vendor/zed/crates/util" }
 workspace = { path = "../../vendor/zed/crates/workspace" }

@@ -46,6 +46,8 @@ pub struct LoadedExtension {
     pub description: Option<String>,
     /// It declares settings (a page in the Settings tab, `ext:<id>`).
     pub has_settings: bool,
+    /// The themes and icon themes it added.
+    pub themes: crate::themes::Registered,
 }
 
 /// Where a loaded extension comes from.
@@ -185,18 +187,34 @@ impl ExtensionHost {
         Ok(host)
     }
 
-    /// Registers an extension's settings, then evaluates and activates it.
-    pub(crate) fn load(&mut self, ext: Discovered, cx: &mut Context<Self>) {
+    /// Registers an extension's settings and themes, then evaluates and activates it (an
+    /// extension that only brings themes has no code).
+    pub(crate) fn load(&mut self, mut ext: Discovered, cx: &mut Context<Self>) {
         if let Some(schema) = &ext.settings {
             self.register_settings(&ext.info, schema, cx);
         }
-        match std::fs::read_to_string(&ext.main) {
+        if !ext.themes.is_empty() || !ext.icon_themes.is_empty() {
+            let (registered, errors) = crate::themes::register(&ext.info.path, &ext.themes, &ext.icon_themes, cx);
+            ext.info.themes = registered;
+            self.errors.extend(errors.into_iter().map(|e| format!("{}: {e}", ext.info.id)));
+        }
+        let Some(main) = &ext.main else {
+            log::info!("loaded extension {} (themes only) from {}", ext.info.id, ext.info.path.display());
+            self.extensions.push(ext.info);
+            cx.emit(HostEvent::Changed);
+            cx.notify();
+            return;
+        };
+        match std::fs::read_to_string(main) {
             Ok(code) => {
                 log::info!("loading extension {} from {}", ext.info.id, ext.info.path.display());
                 self.js.send(ToJs::Load { id: ext.info.id.clone(), path: ext.info.path.to_string_lossy().into_owned(), code });
                 self.extensions.push(ext.info);
             }
-            Err(e) => self.errors.push(format!("{}: cannot read {}: {e}", ext.info.id, ext.main.display())),
+            Err(e) => {
+                crate::themes::unregister(&ext.info.themes, cx);
+                self.errors.push(format!("{}: cannot read {}: {e}", ext.info.id, main.display()));
+            }
         }
         cx.emit(HostEvent::Changed);
         cx.notify();
@@ -221,6 +239,7 @@ impl ExtensionHost {
             defaults: Value::Object(defaults),
             order: 100,
             actions: vec![],
+            project_keys: None,
         };
         let registry = SettingsRegistry::global(cx);
         registry.update(cx, |registry, cx| registry.register(page, cx));
@@ -322,6 +341,7 @@ impl ExtensionHost {
         self.js.send(ToJs::Unload { id: id.to_string() });
         self.kill_processes_of(id);
         self.agent_calls.fail_extension(id);
+        crate::themes::unregister(&extension.themes, cx);
         // Unloading unregisters them too; this also covers an extension whose JS failed.
         forge_ui::agent_tools::agent_tools().unregister_extension(id);
         cx.emit(HostEvent::Changed);
@@ -677,15 +697,9 @@ impl ExtensionHost {
                     let write = cx.write_credentials(&url, key, value.as_bytes());
                     cx.background_spawn(async move { write.await.map(|_| Value::Null) })
                 }
-                None => {
-                    let delete = cx.delete_credentials(&url);
-                    cx.background_spawn(async move { delete.await.map(|_| Value::Null) })
-                }
+                None => Self::delete_secret(url, cx),
             },
-            _ => {
-                let delete = cx.delete_credentials(&url);
-                cx.background_spawn(async move { delete.await.map(|_| Value::Null) })
-            }
+            _ => Self::delete_secret(url, cx),
         };
         cx.background_spawn(async move {
             let (ok, json) = match task.await {
@@ -695,6 +709,18 @@ impl ExtensionHost {
             js.send(ToJs::Resolve { call: id, ok, json });
         })
         .detach();
+    }
+
+    /// Deleting a secret that isn't there succeeds: the macOS keychain fails with
+    /// "item not found" instead, which broke saving a connection with no password.
+    fn delete_secret(url: String, cx: &mut Context<Self>) -> gpui::Task<Result<Value>> {
+        let read = cx.read_credentials(&url);
+        cx.spawn(async move |this, cx| {
+            if read.await?.is_some() {
+                this.update(cx, |_, cx| cx.delete_credentials(&url))?.await?;
+            }
+            Ok(Value::Null)
+        })
     }
 
     fn with_workspace(&self, cx: &mut Context<Self>, f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> Value) -> Result<Value> {
@@ -722,8 +748,11 @@ fn mentions(message: &str, id: &str) -> bool {
 
 pub(crate) struct Discovered {
     pub(crate) info: LoadedExtension,
-    main: PathBuf,
+    /// Its code; `None` for an extension that only brings themes.
+    pub(crate) main: Option<PathBuf>,
     settings: Option<Value>,
+    pub(crate) themes: Vec<PathBuf>,
+    pub(crate) icon_themes: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -746,6 +775,12 @@ struct ForgeManifest {
     /// Settings the extension declares, as a JSON schema object (`{ "properties": … }`).
     #[serde(default)]
     settings: Option<Value>,
+    /// Theme files (Zed theme families or Forge palettes), or folders of them.
+    #[serde(default)]
+    themes: Vec<String>,
+    /// Zed icon theme files, or folders of them; icon paths are relative to the extension.
+    #[serde(default, rename = "iconThemes")]
+    icon_themes: Vec<String>,
 }
 
 /// An extension is a folder with a `package.json` that has a `forge` section.
@@ -775,11 +810,30 @@ pub(crate) fn read_manifest(path: &Path) -> Result<Option<Discovered>> {
     let manifest: Manifest = serde_json::from_str(&std::fs::read_to_string(path.join("package.json"))?)?;
     let Some(forge) = manifest.forge else { return Ok(None) };
     let main = path.join(forge.main.as_deref().unwrap_or("dist/extension.js"));
-    anyhow::ensure!(main.is_file(), "{} not built (run `forge-ext build`)", main.display());
+    let has_themes = !forge.themes.is_empty() || !forge.icon_themes.is_empty();
+    // Without code of its own (and without naming any), an extension can still bring themes.
+    let main = if !main.is_file() && forge.main.is_none() && has_themes {
+        None
+    } else {
+        anyhow::ensure!(main.is_file(), "{} not built (run `forge-ext build`)", main.display());
+        Some(main)
+    };
+    let themes = crate::themes::resolve(path, &forge.themes).context("forge.themes")?;
+    let icon_themes = crate::themes::resolve(path, &forge.icon_themes).context("forge.iconThemes")?;
     Ok(Some(Discovered {
-        info: LoadedExtension { id: manifest.name.clone(), name: manifest.display_name.unwrap_or(manifest.name), path: path.to_path_buf(), version: manifest.version, description: manifest.description, has_settings: forge.settings.is_some() },
+        info: LoadedExtension {
+            id: manifest.name.clone(),
+            name: manifest.display_name.unwrap_or(manifest.name),
+            path: path.to_path_buf(),
+            version: manifest.version,
+            description: manifest.description,
+            has_settings: forge.settings.is_some(),
+            themes: Default::default(),
+        },
         main,
         settings: forge.settings,
+        themes,
+        icon_themes,
     }))
 }
 
@@ -801,9 +855,14 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join("package.json"), r#"{"name":"not-an-extension"}"#).unwrap();
 
+        // Themes need no code; anything else does.
+        let themes = dir.path().join("themes");
+        std::fs::create_dir_all(themes.join("themes")).unwrap();
+        std::fs::write(themes.join("package.json"), r#"{"name":"themes","forge":{"themes":["themes"]}}"#).unwrap();
+
         let found = discover(&[dir.path().to_path_buf()]);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].info.name, "OK");
+        let names: Vec<_> = found.iter().map(|d| (d.info.name.as_str(), d.main.is_some())).collect();
+        assert_eq!(names, [("OK", true), ("themes", false)]);
     }
 
     /// `process.exec` writes its input while reading the output (a megabyte through `cat`

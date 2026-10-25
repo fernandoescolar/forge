@@ -1,20 +1,27 @@
-//! Commits and pushes the agent proposes (`propose_commit`, `propose_push`, or a `git
-//! commit` it asked to run): the cards, and making them from Forge.
+//! Commit and push proposals: the cards the agent's `propose_commit` / `propose_push` (or
+//! a redirected `git commit` / `git push`) show, and what the user does with them.
 
 use super::*;
 
 impl Thread {
     /// Shows a commit card for `files` (relative to the thread's folder; every change when
-    /// empty).
+    /// empty), signed off when the project signs off.
     pub(super) fn propose_commit(&mut self, message: String, files: Vec<String>, origin: crate::commit_proposal::Origin, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>>, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let (root, project_root) = (self.root.clone(), self.project_root(cx));
+        // Only the user signs off, through git.
+        let message = forge_git::signoff::without_trailer(&message);
         cx.spawn(async move |this, cx| {
-            let resolved = cx.background_spawn(async move { crate::commit_proposal::resolve_files(&root, &files) }).await;
+            let resolved = cx
+                .background_spawn(async move {
+                    let files = crate::commit_proposal::resolve_files(&root, &files)?;
+                    anyhow::Ok((files, forge_git::signoff::configured(&project_root).unwrap_or(false), forge_git::signoff::signer(&root)))
+                })
+                .await;
             this.update(cx, |this, cx| {
                 match resolved {
-                    Ok(files) => {
+                    Ok((files, signoff, signer)) => {
                         let state = crate::commit_proposal::CommitState::Waiting;
-                        this.entries.push(Entry::Commit { message, files, origin, state, reply });
+                        this.entries.push(Entry::Commit { message, files, signoff, signer, origin, state, reply });
                     }
                     Err(e) => {
                         let e = format!("{e:#}");
@@ -31,21 +38,22 @@ impl Thread {
         .detach();
     }
 
-    /// The commit card at `ix`, while the user can still act on it: its message and files.
-    pub(super) fn open_commit(&self, ix: usize) -> Option<(String, Vec<PathBuf>)> {
+    /// The commit card at `ix`, while the user can still act on it: its message, files and
+    /// whether it is signed off.
+    fn open_commit(&self, ix: usize) -> Option<(String, Vec<PathBuf>, bool)> {
         match self.entries.get(ix) {
-            Some(Entry::Commit { message, files, state, .. }) if state.is_open() => Some((message.clone(), files.clone())),
+            Some(Entry::Commit { message, files, signoff, state, .. }) if state.is_open() => Some((message.clone(), files.clone(), *signoff)),
             _ => None,
         }
     }
 
     /// Commits the proposal at `ix` as it is.
     pub(crate) fn commit_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some((message, files)) = self.open_commit(ix) else { return };
+        let Some((message, files, signoff)) = self.open_commit(ix) else { return };
         self.set_commit_state(ix, crate::commit_proposal::CommitState::Committing, cx);
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { crate::commit_proposal::commit(&root, &files, &message) }).await;
+            let result = cx.background_spawn(async move { crate::commit_proposal::commit(&root, &files, &message, signoff) }).await;
             let state = match result {
                 Ok((sha, message)) => crate::commit_proposal::CommitState::Committed { sha, message },
                 Err(e) => crate::commit_proposal::CommitState::Failed(format!("{e:#}")),
@@ -59,7 +67,8 @@ impl Thread {
     /// edits and commits it; the card follows HEAD to see the commit made.
     pub(crate) fn commit_proposal_in_panel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         use crate::commit_proposal::{CommitState, head, last_commit, stage_only};
-        let Some((message, files)) = self.open_commit(ix) else { return };
+        // The Git panel's Signoff toggle follows the project's setting, like the card.
+        let Some((message, files, _)) = self.open_commit(ix) else { return };
         let (root, workspace) = (self.root.clone(), self.workspace.clone());
         cx.spawn_in(window, async move |this, cx| {
             let staged = cx.background_spawn({
@@ -99,6 +108,23 @@ impl Thread {
         .detach();
     }
 
+    /// Signs the proposal at `ix` off, or stops signing it off; the project keeps the
+    /// choice for its next commits.
+    pub(crate) fn toggle_commit_signoff(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some((_, _, signoff)) = self.open_commit(ix) else { return };
+        if let Some(Entry::Commit { signoff: on, .. }) = self.entries.get_mut(ix) {
+            *on = !signoff;
+        }
+        forge_git::signoff::set(self.project_root(cx), !signoff, cx);
+        self.changed(cx);
+    }
+
+    /// The project's folder, whose `.forge/` holds its settings (not the thread's worktree,
+    /// which has its own copy).
+    fn project_root(&self, cx: &gpui::App) -> PathBuf {
+        self.project.upgrade().and_then(|project| forge_git::signoff::project_root(project.read(cx), cx)).unwrap_or_else(|| self.root.clone())
+    }
+
     pub(crate) fn decline_commit_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
         if self.open_commit(ix).is_some() {
             self.set_commit_state(ix, crate::commit_proposal::CommitState::Declined, cx);
@@ -106,7 +132,7 @@ impl Thread {
     }
 
     /// Moves the card at `ix` on; a decision (commit made or declined) answers the agent.
-    pub(super) fn set_commit_state(&mut self, ix: usize, new: crate::commit_proposal::CommitState, cx: &mut Context<Self>) {
+    fn set_commit_state(&mut self, ix: usize, new: crate::commit_proposal::CommitState, cx: &mut Context<Self>) {
         use crate::commit_proposal::CommitState;
         if let Some(Entry::Commit { state, reply, .. }) = self.entries.get_mut(ix) {
             *state = new;
@@ -194,7 +220,7 @@ impl Thread {
     }
 
     /// Moves the card at `ix` on; a decision (pushed or declined) answers the agent.
-    pub(super) fn set_push_state(&mut self, ix: usize, new: crate::push_proposal::PushState, cx: &mut Context<Self>) {
+    fn set_push_state(&mut self, ix: usize, new: crate::push_proposal::PushState, cx: &mut Context<Self>) {
         use crate::push_proposal::PushState;
         if let Some(Entry::Push { plan, state, reply, .. }) = self.entries.get_mut(ix) {
             *state = new;

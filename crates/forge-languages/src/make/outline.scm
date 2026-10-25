@@ -1,0 +1,2 @@
+(rule
+  (targets) @name) @item

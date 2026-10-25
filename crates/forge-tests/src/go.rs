@@ -45,7 +45,7 @@ fn load_module(go_mod: &Path) -> Option<TestProject> {
                 row: NO_ROW,
                 tests: Vec::new(),
             });
-            class.tests.push(TestMethod { fqn: format!("{import}.{name}"), name, file: file.clone(), row: row as u32 });
+            class.tests.push(TestMethod { fqn: format!("{import}.{name}"), name, file: file.clone(), row: row as u32, cases: Vec::new() });
         }
     }
     let name = module.rsplit('/').next().unwrap_or(&module).to_string();
@@ -65,6 +65,7 @@ pub(crate) fn args(scope: &Scope, module: &str) -> Vec<String> {
     match scope {
         Scope::Project => vec!["./...".into()],
         Scope::Class(import) => vec![package_arg(import, module)],
+        Scope::Case { method, .. } => args(&Scope::Methods(vec![method.clone()]), module),
         Scope::Methods(fqns) => {
             let mut packages: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for fqn in fqns {
@@ -86,7 +87,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     let mut command = runner::command("go", env);
     command.args(["test", "-json", "-count=1"]).args(args(scope, &module)).current_dir(project.dir());
     let output = runner::execute(command, live, Some(readable)).await.context("failed to start `go test`; is Go installed?")?;
-    Ok(RunOutput { results: parse(&output.stdout), log: output.log, success: output.success })
+    Ok(RunOutput { results: parse(&output.stdout), log: output.log, success: output.success, coverage: None })
 }
 
 /// The human part of a `go test -json` line.

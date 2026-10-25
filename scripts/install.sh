@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/fernandoescolar/forge/main/scripts/install.sh | bash
 #
-# macOS: it downloads Forge-<version>-<arch>.zip for this Mac, checks it is a validly signed
+# macOS: it downloads Forge-<version>-macos-<arch>.zip for this Mac, checks it is a validly signed
 # Forge, quits a running Forge, puts Forge.app in /Applications (~/Applications when
 # /Applications isn't writable). Downloaded this way, macOS doesn't quarantine the app, so it
 # opens without Gatekeeper's prompts.
@@ -69,9 +69,13 @@ install_macos() {
   mkdir -p "$install_dir"
   local app="$install_dir/Forge.app"
 
-  local zip="Forge-$version-$arch.zip"
+  local zip="Forge-$version-macos-$arch.zip"
   say "Downloading Forge $version for $arch"
-  curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip" || fail "couldn't download $zip from $repo's $tag release"
+  if ! curl -fsL "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip"; then
+    # Releases up to 0.0.1-rc.4 named it without the system.
+    zip="Forge-$version-$arch.zip"
+    curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$zip" -o "$tmp/$zip" || fail "couldn't download Forge-$version-macos-$arch.zip from $repo's $tag release"
+  fi
   ditto -x -k "$tmp/$zip" "$tmp/unpacked"
   local new="$tmp/unpacked/Forge.app"
   [ -d "$new" ] || fail "$zip has no Forge.app"
@@ -118,15 +122,18 @@ install_linux() {
 
   say "Downloading Forge $version for Linux ($arch)"
   curl -fL --progress-bar "https://github.com/$repo/releases/download/$tag/$tarball" -o "$tmp/$tarball" || fail "couldn't download $tarball from $repo's $tag release"
-  # GitHub lists each asset's SHA-256 ("digest"); the download must match it.
+  # The release's SHA256SUMS lists every download's SHA-256; the download must match it.
   local expected actual
-  command -v python3 >/dev/null 2>&1 || fail "python3 is needed to check the download"
-  expected="$(curl -fsSL "https://api.github.com/repos/$repo/releases/tags/$tag" | python3 -c 'import json, sys
+  expected="$(curl -fsSL "https://github.com/$repo/releases/download/$tag/SHA256SUMS" 2>/dev/null | grep -E "^[0-9a-f]{64} [ *]?$tarball\$" | cut -d' ' -f1 || true)"
+  if [ -z "$expected" ] && command -v python3 >/dev/null 2>&1; then
+    # Releases from before SHA256SUMS: the digest GitHub lists for the asset.
+    expected="$(curl -fsSL "https://api.github.com/repos/$repo/releases/tags/$tag" | python3 -c 'import json, sys
 for asset in json.load(sys.stdin).get("assets", []):
     if asset.get("name") == sys.argv[1]:
-        print(asset.get("digest") or "")' "$tarball")"
-  actual="sha256:$(sha256sum "$tmp/$tarball" | cut -d' ' -f1)"
+        print((asset.get("digest") or "").removeprefix("sha256:"))' "$tarball")"
+  fi
   [ -n "$expected" ] || fail "the release doesn't list $tarball's SHA-256"
+  actual="$(sha256sum "$tmp/$tarball" | cut -d' ' -f1)"
   [ "$expected" = "$actual" ] || fail "$tarball's SHA-256 isn't the one the release lists"
 
   mkdir -p "$tmp/unpacked"
@@ -166,8 +173,12 @@ for asset in json.load(sys.stdin).get("assets", []):
 
 path_hint() {
   case ":$PATH:" in
-    *":$1:"*) ;;
-    *) say "Add $1 to your PATH to use the forge command, e.g. in your shell's profile: export PATH=\"$1:\$PATH\"" ;;
+    *":$1:"*) return ;;
+  esac
+  case "$(basename "${SHELL:-}")" in
+    fish) say "Add $1 to your PATH to use the forge command: fish_add_path $1" ;;
+    zsh) say "Add $1 to your PATH to use the forge command, in ~/.zshrc: export PATH=\"$1:\$PATH\"" ;;
+    *) say "Add $1 to your PATH to use the forge command, in ~/.bashrc (or your shell's profile): export PATH=\"$1:\$PATH\"" ;;
   esac
 }
 

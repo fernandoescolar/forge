@@ -7,7 +7,8 @@
 // modules instead of being bundled: every extension renders through the same React.
 //
 // A package holds what the extension needs at run time: package.json, dist/, its pages and
-// assets, and its sidecars (bin/<platform>/<name>, declared in `forge.sidecars`). The rules
+// assets, its themes (`forge.themes`, `forge.iconThemes`) and its sidecars
+// (bin/<platform>/<name>, declared in `forge.sidecars`). The rules
 // match crates/forge-extension-host/src/package.rs, which installs and exports packages.
 import { build, context } from 'esbuild';
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -26,6 +27,9 @@ if (!['build', 'watch', 'pack'].includes(cmd)) {
 const root = resolve(dir);
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const entry = join(root, pkg.forge?.entry ?? 'src/extension.tsx');
+const themes = [...(pkg.forge?.themes ?? []), ...(pkg.forge?.iconThemes ?? [])];
+// An extension that only brings themes has no code to build.
+const codeless = !existsSync(entry) && themes.length > 0;
 
 // `@forge/api`: the API's name before it was published as `@forge-ide/api`.
 const shared = ['react', 'react/jsx-runtime', '@forge-ide/api', '@forge/api'];
@@ -57,10 +61,10 @@ const options = {
 // ------------------------------------------------------------------------------- packing
 
 function pack() {
-  const defaults = ['package.json', 'dist', 'assets', 'media', 'bin', 'README.md', 'CHANGELOG.md', 'LICENSE', 'LICENSE.md', 'icon.png'];
+  const defaults = ['package.json', 'dist', 'assets', 'media', 'bin', 'themes', 'icon_themes', 'icons', 'README.md', 'CHANGELOG.md', 'LICENSE', 'LICENSE.md', 'icon.png'];
   const skipped = new Set(['node_modules', '.git', '.DS_Store']);
-  const main = pkg.forge?.main ?? 'dist/extension.js';
-  const roots = [...new Set([...(pkg.forge?.files ?? defaults).map((f) => f.replace(/^\.\//, '').replace(/\/$/, '')), 'package.json', main])].sort();
+  const main = codeless ? null : (pkg.forge?.main ?? 'dist/extension.js');
+  const roots = [...new Set([...(pkg.forge?.files ?? defaults), ...themes].map((f) => f.replace(/^\.\//, '').replace(/\/$/, '')).concat(['package.json', ...(main ? [main] : [])]))].sort();
   const sidecars = pkg.forge?.sidecars ?? [];
 
   const files = [];
@@ -175,6 +179,6 @@ if (cmd === 'watch') {
   const ctx = await context(options);
   await ctx.watch();
 } else {
-  await build(options);
+  if (!codeless) await build(options);
   if (cmd === 'pack') pack();
 }

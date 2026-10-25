@@ -12,8 +12,8 @@
   // serves, install scripts included. Remove "@<version>" to follow the latest.
   "agents": [
     { "id": "claude", "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.95.0"] },
-    { "id": "gemini", "command": "gemini", "args": ["--experimental-acp"] },
-    { "id": "codex", "command": "npx", "args": ["-y", "@zed-industries/codex-acp@0.16.0"] },
+    { "id": "gemini", "command": "gemini", "args": ["--acp"] },
+    { "id": "codex", "command": "npx", "args": ["-y", "@agentclientprotocol/codex-acp@2.2.2"] },
     { "id": "copilot", "command": "npx", "args": ["-y", "@github/copilot@1.0.103", "--acp", "--stdio"] },
     { "id": "antigravity", "command": "npx", "args": ["-y", "@forge-ide/agy-acp@0.1.1"] },
     { "id": "opencode", "command": "opencode", "args": ["acp"] }

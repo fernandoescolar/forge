@@ -28,7 +28,8 @@ fn wrapping(text: impl IntoElement) -> gpui::Div {
     div().flex_1().min_w_0().child(text)
 }
 
-pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, entry: &Entry, window: &Window, cx: &App) -> AnyElement {
+/// `user_markdown`: the user's message as Markdown, for a user entry (plain text without).
+pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, entry: &Entry, user_markdown: Option<&gpui::Entity<markdown::Markdown>>, window: &Window, cx: &App) -> AnyElement {
     let colors = cx.theme().colors().clone();
     match entry {
         // Your message stands apart from the agent's work, so turns are easy to find when
@@ -80,7 +81,11 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                             }))
                     })),
             )
-            .child(wrapping(Label::new(text.clone())))
+            // Written in Markdown, as messages to agents often are, and shown so.
+            .child(match user_markdown {
+                Some(md) => div().min_w_0().child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))).into_any_element(),
+                None => wrapping(Label::new(text.clone())).into_any_element(),
+            })
             .when(!context.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(context.iter().map(|c| {
                     h_flex().gap_0p5().child(Icon::new(IconName::File).size(IconSize::XSmall).color(Color::Muted)).child(Label::new(c.clone()).size(LabelSize::Small).color(Color::Muted))
@@ -128,9 +133,10 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                         .items_start()
                         .child(if waiting { Icon::new(IconName::Warning).size(IconSize::Small).color(Color::Warning) } else { Icon::new(icon).size(IconSize::Small).color(color) })
                         .child(wrapping(Label::new(title.clone()).size(LabelSize::Small)))
-                        .when_some(command.clone(), |el, c| el.child(div().flex_none().max_w(px(320.)).child(Label::new(c).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx).truncate())))
                         .when_some((!kind.is_empty()).then(|| kind.clone()), |el, k| el.child(div().flex_none().child(Label::new(k).size(LabelSize::XSmall).color(Color::Muted)))),
                 )
+                // The command on its own line under what it is for, whole.
+                .when_some(command.clone(), |el, c| el.child(div().pl_6().child(wrapping(Label::new(c).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx)))))
                 .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx)))
                 .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
                 .children(diffs.iter().chain(permission_diffs).map(|d| render_diff(thread, handle, d, cx)))
@@ -224,12 +230,14 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
                 .child(status)
                 .into_any_element()
         }
-        Entry::Commit { message, files, origin, state, .. } => render_commit(thread, handle, ix, message, files, *origin, state, cx),
+        Entry::Commit { message, files, signoff, signer, origin, state, .. } => render_commit(thread, handle, ix, message, files, (*signoff, signer.as_deref()), *origin, state, cx),
         Entry::Push { plan, origin, state, .. } => render_push(handle, ix, plan, *origin, state, cx),
         Entry::LspEdit { plan, state, .. } => render_edit(thread, handle, ix, plan, state, cx),
         Entry::ExtensionTool { tool, args, state, .. } => render_tool_card(handle, ix, &tool.title, Some(format!("from the {} extension", tool.extension)), args, state, Thread::answer_extension_tool, cx),
         Entry::ForgeTool { name, args, state, .. } => render_tool_card(handle, ix, &crate::thread::forge_tool_title(name), None, args, state, Thread::answer_forge_tool, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
+        Entry::Config { changes, state, .. } => render_config(handle, ix, changes, state, cx),
+        Entry::Command { command, cwd, state, terminal, exit, .. } => render_command(thread, handle, ix, command, cwd, state, terminal.as_deref(), exit.as_deref(), cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
@@ -320,9 +328,10 @@ pub(crate) fn render_permission_answer(handle: &WeakEntity<Thread>, request_id: 
     row.into_any_element()
 }
 
-/// A commit the agent proposes: its message and files, and how the user makes it.
+/// A commit the agent proposes: its message and files, whether it is signed off (and as
+/// whom), and how the user makes it.
 #[allow(clippy::too_many_arguments)]
-fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, message: &str, files: &[PathBuf], origin: crate::commit_proposal::Origin, state: &crate::commit_proposal::CommitState, cx: &App) -> AnyElement {
+fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, message: &str, files: &[PathBuf], (signoff, signer): (bool, Option<&str>), origin: crate::commit_proposal::Origin, state: &crate::commit_proposal::CommitState, cx: &App) -> AnyElement {
     use crate::commit_proposal::{CommitState, Origin, short};
     let colors = cx.theme().colors().clone();
     let root = thread.root().clone();
@@ -376,6 +385,20 @@ fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, messag
         _ if message.trim().is_empty() => "(no message: write one in the Git panel)".to_string(),
         _ => message.to_string(),
     };
+    // In the Git panel, its own Signoff toggle decides.
+    let signoff_row = matches!(state, CommitState::Waiting | CommitState::Failed(_)).then(|| {
+        ui::Checkbox::new(("commit-signoff", ix), ui::ToggleState::from(signoff))
+            .label(match signer {
+                Some(signer) => format!("Sign off (Signed-off-by: {signer})"),
+                None => "Sign off (Signed-off-by: you)".to_string(),
+            })
+            .on_click({
+                let handle = handle.clone();
+                move |_, _, cx| {
+                    handle.update(cx, |t, cx| t.toggle_commit_signoff(ix, cx)).ok();
+                }
+            })
+    });
     v_flex()
         .gap_1()
         .p_2()
@@ -386,6 +409,7 @@ fn render_commit(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, messag
         .child(h_flex().gap_2().child(Icon::new(IconName::GitCommit).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted })).child(wrapping(Label::new(headline).size(LabelSize::Small))))
         .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(Label::new(shown_message).size(LabelSize::Small).buffer_font(cx)))
         .child(v_flex().gap_0p5().children(file_rows))
+        .children(signoff_row)
         .when_some(if let CommitState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
             el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(format!("The commit failed: {e}")).size(LabelSize::Small).color(Color::Error))))
         })
@@ -482,6 +506,114 @@ fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note
         )
         .child(div().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(note.clone()))
         .when(open, |el| el.child(Label::new("Edit it before keeping it, if you like. Agents read it at the start of every new session.").size(LabelSize::XSmall).color(Color::Muted)))
+        .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
+            el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+/// A command the agent runs with `run_command`: what and where, *Run* / *Don't* while it
+/// waits for the user, then its terminal (live) and how it ended.
+#[allow(clippy::too_many_arguments)]
+fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, command: &str, cwd: &std::path::Path, state: &crate::forge_tools::EditState, terminal: Option<&str>, exit: Option<&str>, cx: &App) -> AnyElement {
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let waiting = *state == EditState::Waiting;
+    let place = cwd.strip_prefix(thread.root()).ok().filter(|p| !p.as_os_str().is_empty()).map(|p| format!(" in {}", p.display())).unwrap_or_default();
+    let terminal_view = terminal.and_then(|t| thread.terminal_view(t));
+    let (icon, color) = match state {
+        EditState::Waiting => (IconName::Terminal, Color::Info),
+        EditState::Applying => (IconName::ArrowCircle, Color::Accent),
+        EditState::Applied => (IconName::Check, if exit.is_some_and(|e| e.starts_with("Exit code 0") || e == "It ended.") { Color::Success } else { Color::Warning }),
+        EditState::Declined => (IconName::Close, Color::Muted),
+        EditState::Failed(_) => (IconName::XCircle, Color::Error),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if waiting { cx.theme().status().info_border } else { colors.border })
+        .when(waiting, |el| el.bg(cx.theme().status().info_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                .child(Label::new(if waiting { "The agent wants to run" } else { "Ran" }).size(LabelSize::Small).color(Color::Muted))
+                .child(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx))
+                .when(!place.is_empty(), |el| el.child(Label::new(place).size(LabelSize::Small).color(Color::Muted))),
+        )
+        .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
+        .when_some(exit.map(str::to_string), |el, exit| el.child(Label::new(exit).size(LabelSize::XSmall).color(Color::Muted)))
+        .when(waiting, |el| {
+            el.child(
+                h_flex()
+                    .gap_1()
+                    .child(Button::new(("command-run", ix), "Run").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::PlayFilled).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_command(ix, true, window, cx))))
+                    .child(Button::new(("command-skip", ix), "Don't").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, window, cx| t.answer_command(ix, false, window, cx)))),
+            )
+        })
+        .into_any_element()
+}
+
+/// Settings and key bindings the agent wants to change: each one with its value before and
+/// after, and *Apply* / *Discard*.
+fn render_config(handle: &WeakEntity<Thread>, ix: usize, changes: &[crate::configure::ConfigChange], state: &crate::forge_tools::EditState, cx: &App) -> AnyElement {
+    use crate::configure::ConfigChange;
+    use crate::forge_tools::EditState;
+    let colors = cx.theme().colors().clone();
+    let open = state.is_open();
+    let value = |v: Option<&serde_json::Value>, unset: &str| v.map(|v| v.to_string()).unwrap_or_else(|| unset.to_string());
+    let rows = changes.iter().map(|change| {
+        let (what, place, before, after) = match change {
+            ConfigChange::Setting(s) => (s.title.clone(), format!("{} · {}", s.page, s.path.join(".")), value(s.before.as_ref(), "default"), value(s.after.as_ref(), "default")),
+            ConfigChange::Binding(b) => (
+                b.keys.clone(),
+                format!("keymap.json{}", b.context.as_ref().map(|c| format!(" · when {c}")).unwrap_or_default()),
+                b.before.clone().map(|line| line.split(" → ").nth(1).unwrap_or(&line).to_string()).unwrap_or_else(|| "nothing".into()),
+                match (&b.action, &b.args) {
+                    (None, _) => "nothing".into(),
+                    (Some(a), None) => a.clone(),
+                    (Some(a), Some(args)) => format!("{a} {args}"),
+                },
+            ),
+        };
+        v_flex()
+            .gap_0p5()
+            .child(h_flex().gap_1().child(Label::new(what).size(LabelSize::Small).weight(gpui::FontWeight::MEDIUM)).child(Label::new(place).size(LabelSize::XSmall).color(Color::Muted)))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Label::new(before).size(LabelSize::Small).buffer_font(cx).color(Color::Muted).strikethrough())
+                    .child(Icon::new(IconName::ArrowRight).size(IconSize::XSmall).color(Color::Muted))
+                    .child(Label::new(after).size(LabelSize::Small).buffer_font(cx).color(Color::Success)),
+            )
+    });
+    let footer = match state {
+        EditState::Applied => h_flex().gap_1().child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Success)).child(Label::new("Applied").size(LabelSize::Small).color(Color::Success)).into_any_element(),
+        EditState::Declined => Label::new("→ Discarded").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Applying => Label::new("Applying…").size(LabelSize::Small).color(Color::Muted).into_any_element(),
+        EditState::Waiting | EditState::Failed(_) => h_flex()
+            .gap_1()
+            .child(Button::new(("config-apply", ix), "Apply").style(ButtonStyle::Filled).start_icon(Icon::new(IconName::Check).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_config(ix, true, cx))))
+            .child(Button::new(("config-discard", ix), "Discard").start_icon(Icon::new(IconName::Close).size(IconSize::Small)).on_click(on_thread(handle, move |t, _, cx| t.answer_config(ix, false, cx))))
+            .into_any_element(),
+    };
+    v_flex()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if open { cx.theme().status().info_border } else { colors.border })
+        .when(open, |el| el.bg(cx.theme().status().info_background))
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Icon::new(IconName::Settings).size(IconSize::Small).color(if open { Color::Info } else { Color::Muted }))
+                .child(Label::new("The agent wants to change Forge's setup").size(LabelSize::Small)),
+        )
+        .child(v_flex().gap_1p5().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).children(rows))
         .when_some(if let EditState::Failed(e) = state { Some(e.clone()) } else { None }, |el, e| {
             el.child(h_flex().gap_1().items_start().child(Icon::new(IconName::XCircle).size(IconSize::XSmall).color(Color::Error)).child(wrapping(Label::new(e).size(LabelSize::Small).color(Color::Error))))
         })
@@ -676,7 +808,7 @@ pub(crate) fn render_diff(thread: &Thread, handle: &WeakEntity<Thread>, diff: &D
     let open_path = PathBuf::from(&diff.edit.path);
     let path = std::path::Path::new(&diff.edit.path);
     let shown = path.strip_prefix(thread.root()).unwrap_or(path).to_string_lossy().into_owned();
-    let (added, removed) = diff.edit.stats();
+    let (added, removed) = diff.stats;
     v_flex()
         .mt_1()
         .rounded_md()

@@ -91,7 +91,7 @@ impl ForgeWelcome {
     fn render_recent(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let recent = self.recent.as_ref().filter(|r| !r.is_empty())?;
         let colors = cx.theme().colors().clone();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = std::env::home_dir();
         let now = chrono::Utc::now().timestamp();
         let mut list = v_flex().gap_0p5().child(Label::new("RECENT").size(LabelSize::XSmall).color(Color::Muted)).child(Divider::horizontal());
         for (i, r) in recent.iter().enumerate() {
@@ -151,7 +151,7 @@ pub fn open_recent(workspace: &mut Workspace, new_window: bool, window: &mut Win
                 ws.show_toast(workspace::Toast::new(id, "No recent projects yet."), cx);
                 return;
             }
-            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let home = std::env::home_dir();
             let now = chrono::Utc::now().timestamp();
             let choices = recent.iter().map(|r| forge_ui::pick::Choice::new(r.name()).detail(format!("{} · {}", r.location(home.as_deref()), relative_time(r.opened_at, now)))).collect();
             let weak = cx.entity().downgrade();

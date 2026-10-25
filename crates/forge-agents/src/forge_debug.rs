@@ -49,7 +49,7 @@ pub(crate) async fn set_breakpoint(ide: Ide, args: Value, cx: &mut AsyncWindowCo
     let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
     let line = line_arg(&args, "line").ok_or("`line` (1-based) is missing.")?;
     let condition = str_arg(&args, "condition");
-    let abs = ide.resolve(&path);
+    let abs = ide.resolve(&path)?;
     let project = ide.project.upgrade().ok_or_else(closed)?;
     let buffer = project.update(cx, |p, cx| p.open_local_buffer(&abs, cx)).await.map_err(|e| format!("Can't open {path}: {e:#}"))?;
     cx.update(|_, cx| {
@@ -75,7 +75,7 @@ pub(crate) async fn remove_breakpoint(ide: Ide, args: Value, cx: &mut AsyncWindo
     }
     let path = str_arg(&args, "path").ok_or("`path` is missing (or pass `all`).")?;
     let line = line_arg(&args, "line").ok_or("`line` (1-based) is missing.")?;
-    let abs = ide.resolve(&path);
+    let abs = ide.resolve(&path)?;
     let removed = cx
         .update(|_, cx| {
             let store = project.read(cx).breakpoint_store();
@@ -218,7 +218,7 @@ pub(crate) async fn start_debugging(ide: Ide, args: Value, cx: &mut AsyncWindowC
     if active_session(&ide, cx).is_ok() {
         return Err("A debug session is already going; stop it first with `stop_debugging`.".into());
     }
-    let test_path = str_arg(&args, "test_path").map(|p| ide.resolve(&p));
+    let test_path = str_arg(&args, "test_path").map(|p| ide.resolve(&p)).transpose()?;
     let test_name = str_arg(&args, "test_name");
     let what = if test_path.is_some() || test_name.is_some() { DebugWhat::Tests { path: test_path, name: test_name } } else { DebugWhat::Target(str_arg(&args, "target")) };
     // Run registers how to start sessions (of run targets, and of tests through the Tests panel).

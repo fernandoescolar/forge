@@ -162,7 +162,7 @@ impl GitHub {
             let env = env.await;
             let result = cx
                 .background_spawn(async move {
-                    let top = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())).unwrap_or(root.clone());
+                    let top = ide_api::std_command("git").arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())).unwrap_or(root.clone());
                     gh::comments(&root, number, &env).await.map(|comments| (top, comments))
                 })
                 .await;

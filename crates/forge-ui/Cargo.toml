@@ -33,4 +33,5 @@ project = { path = "../../vendor/zed/crates/project" }
 
 
 [dev-dependencies]
+tempfile.workspace = true
 futures = "0.3"

@@ -1,4 +1,4 @@
-//! The tools Forge's features run (git, .NET, Rust, Go, Node and its package managers,
+//! The tools Forge's features run (git, .NET, Rust, Go, Node and its package managers, Bun,
 //! Python, make, gh, Docker), which a project needs (from its files), whether they are
 //! installed, and how to install them on this machine. No UI here.
 
@@ -13,6 +13,7 @@ pub enum Tool {
     Node,
     Pnpm,
     Yarn,
+    Bun,
     Python,
     Make,
     Gh,
@@ -20,7 +21,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 11] = [Tool::Git, Tool::Dotnet, Tool::Rust, Tool::Go, Tool::Node, Tool::Pnpm, Tool::Yarn, Tool::Python, Tool::Make, Tool::Gh, Tool::Docker];
+    pub const ALL: [Tool; 12] = [Tool::Git, Tool::Dotnet, Tool::Rust, Tool::Go, Tool::Node, Tool::Pnpm, Tool::Yarn, Tool::Bun, Tool::Python, Tool::Make, Tool::Gh, Tool::Docker];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -31,6 +32,7 @@ impl Tool {
             Tool::Node => "Node.js (npm, npx)",
             Tool::Pnpm => "pnpm",
             Tool::Yarn => "Yarn",
+            Tool::Bun => "Bun",
             Tool::Python => "Python",
             Tool::Make => "make",
             Tool::Gh => "GitHub CLI (gh)",
@@ -48,6 +50,7 @@ impl Tool {
             Tool::Node => &["node", "npm", "npx"],
             Tool::Pnpm => &["pnpm"],
             Tool::Yarn => &["yarn"],
+            Tool::Bun => &["bun"],
             Tool::Python => &["python3"],
             Tool::Make => &["make"],
             Tool::Gh => &["gh"],
@@ -103,11 +106,13 @@ pub fn needed(root: &Path, files: &[PathBuf]) -> Vec<Need> {
                 match declared.as_deref().and_then(|d| d.split('@').next()) {
                     Some("pnpm") => add(Tool::Pnpm, file),
                     Some("yarn") => add(Tool::Yarn, file),
+                    Some("bun") => add(Tool::Bun, file),
                     _ => {}
                 }
             }
             "pnpm-lock.yaml" | "pnpm-workspace.yaml" => add(Tool::Pnpm, file),
             "yarn.lock" => add(Tool::Yarn, file),
+            "bun.lock" | "bun.lockb" => add(Tool::Bun, file),
             "pyproject.toml" | "requirements.txt" | "setup.py" | "setup.cfg" | "Pipfile" => add(Tool::Python, file),
             "Makefile" | "makefile" | "GNUmakefile" => add(Tool::Make, file),
             "compose.yaml" | "compose.yml" | "docker-compose.yml" | "docker-compose.yaml" | "Dockerfile" => add(Tool::Docker, file),
@@ -132,7 +137,7 @@ pub enum Found {
 
 /// Folders installers use that a `PATH` set before installing may lack.
 pub fn usual_places(home: &Path) -> Vec<PathBuf> {
-    ["~/.cargo/bin", "~/.dotnet", "~/go/bin", "~/.local/share/pnpm", "~/Library/pnpm", "~/.local/bin", "~/.yarn/bin"]
+    ["~/.cargo/bin", "~/.dotnet", "~/go/bin", "~/.local/share/pnpm", "~/Library/pnpm", "~/.local/bin", "~/.yarn/bin", "~/.bun/bin"]
         .iter()
         .map(|p| home.join(p.trim_start_matches("~/")))
         .chain(["/usr/local/go/bin", "/usr/local/bin", "/opt/homebrew/bin", "/usr/local/share/dotnet"].map(PathBuf::from))
@@ -224,6 +229,8 @@ pub fn plan(tool: Tool, os: &str, manager: Option<PackageManager>) -> Plan {
         (Tool::Pnpm, Some(_)) => None,
         (Tool::Yarn, Some(Pacman | Brew)) => Some(&["yarn"]),
         (Tool::Yarn, Some(_)) => None,
+        (Tool::Bun, Some(Brew)) => Some(&["oven-sh/bun/bun"]),
+        (Tool::Bun, Some(_)) => None,
         (Tool::Python, Some(Pacman)) => Some(&["python"]),
         (Tool::Python, Some(Brew)) => Some(&["python"]),
         (Tool::Python, Some(_)) => Some(&["python3"]),
@@ -261,6 +268,7 @@ pub fn plan(tool: Tool, os: &str, manager: Option<PackageManager>) -> Plan {
         },
         Tool::Pnpm => Plan::Run { command: "curl -fsSL https://get.pnpm.io/install.sh | sh -".into(), admin: false, note: Some("pnpm's installer, into your home folder") },
         Tool::Yarn => run("corepack enable yarn".into()),
+        Tool::Bun => Plan::Run { command: "curl -fsSL https://bun.sh/install | bash".into(), admin: false, note: Some("Bun's installer, into ~/.bun") },
         Tool::Git => Plan::Manual { url: "https://git-scm.com/downloads" },
         Tool::Go => Plan::Manual { url: "https://go.dev/dl/" },
         Tool::Node => Plan::Manual { url: "https://nodejs.org/en/download" },

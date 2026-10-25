@@ -9,6 +9,7 @@ description = "Test explorer panel for Forge (.NET via dotnet test)"
 [dependencies]
 forge-process = { path = "../forge-process" }
 anyhow.workspace = true
+db = { path = "../../vendor/zed/crates/db" }
 editor = { path = "../../vendor/zed/crates/editor" }
 forge-languages = { path = "../forge-languages" }
 forge-ui = { path = "../forge-ui" }

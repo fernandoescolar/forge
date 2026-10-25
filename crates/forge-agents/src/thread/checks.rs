@@ -1,5 +1,5 @@
-//! Checking what the agent changed: the language servers' problems in the files it
-//! touched, watched until they settle, and asking it to fix them.
+//! Checking the files a turn changed: their errors and warnings, kept current as the
+//! language servers report, and sent back to the agent to fix.
 
 use super::*;
 
@@ -36,7 +36,7 @@ impl Thread {
 
     /// Language servers may report on the files later (a slow first build): the check at
     /// `ix` follows their diagnostics until the next one starts.
-    pub(super) fn watch_check(&mut self, ix: usize, files: Vec<PathBuf>, before: HashMap<PathBuf, (usize, usize)>, cx: &mut Context<Self>) {
+    fn watch_check(&mut self, ix: usize, files: Vec<PathBuf>, before: HashMap<PathBuf, (usize, usize)>, cx: &mut Context<Self>) {
         let Some(project) = self.project.upgrade() else { return };
         self.check_watch = Some(cx.subscribe(&project, move |_, project, event: &project::Event, cx| {
             let project::Event::DiagnosticsUpdated { paths, .. } = event else { return };
@@ -64,22 +64,5 @@ impl Thread {
         let Some(Entry::Check(Some(checks))) = self.entries.get(ix) else { return };
         let prompt = crate::verify::fix_prompt(checks, &self.root);
         self.ask(prompt, window, cx);
-    }
-
-    /// Opens `path` at `line` (zero-based).
-    pub(crate) fn open_at(&self, path: PathBuf, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else { return };
-        let open = workspace.update(cx, |ws, cx| ws.open_abs_path(path, workspace::OpenOptions::default(), window, cx));
-        cx.spawn_in(window, async move |_, cx| {
-            let item = open.await?;
-            if let Some(editor) = item.downcast::<editor::Editor>() {
-                editor.update_in(cx, |editor, window, cx| {
-                    let point = language::Point::new(line, 0);
-                    editor.change_selections(editor::SelectionEffects::scroll(editor::scroll::Autoscroll::center()), window, cx, |s| s.select_ranges([point..point]));
-                })?;
-            }
-            anyhow::Ok(())
-        })
-        .detach();
     }
 }

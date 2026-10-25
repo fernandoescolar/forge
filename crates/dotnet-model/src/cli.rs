@@ -3,18 +3,20 @@
 
 use std::collections::HashMap;
 
-/// The commands Forge runs, as argument templates with `$parameters`.
+/// The commands Forge runs, as argument templates with `$parameters`. `$configuration`,
+/// `$platformProperty` (`-p:Platform=x64`) and `$framework` are the ones chosen in the title
+/// bar, empty for the project's defaults.
 pub fn default_commands() -> HashMap<&'static str, Vec<&'static str>> {
     HashMap::from([
-        ("build", vec!["dotnet", "build", "$projectPath"]),
-        ("clean", vec!["dotnet", "clean", "$projectPath"]),
-        ("pack", vec!["dotnet", "pack", "$projectPath"]),
-        ("publish", vec!["dotnet", "publish", "$projectPath"]),
+        ("build", vec!["dotnet", "build", "$projectPath", "-c", "$configuration", "$platformProperty"]),
+        ("clean", vec!["dotnet", "clean", "$projectPath", "-c", "$configuration", "$platformProperty"]),
+        ("pack", vec!["dotnet", "pack", "$projectPath", "-c", "$configuration", "$platformProperty"]),
+        ("publish", vec!["dotnet", "publish", "$projectPath", "-c", "$configuration", "$platformProperty"]),
         ("restore", vec!["dotnet", "restore", "$projectPath"]),
-        ("rebuild", vec!["dotnet", "build", "$projectPath", "--no-incremental"]),
-        ("run", vec!["dotnet", "run", "--project", "$projectPath"]),
-        ("watch", vec!["dotnet", "watch", "run", "--project", "$projectPath"]),
-        ("test", vec!["dotnet", "test", "$projectPath"]),
+        ("rebuild", vec!["dotnet", "build", "$projectPath", "-c", "$configuration", "$platformProperty", "--no-incremental"]),
+        ("run", vec!["dotnet", "run", "--project", "$projectPath", "-c", "$configuration", "$platformProperty", "-f", "$framework"]),
+        ("watch", vec!["dotnet", "watch", "run", "--project", "$projectPath", "-c", "$configuration", "$platformProperty", "-f", "$framework"]),
+        ("test", vec!["dotnet", "test", "$projectPath", "-c", "$configuration", "$platformProperty"]),
         ("createProject", vec!["dotnet", "new", "$projectType", "-lang", "$language", "-n", "$projectName", "-o", "$folderName", "-f", "$framework"]),
         ("createSolution", vec!["dotnet", "new", "sln", "-n", "$solutionName", "--format", "$format"]),
         ("installTool", vec!["dotnet", "tool", "install", "$tool"]),
@@ -130,6 +132,11 @@ mod tests {
         assert_eq!(args, vec!["dotnet", "new", "console", "-lang", "C#", "-n", "App", "-o", "src/App"]);
         let custom = HashMap::from([("build".to_string(), vec!["dotnet".to_string(), "build".to_string(), "\"$projectPath\"".to_string(), "-c".to_string(), "Release".to_string()])]);
         assert_eq!(command_line("build", &[("projectPath", "/a b/x.csproj")], &custom), vec!["dotnet", "build", "/a b/x.csproj", "-c", "Release"]);
+        let none = HashMap::new();
+        assert_eq!(command_line("build", &[("projectPath", "x.csproj")], &none), vec!["dotnet", "build", "x.csproj"], "the project's defaults");
+        let chosen = [("projectPath", "x.csproj"), ("configuration", "Release"), ("platformProperty", "-p:Platform=x64"), ("framework", "net8.0")];
+        assert_eq!(command_line("run", &chosen, &none), vec!["dotnet", "run", "--project", "x.csproj", "-c", "Release", "-p:Platform=x64", "-f", "net8.0"]);
+        assert_eq!(command_line("rebuild", &[("projectPath", "x.csproj"), ("configuration", "Release")], &none), vec!["dotnet", "build", "x.csproj", "-c", "Release", "--no-incremental"]);
         if !cfg!(windows) {
             assert_eq!(shell_line(&["dotnet".into(), "build".into(), "/a b/it's.csproj".into()]), "dotnet build '/a b/it'\\''s.csproj'");
         }

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use dap::adapters::DebugAdapterName;
 use db::kvp::KeyValueStore;
+use forge_languages::active_build::ActiveBuild;
 use forge_tests::TestPanel;
 use gpui::TaskExt as _;
 use futures::StreamExt as _;
@@ -278,7 +279,7 @@ impl RunController {
             return;
         }
 
-        self.run_template(target.task(), &target, window, cx);
+        self.run_template(target.task_with(&ActiveBuild::get(cx)), &target, window, cx);
     }
 
     /// Runs the selected target with hot reload, if it can (`RunTarget::watch_task`).
@@ -287,7 +288,7 @@ impl RunController {
         if self.state(cx) != State::Idle {
             return;
         }
-        if let Some(template) = target.watch_task() {
+        if let Some(template) = target.watch_task_with(&ActiveBuild::get(cx)) {
             self.run_template(template, &target, window, cx);
         }
     }
@@ -401,7 +402,7 @@ impl RunController {
         }
         let Some(workspace) = self.workspace.upgrade() else { return };
         let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
-        let template = target.task();
+        let template = target.task_with(&ActiveBuild::get(cx));
         let label: gpui::SharedString = format!("Debug {}", target.name).into();
         let scenario = self.project.read(cx).dap_store().update(cx, |store, cx| {
             store.debug_scenario_for_build_task(template, DebugAdapterName(target.kind.debug_adapter().into()), label, cx)
@@ -505,7 +506,7 @@ impl RunController {
                 return;
             }
         };
-        let mut template = target.task();
+        let mut template = target.task_with(&ActiveBuild::get(cx));
         template.label = format!("Debug {}", target.name);
         template.env.extend(endpoint.env());
         let profile = target.entry.clone().or_else(|| forge_languages::launch_settings::profile(&target.manifest, None).map(|p| p.name));
@@ -525,7 +526,7 @@ impl RunController {
         match request {
             aspire::Request::Start(session) => {
                 let id = session.id.clone();
-                let template = aspire_project_task(&session, aspire.profile.as_deref());
+                let template = aspire_project_task(&session, aspire.profile.as_deref(), &ActiveBuild::get(cx));
                 let name = session.project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let label: SharedString = format!("{name} · Aspire {id}").into();
                 aspire.pending.insert(label.clone(), id.clone());
@@ -612,9 +613,13 @@ impl RunController {
 /// `dotnet run` for a project Aspire asked for, which the .NET debug locator turns into a
 /// debug session. The base launch profile is the one asked for, or else the app host's
 /// when the project has one of that name; the request's environment and arguments win.
-pub(crate) fn aspire_project_task(session: &aspire::RunSession, apphost_profile: Option<&str>) -> task::TaskTemplate {
+pub(crate) fn aspire_project_task(session: &aspire::RunSession, apphost_profile: Option<&str>, build: &ActiveBuild) -> task::TaskTemplate {
     let file_based = session.project.extension().is_some_and(|e| e == "cs");
     let mut args = vec!["run".to_string(), if file_based { "--file" } else { "--project" }.into(), format!("\"{}\"", session.project.display())];
+    args.extend(build.configuration_args());
+    if let Some(framework) = build.framework_for(&forge_languages::target_frameworks(&session.project)) {
+        args.extend(["--framework".into(), framework]);
+    }
     let wanted = if session.disable_launch_profile { None } else { session.launch_profile.as_deref().or(apphost_profile) };
     match wanted.filter(|name| forge_languages::launch_settings::profile(&session.project, Some(name)).is_some()) {
         Some(profile) => args.extend(["--launch-profile".into(), format!("\"{profile}\"")]),
@@ -675,7 +680,7 @@ mod tests {
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let controller = cx.update(|_, cx| RunController::for_workspace(&workspace, cx)).unwrap();
         controller.update(cx, |c, _| {
-            c.targets = vec![RunTarget { kind: Kind::Cargo, name: "demo".into(), manifest: "/root/Cargo.toml".into(), dir: "/root".into(), framework: None, program: None, entry: None }];
+            c.targets = vec![RunTarget { kind: Kind::Cargo, name: "demo".into(), manifest: "/root/Cargo.toml".into(), dir: "/root".into(), frameworks: Vec::new(), program: None, entry: None }];
         });
         workspace.update_in(cx, |ws, window, cx| {
             window.focus(&gpui::Focusable::focus_handle(ws, cx), cx);

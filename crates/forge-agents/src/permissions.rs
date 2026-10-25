@@ -99,10 +99,17 @@ impl SharedPermissions {
 pub enum Decision {
     Ask,
     Allow(&'static str),
+    /// Refused for the user, whatever the mode: it names files kept from agents.
+    Deny(String),
 }
 
 /// Whether to answer a permission request (its `toolCall`) for the user.
-pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf]) -> Decision {
+pub fn decide(permissions: &Permissions, tool_call: &Value, roots: &[PathBuf], kept: &crate::agent_ignore::AgentIgnore) -> Decision {
+    // Files kept from agents (`.forge/agentignore`): named by the tool, or by its command.
+    let command_paths: Vec<PathBuf> = tool_command(tool_call).map(|c| c.split_whitespace().map(|w| PathBuf::from(w.trim_matches(|ch| ch == '"' || ch == '\'' || ch == ';'))).collect()).unwrap_or_default();
+    if let Some(path) = tool_paths(tool_call).into_iter().chain(command_paths).find(|p| kept.denies(p)) {
+        return Decision::Deny(format!("Refused: {} is kept from agents", path.display()));
+    }
     if permissions.mode == PermissionMode::SuperUser {
         return Decision::Allow("super user mode");
     }
@@ -182,7 +189,7 @@ fn tool_paths(tool_call: &Value) -> Vec<PathBuf> {
         }
     }
     if let Some(input) = tool_call.get("rawInput") {
-        for key in ["file_path", "path", "notebook_path", "abs_path"] {
+        for key in ["file_path", "path", "notebook_path", "abs_path", "cwd"] {
             paths.extend(input.get(key).and_then(Value::as_str).map(PathBuf::from));
         }
     }
@@ -331,34 +338,15 @@ fn shell_words(command: &str) -> Vec<String> {
     words
 }
 
-/// Whether `path` stays in the workspace. Relative paths start at the agent's working
-/// directory (the first root); `..` is followed, so `../../.bashrc` is outside.
+/// Relative paths start in the agent's working directory (the first root); `..` counts.
+/// The folders for temporary files count as the workspace.
 fn inside(path: &Path, roots: &[PathBuf]) -> bool {
-    let absolute = match (path.is_relative(), roots.first()) {
-        (true, Some(root)) => root.join(path),
-        (true, None) => return false,
-        (false, _) => path.to_path_buf(),
+    let path = match roots.first() {
+        Some(root) if path.is_relative() => root.join(path),
+        _ if path.is_relative() => return !path.components().any(|c| c == std::path::Component::ParentDir),
+        _ => path.to_path_buf(),
     };
-    let Some(path) = normalize(&absolute) else { return false };
-    roots.iter().filter_map(|root| normalize(root)).any(|root| path.starts_with(root))
-}
-
-/// `path` with `.` and `..` resolved (lexically); `None` when `..` climbs above the top.
-fn normalize(path: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    return None;
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    Some(out)
+    crate::forge_tools::within(&crate::forge_tools::normalize(&path), roots) || crate::forge_tools::in_temp(&path)
 }
 
 /// `command` starts with one of `allowed` (whole words) and runs nothing else: chained,
@@ -380,6 +368,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Files kept from agents are refused, by path or by command, whatever the mode.
+    #[test]
+    fn refuses_files_kept_from_agents() {
+        let kept = crate::agent_ignore::AgentIgnore::from_text(std::path::Path::new("/p"), "data/customers/\n");
+        let read = json!({ "kind": "read", "locations": [{ "path": "/p/.env" }] });
+        let refused = |permissions: &Permissions, call: &Value| matches!(decide(permissions, call, &roots(), &kept), Decision::Deny(_));
+        let run = |command: &str| json!({"kind": "execute", "title": "Run", "rawInput": {"command": command}});
+        assert!(refused(&perms(PermissionMode::SuperUser), &read), "even a super user's agent");
+        assert!(refused(&perms(PermissionMode::AllowWorkspace), &run("cat .env")));
+        assert!(refused(&perms(PermissionMode::AllowWorkspace), &json!({ "kind": "read", "rawInput": { "file_path": "/p/data/customers/2024.csv" } })));
+        assert!(!refused(&perms(PermissionMode::AllowWorkspace), &run("cat README.md")));
+    }
+
+    fn nothing_kept() -> crate::agent_ignore::AgentIgnore {
+        crate::agent_ignore::AgentIgnore::from_text(std::path::Path::new("/nowhere"), "")
+    }
+
     fn roots() -> Vec<PathBuf> {
         vec![PathBuf::from("/work/app")]
     }
@@ -393,18 +398,18 @@ mod tests {
         let mut allow_git = perms(PermissionMode::AllowWorkspace);
         allow_git.allow_commands.push("git".into());
         let run = |command: &str| json!({"kind": "execute", "title": "Run", "rawInput": {"command": command}});
-        assert_eq!(decide(&allow_git, &run("git commit -m 'Fix'"), &roots()), Decision::Ask);
-        assert_eq!(decide(&allow_git, &run("git add -A && git -C . push origin main"), &roots()), Decision::Ask);
-        assert!(matches!(decide(&allow_git, &run("git log --oneline"), &roots()), Decision::Allow(_)));
-        assert!(matches!(decide(&allow_git, &run("echo commit"), &roots()), Decision::Allow(_)));
+        assert_eq!(decide(&allow_git, &run("git commit -m 'Fix'"), &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&allow_git, &run("git add -A && git -C . push origin main"), &roots(), &nothing_kept()), Decision::Ask);
+        assert!(matches!(decide(&allow_git, &run("git log --oneline"), &roots(), &nothing_kept()), Decision::Allow(_)));
+        assert!(matches!(decide(&allow_git, &run("echo commit"), &roots(), &nothing_kept()), Decision::Allow(_)));
     }
 
     #[test]
     fn forge_tools_go_ahead() {
         let propose = json!({"kind": "other", "title": "propose_commit", "_meta": {"claudeCode": {"toolName": "mcp__forge__propose_commit"}}});
-        assert!(matches!(decide(&perms(PermissionMode::Ask), &propose, &roots()), Decision::Allow(_)));
+        assert!(matches!(decide(&perms(PermissionMode::Ask), &propose, &roots(), &nothing_kept()), Decision::Allow(_)));
         let other = json!({"kind": "other", "title": "x", "_meta": {"claudeCode": {"toolName": "mcp__github__create_pr"}}});
-        assert_eq!(decide(&perms(PermissionMode::Ask), &other, &roots()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::Ask), &other, &roots(), &nothing_kept()), Decision::Ask);
     }
 
     #[test]
@@ -459,7 +464,7 @@ mod tests {
         assert!(!inside(Path::new("/work/app/../../home/u/.bashrc"), &roots));
         assert!(!inside(Path::new("/work/application/a.cs"), &roots));
         let edit = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "../../.bashrc"}]});
-        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &edit, &roots), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &edit, &roots, &nothing_kept()), Decision::Ask);
     }
 
     #[test]
@@ -469,22 +474,37 @@ mod tests {
         let build = json!({"kind": "execute", "title": "Run `dotnet build`", "rawInput": {"command": "dotnet build"}});
         let rm = json!({"kind": "execute", "title": "rm", "rawInput": {"command": "rm -rf bin"}});
 
-        assert_eq!(decide(&perms(PermissionMode::Ask), &edit_inside, &roots()), Decision::Ask);
-        assert!(matches!(decide(&perms(PermissionMode::Ask), &build, &roots()), Decision::Allow(_)), "always-allowed command");
-        assert_eq!(decide(&perms(PermissionMode::Ask), &rm, &roots()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::Ask), &edit_inside, &roots(), &nothing_kept()), Decision::Ask);
+        assert!(matches!(decide(&perms(PermissionMode::Ask), &build, &roots(), &nothing_kept()), Decision::Allow(_)), "always-allowed command");
+        assert_eq!(decide(&perms(PermissionMode::Ask), &rm, &roots(), &nothing_kept()), Decision::Ask);
 
-        assert!(matches!(decide(&perms(PermissionMode::AllowEdits), &edit_inside, &roots()), Decision::Allow(_)));
-        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &edit_outside, &roots()), Decision::Ask);
-        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &rm, &roots()), Decision::Ask, "commands still ask");
+        assert!(matches!(decide(&perms(PermissionMode::AllowEdits), &edit_inside, &roots(), &nothing_kept()), Decision::Allow(_)));
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &edit_outside, &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &rm, &roots(), &nothing_kept()), Decision::Ask, "commands still ask");
 
-        assert!(matches!(decide(&perms(PermissionMode::AllowWorkspace), &rm, &roots()), Decision::Allow(_)));
-        assert_eq!(decide(&perms(PermissionMode::AllowWorkspace), &edit_outside, &roots()), Decision::Ask);
+        assert!(matches!(decide(&perms(PermissionMode::AllowWorkspace), &rm, &roots(), &nothing_kept()), Decision::Allow(_)));
+        assert_eq!(decide(&perms(PermissionMode::AllowWorkspace), &edit_outside, &roots(), &nothing_kept()), Decision::Ask);
 
         let mut outside_ok = perms(PermissionMode::AllowEdits);
         outside_ok.files_outside_workspace = true;
-        assert!(matches!(decide(&outside_ok, &edit_outside, &roots()), Decision::Allow(_)));
+        assert!(matches!(decide(&outside_ok, &edit_outside, &roots(), &nothing_kept()), Decision::Allow(_)));
 
-        assert!(matches!(decide(&perms(PermissionMode::SuperUser), &edit_outside, &roots()), Decision::Allow(_)));
+        assert!(matches!(decide(&perms(PermissionMode::SuperUser), &edit_outside, &roots(), &nothing_kept()), Decision::Allow(_)));
+
+        // `..` leaves the workspace, relative or not; so does a command's folder.
+        let climbing = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "../other/a.cs"}]});
+        let dotted = json!({"kind": "edit", "title": "Edit", "locations": [{"path": "/work/app/../other/a.cs"}]});
+        let rm_elsewhere = json!({"kind": "execute", "title": "rm", "rawInput": {"command": "rm -rf bin", "cwd": "/opt"}});
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &climbing, &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowEdits), &dotted, &roots(), &nothing_kept()), Decision::Ask);
+        assert_eq!(decide(&perms(PermissionMode::AllowWorkspace), &rm_elsewhere, &roots(), &nothing_kept()), Decision::Ask);
+
+        // Scratch files in /tmp count as the workspace.
+        let scratch = std::env::temp_dir().join("forge-scratch.py");
+        let write_scratch = json!({"kind": "edit", "title": "Write", "locations": [{"path": scratch}]});
+        let run_scratch = json!({"kind": "execute", "title": "python", "rawInput": {"command": "python3 forge-scratch.py", "cwd": std::env::temp_dir()}});
+        assert!(matches!(decide(&perms(PermissionMode::AllowEdits), &write_scratch, &roots(), &nothing_kept()), Decision::Allow(_)));
+        assert!(matches!(decide(&perms(PermissionMode::AllowWorkspace), &run_scratch, &roots(), &nothing_kept()), Decision::Allow(_)));
     }
 
     #[test]

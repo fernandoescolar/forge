@@ -22,6 +22,8 @@ use project::{PathChange, Project};
 
 use crate::config::{self, DotnetConfig};
 use crate::language_server_sync::AssetsWatchers;
+use crate::roslyn_session::{ROSLYN, RoslynSession};
+use forge_languages::active_build::ActiveBuild;
 
 pub enum ModelEvent {
     /// The solution, its projects or the tree changed.
@@ -66,6 +68,10 @@ pub struct DotnetModel {
     load_task: Option<Task<()>>,
     /// Tells OmniSharp about restores (see `language_server_sync`).
     assets_watchers: AssetsWatchers,
+    /// Tells Roslyn which solution to load.
+    roslyn: RoslynSession,
+    /// The solution whose saved configuration and framework were last restored.
+    build_for: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -92,7 +98,21 @@ impl DotnetModel {
                     this.schedule(cx);
                 }
             }
+            project::Event::LanguageServerAdded(_, name, _) if name.0.as_ref() == ROSLYN => {
+                let solution = this.solution.clone();
+                this.roslyn.open(&project, solution.as_deref(), cx);
+            }
             _ => {}
+        });
+        // Projects evaluate in the chosen configuration: another one evaluates them again.
+        let mut evaluated_build = ActiveBuild::get(cx);
+        let build_subscription = cx.observe_global::<ActiveBuild>(move |this, cx| {
+            let build = ActiveBuild::get(cx);
+            if (&build.configuration, &build.platform) != (&evaluated_build.configuration, &evaluated_build.platform) {
+                evaluated_build = build;
+                this.pending.evaluate.extend(this.projects.keys().cloned());
+                this.schedule(cx);
+            }
         });
         let mut model = Self {
             project,
@@ -109,7 +129,9 @@ impl DotnetModel {
             pending: Pending { full: true, ..Default::default() },
             load_task: None,
             assets_watchers: AssetsWatchers::default(),
-            _subscriptions: vec![subscription],
+            roslyn: RoslynSession::default(),
+            build_for: None,
+            _subscriptions: vec![subscription, build_subscription],
         };
         model.schedule(cx);
         model.watch_restores(cx);
@@ -180,6 +202,58 @@ impl DotnetModel {
         self.schedule(cx);
     }
 
+    /// Builds, runs and tests in `build` from now on, and remembers it for this solution.
+    pub fn select_build(&mut self, build: ActiveBuild, cx: &mut Context<Self>) {
+        if let Some(solution) = &self.solution {
+            let key = format!("forge-dotnet-build:{}", solution.path.display());
+            let value = serde_json::json!({ "configuration": build.configuration, "platform": build.platform, "framework": build.framework }).to_string();
+            let kvp = KeyValueStore::global(cx);
+            cx.background_spawn(async move { kvp.write_kvp(key, value).await.ok() }).detach();
+        }
+        build.set(cx);
+    }
+
+    /// The configurations the solution defines (`Debug|Any CPU`, `Release|x64`…).
+    pub fn configurations(&self) -> Vec<String> {
+        self.solution.as_ref().map(|s| s.configurations.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| vec!["Debug|Any CPU".into(), "Release|Any CPU".into()])
+    }
+
+    /// Every target framework of the solution's projects, in the order first seen.
+    pub fn frameworks(&self) -> Vec<String> {
+        let mut frameworks: Vec<String> = Vec::new();
+        for project in self.loaded_projects() {
+            for framework in project.target_frameworks() {
+                if !frameworks.contains(&framework) {
+                    frameworks.push(framework);
+                }
+            }
+        }
+        frameworks
+    }
+
+    /// Whether some project builds for more than one framework.
+    pub fn is_multi_targeted(&self) -> bool {
+        self.loaded_projects().iter().any(|p| p.target_frameworks().len() > 1)
+    }
+
+    /// When another solution is shown, goes back to the configuration and framework last
+    /// chosen for it (the defaults when none was).
+    fn restore_build(&mut self, cx: &mut Context<Self>) {
+        let path = self.solution.as_ref().map(|s| s.path.clone());
+        if path == self.build_for {
+            return;
+        }
+        self.build_for = path.clone();
+        let Some(path) = path else { return };
+        let saved = KeyValueStore::global(cx).read_kvp(&format!("forge-dotnet-build:{}", path.display())).ok().flatten();
+        let saved: Option<serde_json::Value> = saved.and_then(|text| serde_json::from_str(&text).ok());
+        let field = |name: &str| saved.as_ref().and_then(|s| s.get(name)?.as_str().map(String::from));
+        let build = ActiveBuild { configuration: field("configuration"), platform: field("platform"), framework: field("framework") };
+        if build != ActiveBuild::get(cx) {
+            build.set(cx);
+        }
+    }
+
     /// Finds and loads everything again.
     pub fn reload(&mut self, _find_solutions: bool, cx: &mut Context<Self>) {
         self.pending.full = true;
@@ -231,7 +305,14 @@ impl DotnetModel {
 
     fn take_job(&mut self, cx: &mut Context<Self>) -> Box<dyn FnOnce() -> LoadResult + Send> {
         let pending = std::mem::take(&mut self.pending);
-        let config = config::get(cx);
+        let mut config = config::get(cx);
+        let build = ActiveBuild::get(cx);
+        if let Some(configuration) = &build.configuration {
+            config.configuration = configuration.clone();
+        }
+        if let Some(platform) = build.msbuild_platform() {
+            config.platform = platform;
+        }
         let roots = self.roots(cx);
         let chosen = self.chosen.take().or_else(|| self.solution.as_ref().map(|s| s.path.clone()));
         let kvp = KeyValueStore::global(cx);
@@ -258,6 +339,9 @@ impl DotnetModel {
         self.error = result.error;
         self.loading = !self.pending.is_empty();
         self.generation += 1;
+        self.restore_build(cx);
+        let (project, solution) = (self.project.clone(), self.solution.clone());
+        self.roslyn.open(&project, solution.as_deref(), cx);
         cx.emit(ModelEvent::Changed);
         cx.notify();
     }

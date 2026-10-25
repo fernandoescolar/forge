@@ -3,6 +3,9 @@
 //! a dock panel.
 
 pub mod agent_tools;
+pub mod cases;
+pub mod cobertura;
+pub mod coverage_view;
 pub mod discovery;
 mod go;
 mod gutter;
@@ -19,4 +22,5 @@ pub fn init(cx: &mut gpui::App) {
     panel::init(cx);
     gutter::init(cx);
     agent_tools::init(cx);
+    coverage_view::init(cx);
 }

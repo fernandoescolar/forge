@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds dist/Forge.app: release binary, Info.plist, icon, the extensions that ship with Forge,
-# signature; then dist/Forge-<version>-<arch>.zip, the file releases and updates use.
+# signature; then dist/Forge-<version>-macos-<arch>.zip, the file releases and updates use.
 #
 #   scripts/bundle-macos.sh                 # runtime-compiled Metal shaders (no Xcode needed)
 #   FORGE_PRECOMPILED_SHADERS=1 scripts/bundle-macos.sh   # needs full Xcode (`xcrun metal`)
@@ -24,6 +24,14 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)"/\1/')"
 # The app's own version fields take numbers only (0.0.1 for 0.0.1-beta); the zip keeps it all.
 BUNDLE_VERSION="${VERSION%%-*}"
 APP="$ROOT/dist/Forge.app"
+# Releases (CI sets FORGE_UPDATE_REPOSITORY) are dev.forge.ide; a local build gets its own id so
+# that it and an installed Forge are different apps to macOS (a notification's click goes to
+# the app with its bundle id, which with both running may be the other one).
+if [ -n "${FORGE_UPDATE_REPOSITORY:-}" ]; then
+  BUNDLE_ID="dev.forge.ide"
+else
+  BUNDLE_ID="dev.forge.ide.local"
+fi
 # The architecture to build for: this Mac's, or FORGE_TARGET (Apple silicon builds Intel too).
 TARGET="${FORGE_TARGET:-}"
 target_args=()
@@ -42,7 +50,7 @@ cargo build --release -p forge-native ${features[@]+"${features[@]}"} ${target_a
 
 # The extensions that ship with Forge. The others in extensions/ are examples for extension
 # authors (debug builds load them all).
-BUNDLED_EXTENSIONS=(db-explorer containers)
+BUNDLED_EXTENSIONS=(db-explorer containers forge-icons modern-icons colored-icons vscode-great-icons seti-icons)
 
 echo "==> building and packing the bundled extensions: ${BUNDLED_EXTENSIONS[*]}"
 PACKAGES="$(mktemp -d)"
@@ -88,7 +96,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Forge</string>
   <key>CFBundleDisplayName</key><string>Forge</string>
-  <key>CFBundleIdentifier</key><string>dev.forge.ide</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>forge</string>
   <key>CFBundleIconFile</key><string>Forge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -151,7 +159,7 @@ if [ -n "$TARGET" ]; then
 else
   ARCH="$(uname -m | sed 's/^arm64$/aarch64/')"
 fi
-ZIP="$ROOT/dist/Forge-$VERSION-$ARCH.zip"
+ZIP="$ROOT/dist/Forge-$VERSION-macos-$ARCH.zip"
 if [ -n "${FORGE_NOTARY_PROFILE:-}" ]; then
   [ "$IDENTITY" != "-" ] || { echo "error: notarizing needs FORGE_SIGN_IDENTITY (a Developer ID)" >&2; exit 1; }
   echo "==> notarizing with profile $FORGE_NOTARY_PROFILE"

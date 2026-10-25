@@ -234,7 +234,7 @@ for line in sys.stdin:
             sid = "mock-" + uuid.uuid4().hex[:10]
             sessions[sid] = {"cwd": params.get("cwd") or os.getcwd(), "history": []}
             sessions[sid]["mode"] = "default"
-            result = {"sessionId": sid, "echoMcpServers": params.get("mcpServers") or [],
+            result = {"sessionId": sid, "echoMcpServers": params.get("mcpServers") or [], "echoMeta": params.get("_meta"),
                       "modes": {"currentModeId": "default", "availableModes": MODES}, "configOptions": config_options(sessions[sid])}
             notify("session/update", {"sessionId": sid, "update": {"sessionUpdate": "available_commands_update", "availableCommands": [
                 {"name": "usage", "description": "Show plan usage limits", "input": None}]}})

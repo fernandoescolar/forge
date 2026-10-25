@@ -99,7 +99,7 @@ pub fn start_test_session(ide: &ToolContext, path: Option<&Path>, name: Option<&
 /// Runs tests in the Tests panel (shown, with its progress and the gutter results) and
 /// reports how they went: counts, and each failure with its place and message.
 async fn run_tests(ide: ToolContext, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    let path = str_arg(&args, "path").map(|p| ide.resolve(&p));
+    let path = str_arg(&args, "path").map(|p| ide.resolve(&p)).transpose()?;
     let name = str_arg(&args, "name");
     let panel = ide
         .workspace
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn selects_tests_by_file_folder_and_name() {
         use crate::discovery::{Kind, TestClass, TestMethod};
-        let method = |fqn: &str, file: &str| TestMethod { fqn: fqn.into(), name: fqn.rsplit('.').next().unwrap().into(), file: file.into(), row: 1 };
+        let method = |fqn: &str, file: &str| TestMethod { fqn: fqn.into(), name: fqn.rsplit('.').next().unwrap().into(), file: file.into(), row: 1, cases: vec![] };
         let project = TestProject {
             name: "app".into(),
             path: "/p/Cargo.toml".into(),

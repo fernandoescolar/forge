@@ -3,6 +3,8 @@
 //! in the editor area (thread tab), anchored in the code (ctrl-enter), following the
 //! agent live, with access to the project's files through Zed's buffers.
 
+pub mod agent_ignore;
+pub mod agent_setup;
 pub mod agent_review;
 pub mod agent_settings;
 mod anchored;
@@ -10,12 +12,14 @@ mod auth;
 pub mod context;
 pub mod commit_message;
 mod commit_proposal;
+pub mod configure;
 pub mod conflicts;
 pub mod config;
 pub mod diff;
 mod entry_ui;
 mod fix_with_agent;
 mod forge_debug;
+mod forge_read;
 pub mod forge_mcp;
 mod forge_tools;
 mod history;
@@ -33,10 +37,13 @@ mod project_fs;
 pub mod rules;
 pub mod worktree;
 pub mod settings;
+pub mod shell_guard;
+pub mod shell_translate;
 mod terminals;
 mod verify;
 
-pub use fix_with_agent::FixProblemAtCursor;
+pub use configure::ConfigureForge;
+pub use fix_with_agent::{FixProblemAtCursor, FixProblemsInFile, FixProblemsInProject};
 pub use thread::{Status, Thread, ThreadEvent};
 pub use anchored::AskHere;
 pub use threads::{Cancel, ManageWorktrees, NewThread, NewThreadInWorktree, OpenThreads, Send, ThreadView};
@@ -62,5 +69,6 @@ pub fn init(cx: &mut gpui::App) {
     commit_message::init(cx);
     context::init(cx);
     fix_with_agent::init(cx);
+    configure::init(cx);
     conflicts::init(cx);
 }

@@ -3,7 +3,10 @@
 //! plain Rust over the file system, so it can be tested without a window.
 
 pub mod assets;
+pub mod build_log;
 pub mod cli;
+pub mod decompiler;
+pub mod editorconfig;
 pub mod explorer;
 pub mod msbuild;
 pub mod nuget;

@@ -17,6 +17,12 @@ pub fn default_instructions_files() -> Vec<String> {
     vec![".forge/AGENTS.md".into(), "AGENTS.md".into()]
 }
 
+/// The files listing what agents don't get (see `agent_ignore`): a name with a folder in it is
+/// the project's, relative to its root; a bare name counts in every folder, like `.gitignore`.
+pub fn default_agent_ignore_files() -> Vec<String> {
+    vec![".forge/agentignore".into(), ".agentignore".into()]
+}
+
 /// An MCP server offered to every agent session (ACP `McpServer`, stdio transport).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -59,6 +65,14 @@ pub struct AgentsConfig {
     /// The project's instructions files, relative to its root, in order (see `rules`).
     #[serde(default = "default_instructions_files")]
     pub instructions_files: Vec<String>,
+    /// The files listing what agents don't get (see `default_agent_ignore_files`).
+    #[serde(default = "default_agent_ignore_files")]
+    pub agent_ignore_files: Vec<String>,
+    /// How long an agent waits for one of Forge's tools to answer (an `ask_user` question,
+    /// a review, a test run), in seconds; unset: until it answers (see
+    /// `agent_setup::set_tool_timeout`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_seconds: Option<u64>,
 }
 
 impl AgentsConfig {
@@ -88,7 +102,9 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
         "verify_changes": saved.verify_changes,
         "permissions": saved.permissions,
         "instructions_files": saved.instructions_files,
+        "agent_ignore_files": saved.agent_ignore_files,
         "mcp_servers": saved.mcp_servers,
+        "tool_timeout_seconds": saved.tool_timeout_seconds,
         "agents": saved.agents,
     }))
     .unwrap_or_default();
@@ -103,6 +119,10 @@ pub fn to_file_text(config: &AgentsConfig) -> String {
          // prefixes that never ask; \"files_outside_workspace\"). \"mcp_servers\": MCP servers\n\
          // every agent session gets. \"instructions_files\": the project's instructions for agents,\n\
          // relative to its root (every one found is sent; agents' notes go to the first found).\n\
+         // \"agent_ignore_files\": files listing what agents don't get, in .gitignore's syntax (a\n\
+         // name with a folder is relative to the root; a bare name counts in every folder).\n\
+         // \"tool_timeout_seconds\": how long agents wait for Forge's tools (a question to you, a\n\
+         // review); null: until you answer.\n\
          // Forge > Settings > Agents edits this file too.\n{body}\n"
     )
 }
@@ -147,11 +167,15 @@ pub fn load() -> Result<AgentsConfig> {
 pub fn parse(text: &str) -> Result<AgentsConfig> {
     let mut config: AgentsConfig = serde_json_lenient::from_str(text)?;
     migrate(&mut config.agents);
+    crate::agent_ignore::set_files(config.agent_ignore_files.clone());
     Ok(config)
 }
 
 /// npm packages that were renamed upstream; old names stop receiving fixes.
-const RENAMED_PACKAGES: &[(&str, &str)] = &[("@zed-industries/claude-code-acp", "@agentclientprotocol/claude-agent-acp")];
+const RENAMED_PACKAGES: &[(&str, &str)] = &[
+    ("@zed-industries/claude-code-acp", "@agentclientprotocol/claude-agent-acp"),
+    ("@zed-industries/codex-acp", "@agentclientprotocol/codex-acp"),
+];
 
 fn migrate(agents: &mut [AgentSpec]) {
     for agent in agents {
@@ -275,6 +299,8 @@ mod tests {
         let config = super::parse(super::DEFAULT_AGENTS).unwrap();
         let ids: Vec<&str> = config.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["claude", "gemini", "codex", "copilot", "antigravity", "opencode"]);
+        // The shipped file needs no migration (it would warn on every launch).
+        assert!(!super::RENAMED_PACKAGES.iter().any(|(old, _)| super::DEFAULT_AGENTS.contains(old)));
         assert!(config.review_writes);
         assert!(!super::parse(r#"{"agents": [], "review_writes": false}"#).unwrap().review_writes);
         let with_mcp = super::parse(r#"{"agents": [], "mcp_servers": [{"name": "gh", "command": "gh-mcp", "env": {"TOKEN": "t"}}]}"#).unwrap();

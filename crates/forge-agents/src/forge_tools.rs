@@ -18,7 +18,7 @@ const MAX_RESULTS: usize = 100;
 /// What a tool works on.
 pub(crate) type Ide = forge_ui::ide_tools::ToolContext;
 
-pub(crate) use forge_ui::ide_tools::{line_arg, str_arg, tail};
+pub(crate) use forge_ui::ide_tools::{in_temp, line_arg, normalize, str_arg, tail, within};
 
 /// Where `symbol` starts in `line` (bytes): its first occurrence as a whole word.
 pub(crate) fn column_of(line: &str, symbol: &str) -> Option<usize> {
@@ -30,7 +30,7 @@ pub(crate) fn column_of(line: &str, symbol: &str) -> Option<usize> {
     })
 }
 
-async fn open(ide: &Ide, path: &Path, cx: &mut AsyncWindowContext) -> Result<Entity<Buffer>, String> {
+pub(crate) async fn open(ide: &Ide, path: &Path, cx: &mut AsyncWindowContext) -> Result<Entity<Buffer>, String> {
     let task = ide.project.update(cx, |p, cx| p.open_local_buffer(path, cx)).map_err(|_| "The project is closed.".to_string())?;
     task.await.map_err(|e| format!("Can't open {}: {e:#}", ide.show(path)))
 }
@@ -40,7 +40,7 @@ pub(crate) async fn symbol_at(ide: &Ide, args: &Value, cx: &mut AsyncWindowConte
     let path = str_arg(args, "path").ok_or("`path` is missing.")?;
     let line = line_arg(args, "line").ok_or("`line` (1-based) is missing.")?;
     let symbol = str_arg(args, "symbol").ok_or("`symbol` is missing.")?;
-    let buffer = open(ide, &ide.resolve(&path), cx).await?;
+    let buffer = open(ide, &ide.resolve(&path)?, cx).await?;
     let text = cx.update(|_, cx| {
         let snapshot = buffer.read(cx).snapshot();
         let row = line - 1;
@@ -90,42 +90,113 @@ pub(crate) async fn references(ide: Ide, args: Value, cx: &mut AsyncWindowContex
     Ok(format!("{total} references to `{symbol}`:\n{}{more}", lines.join("\n")))
 }
 
-/// The language servers' errors and warnings: in `path`, or in every file that has some.
-pub(crate) async fn diagnostics(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
-    let files: Vec<PathBuf> = match str_arg(&args, "path") {
-        Some(path) => vec![ide.resolve(&path)],
-        None => {
-            let project = ide.project.upgrade().ok_or("The project is closed.")?;
-            let counts = cx.update(|_, cx| crate::verify::diagnostic_counts(&project, cx)).map_err(|_| "The project is closed.".to_string())?;
-            let mut files: Vec<PathBuf> = counts.into_iter().filter(|(_, (e, w))| e + w > 0).map(|(p, _)| p).collect();
-            files.sort();
-            files
-        }
+/// The language servers' errors and warnings: in a file or a folder (`path`), in the files
+/// this conversation changed (`changed`), or in every file that has some; only errors, or
+/// only warnings, with `severity`.
+pub(crate) async fn diagnostics(ide: Ide, args: Value, changed: &[PathBuf], cx: &mut AsyncWindowContext) -> ToolReply {
+    let only_changed = args.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    let severity = str_arg(&args, "severity");
+    let want = |error: bool| match severity.as_deref() {
+        Some("error") => error,
+        Some("warning") => !error,
+        _ => true,
     };
+    let within = str_arg(&args, "path").map(|p| ide.resolve(&p)).transpose()?;
+    let mut files: Vec<PathBuf> = if only_changed {
+        changed.to_vec()
+    } else if within.as_ref().is_some_and(|p| p.is_file()) {
+        within.iter().cloned().collect()
+    } else {
+        let project = ide.project.upgrade().ok_or("The project is closed.")?;
+        let counts = cx.update(|_, cx| crate::verify::diagnostic_counts(&project, cx)).map_err(|_| "The project is closed.".to_string())?;
+        counts.into_iter().filter(|(_, (e, w))| e + w > 0).map(|(p, _)| p).collect()
+    };
+    if let Some(within) = &within {
+        files.retain(|f| f.starts_with(within));
+    }
+    files.sort();
     if files.is_empty() {
-        return Ok("The language servers report no errors or warnings.".into());
+        return Ok(match (only_changed, &within) {
+            (true, _) if changed.is_empty() => "You haven't changed any file in this conversation.".into(),
+            (true, Some(_)) => "You haven't changed any file there in this conversation.".into(),
+            _ => "The language servers report no errors or warnings there.".into(),
+        });
     }
     let project = ide.project.clone();
     let checks = cx.update(|_, cx| crate::verify::check(project, files, Default::default(), cx)).map_err(|_| "The project is closed.".to_string())?.await;
     let mut lines = Vec::new();
+    let (mut errors, mut warnings, mut with_problems) = (0, 0, 0);
     for check in &checks {
-        for p in &check.problems {
+        let shown: Vec<_> = check.problems.iter().filter(|p| want(p.error)).collect();
+        if !shown.is_empty() {
+            with_problems += 1;
+        }
+        for p in shown {
+            if p.error { errors += 1 } else { warnings += 1 }
             lines.push(format!("{}:{} {}: {}", ide.show(&check.path), p.line + 1, if p.error { "error" } else { "warning" }, p.message));
         }
     }
     if lines.is_empty() {
-        return Ok("The language servers report no errors or warnings there.".into());
+        return Ok("The language servers report no such problems there.".into());
     }
     let total = lines.len();
     lines.truncate(MAX_RESULTS);
-    let more = if total > MAX_RESULTS { format!("\n… and {} more", total - MAX_RESULTS) } else { String::new() };
-    Ok(format!("{}{more}", lines.join("\n")))
+    let more = if total > MAX_RESULTS { format!("\n… and {} more (narrow it with `path` or `severity`)", total - MAX_RESULTS) } else { String::new() };
+    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    Ok(format!("{}{more}\n({}, {} in {})", lines.join("\n"), plural(errors, "error"), plural(warnings, "warning"), plural(with_problems, "file")))
+}
+
+/// The problems your changes brought: in `path`, or in every file this conversation changed,
+/// once the language servers have looked at them, compared with what each file had before
+/// the agent first changed it (by message, as lines move).
+pub(crate) async fn check_file(ide: Ide, args: Value, changed: &[PathBuf], baseline: &std::collections::HashMap<PathBuf, Vec<crate::verify::Problem>>, cx: &mut AsyncWindowContext) -> ToolReply {
+    let files: Vec<PathBuf> = match str_arg(&args, "path") {
+        Some(path) => vec![ide.resolve(&path)?],
+        None => changed.to_vec(),
+    };
+    if files.is_empty() {
+        return Ok("You haven't changed any file in this conversation: there is nothing to check.".into());
+    }
+    let project = ide.project.clone();
+    crate::verify::settle(&project, cx).await;
+    let mut parts = Vec::new();
+    let mut clean = 0;
+    for path in files {
+        let shown = ide.show(&path);
+        let Some(now) = crate::verify::problems_in(&project, &path, crate::verify::BASELINE_LIMIT, cx).await else {
+            parts.push(format!("{shown}: it doesn't exist."));
+            continue;
+        };
+        let Some(before) = baseline.get(&path) else {
+            // Not changed by this conversation: all of its problems are as they were.
+            let list: Vec<String> = now.iter().take(MAX_RESULTS).map(|p| format!("- line {} {}: {}", p.line + 1, if p.error { "error" } else { "warning" }, p.message)).collect();
+            parts.push(if now.is_empty() {
+                format!("{shown}: no problems (you haven't changed it in this conversation).")
+            } else {
+                format!("{shown}: you haven't changed it in this conversation; its problems:\n{}", list.join("\n"))
+            });
+            continue;
+        };
+        let (new, kept) = crate::verify::new_problems(&now, before);
+        let had = if kept > 0 { format!(" ({kept} it already had before your changes remain)") } else { String::new() };
+        if new.is_empty() {
+            clean += 1;
+            parts.push(format!("{shown}: no new problems{had}."));
+        } else {
+            let list: Vec<String> = new.iter().take(MAX_RESULTS).map(|p| format!("- line {} {}: {}", p.line + 1, if p.error { "error" } else { "warning" }, p.message)).collect();
+            parts.push(format!("{shown}: {} new problem{}{had}:\n{}", new.len(), if new.len() == 1 { "" } else { "s" }, list.join("\n")));
+        }
+    }
+    if clean == parts.len() && parts.len() > 1 {
+        return Ok(format!("No new problems in the {} files you changed.\n{}", parts.len(), parts.join("\n")));
+    }
+    Ok(parts.join("\n"))
 }
 
 /// Opens `path` in the editor at `line` (to `end_line`), selected, for the user to look at.
 pub(crate) async fn show_file(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
     let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
-    let abs = ide.resolve(&path);
+    let abs = ide.resolve(&path)?;
     let start = line_arg(&args, "line").unwrap_or(1);
     let end = line_arg(&args, "end_line").unwrap_or(start).max(start);
     let open = ide
@@ -207,7 +278,7 @@ async fn lines_at(ide: &Ide, args: &Value, cx: &mut AsyncWindowContext) -> Resul
     let path = str_arg(args, "path").ok_or("`path` is missing.")?;
     let line = line_arg(args, "line").ok_or("`line` (1-based) is missing.")?;
     let end = line_arg(args, "end_line").unwrap_or(line).max(line);
-    let buffer = open(ide, &ide.resolve(&path), cx).await?;
+    let buffer = open(ide, &ide.resolve(&path)?, cx).await?;
     let range = cx
         .update(|_, cx| {
             let snapshot = buffer.read(cx).snapshot();
@@ -270,7 +341,7 @@ pub(crate) async fn edit_plan(name: &str, ide: &Ide, args: &Value, cx: &mut Asyn
         }
         "format_file" => {
             let path = str_arg(args, "path").ok_or("`path` is missing.")?;
-            let abs = ide.resolve(&path);
+            let abs = ide.resolve(&path)?;
             open(ide, &abs, cx).await?;
             Ok(EditPlan { kind: EditKind::Format, args: args.clone(), places: None, files: vec![abs] })
         }
@@ -319,7 +390,7 @@ pub(crate) async fn apply_edit(ide: &Ide, plan: &EditPlan, cx: &mut AsyncWindowC
         let old_text = std::fs::read_to_string(&path).ok();
         let save = ide.project.update(cx, |p, cx| p.save_buffer(buffer.clone(), cx)).map_err(|_| closed())?;
         save.await.map_err(|e| format!("Couldn't save {}: {e:#}", ide.show(&path)))?;
-        records.push(crate::project_fs::WriteRecord { path, old_text, new_text });
+        records.push(crate::project_fs::WriteRecord { path, old_text, new_text, problems_before: None });
     }
     records.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(records)
@@ -334,6 +405,142 @@ pub(crate) async fn hover(ide: Ide, args: Value, cx: &mut AsyncWindowContext) ->
         return Ok(format!("The language server says nothing about `{symbol}` there."));
     }
     Ok(text.join("\n\n"))
+}
+
+/// Where the implementations of `symbol` are (of an interface, a trait, an abstract method).
+pub(crate) async fn implementations(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.implementations(&buffer, point, cx)).map_err(|_| closed())?;
+    let links = task.await.map_err(|e| format!("The language server couldn't find them: {e:#}"))?.unwrap_or_default();
+    if links.is_empty() {
+        return Ok(format!("The language server finds no implementations of `{symbol}`."));
+    }
+    let mut lines = cx
+        .update(|_, cx| links.iter().take(MAX_RESULTS).map(|l| describe(&ide, &l.target.buffer, l.target.range.start.to_point(&l.target.buffer.read(cx).snapshot()), cx)).collect::<Vec<_>>())
+        .map_err(|_| closed())?;
+    lines.sort();
+    lines.dedup();
+    Ok(format!("{} implementation{} of `{symbol}`:\n{}", links.len(), if links.len() == 1 { "" } else { "s" }, lines.join("\n")))
+}
+
+/// Where the type of `symbol` (a variable, a parameter, an expression) is defined.
+pub(crate) async fn type_definition(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.type_definitions(&buffer, point, cx)).map_err(|_| closed())?;
+    let links = task.await.map_err(|e| format!("The language server couldn't find it: {e:#}"))?.unwrap_or_default();
+    if links.is_empty() {
+        return Err(format!("The language server knows no type definition for `{symbol}` there."));
+    }
+    let lines = cx
+        .update(|_, cx| links.iter().map(|l| describe(&ide, &l.target.buffer, l.target.range.start.to_point(&l.target.buffer.read(cx).snapshot()), cx)).collect::<Vec<_>>())
+        .map_err(|_| closed())?;
+    Ok(format!("The type of `{symbol}` is defined at:\n{}", lines.join("\n")))
+}
+
+/// A file's outline: its classes, functions, methods… nested, with their lines.
+pub(crate) async fn document_symbols(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let path = str_arg(&args, "path").ok_or("`path` is missing.")?;
+    let buffer = open(&ide, &ide.resolve(&path)?, cx).await?;
+    let task = ide.project.update(cx, |p, cx| p.document_symbols(&buffer, cx)).map_err(|_| closed())?;
+    let symbols = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?;
+    if symbols.is_empty() {
+        return Ok(format!("The language server lists no symbols in {path} (is one running for this file?)."));
+    }
+    fn walk(symbols: &[project::DocumentSymbol], depth: usize, out: &mut Vec<String>) {
+        for s in symbols {
+            let (start, end) = (s.range.start.0.row + 1, s.range.end.0.row + 1);
+            let lines = if start == end { format!("line {start}") } else { format!("lines {start}-{end}") };
+            out.push(format!("{}{} {} ({lines})", "  ".repeat(depth), symbol_kind(s.kind), s.name));
+            walk(&s.children, depth + 1, out);
+        }
+    }
+    let mut lines = Vec::new();
+    walk(&symbols, 0, &mut lines);
+    let total = lines.len();
+    lines.truncate(MAX_RESULTS * 3);
+    let more = if total > lines.len() { format!("\n… and {} more", total - lines.len()) } else { String::new() };
+    Ok(format!("{}{more}", lines.join("\n")))
+}
+
+/// `function`, `class`, `method`…: a symbol kind as words.
+fn symbol_kind(kind: impl std::fmt::Debug) -> String {
+    let name = format!("{kind:?}");
+    // `SymbolKind(12)`-style output for kinds the protocol doesn't name.
+    if name.starts_with("SymbolKind") { "symbol".into() } else { name.to_lowercase().replace('_', " ") }
+}
+
+/// Who calls `symbol` (`incoming`, the default) or what it calls (`outgoing`), per the
+/// language server's call hierarchy: each caller or callee with where.
+pub(crate) async fn call_hierarchy(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    let outgoing = str_arg(&args, "direction").as_deref() == Some("outgoing");
+    let task = ide.project.update(cx, |p, cx| p.prepare_call_hierarchy(&buffer, point, cx)).map_err(|_| closed())?;
+    let items = task.await.map_err(|e| format!("The language server has no call hierarchy there: {e:#}"))?.unwrap_or_default();
+    let Some(item) = items.into_iter().next() else {
+        return Err(format!("The language server has no call hierarchy for `{symbol}` (is it a function or method, and does the server support call hierarchies?)."));
+    };
+    let item_place = |item: &project::CallHierarchyItem, cx: &gpui::App| {
+        let snapshot = item.buffer.read(cx).snapshot();
+        describe(&ide, &item.buffer, item.selection_range.start.to_point(&snapshot), cx)
+    };
+    let lines: Vec<String> = if outgoing {
+        let task = ide.project.update(cx, |p, cx| p.outgoing_calls(item, cx)).map_err(|_| closed())?;
+        let calls = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?.unwrap_or_default();
+        cx.update(|_, cx| calls.iter().take(MAX_RESULTS).map(|c| format!("- {} {}: {}", symbol_kind(c.to.kind), c.to.name, item_place(&c.to, cx))).collect()).map_err(|_| closed())?
+    } else {
+        let task = ide.project.update(cx, |p, cx| p.incoming_calls(item, cx)).map_err(|_| closed())?;
+        let calls = task.await.map_err(|e| format!("The language server couldn't list them: {e:#}"))?.unwrap_or_default();
+        cx.update(|_, cx| {
+            calls
+                .iter()
+                .take(MAX_RESULTS)
+                .map(|c| {
+                    let sites: Vec<String> = c.from_ranges.iter().map(|l| (l.range.start.to_point(&l.buffer.read(cx).snapshot()).row + 1).to_string()).collect();
+                    let times = if sites.len() > 1 { format!(" ({} calls, lines {})", sites.len(), sites.join(", ")) } else { String::new() };
+                    format!("- {} {}{times}: {}", symbol_kind(c.from.kind), c.from.name, item_place(&c.from, cx))
+                })
+                .collect()
+        })
+        .map_err(|_| closed())?
+    };
+    if lines.is_empty() {
+        return Ok(if outgoing { format!("`{symbol}` calls nothing the language server knows of.") } else { format!("Nothing calls `{symbol}`, as far as the language server knows.") });
+    }
+    Ok(format!("{} `{symbol}`:\n{}", if outgoing { "Calls made by" } else { "Callers of" }, lines.join("\n")))
+}
+
+/// The signatures (overloads) of the function called as `symbol(` on `line`, with their
+/// parameters' documentation.
+pub(crate) async fn signature_help(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -> ToolReply {
+    let (buffer, point, symbol) = symbol_at(&ide, &args, cx).await?;
+    // Inside the call's parentheses, where an editor asks for it.
+    let inside = cx
+        .update(|_, cx| {
+            let snapshot = buffer.read(cx).snapshot();
+            let after = Point::new(point.row, point.column + symbol.len() as u32);
+            let rest: String = snapshot.text_for_range(after..Point::new(point.row, snapshot.line_len(point.row))).collect();
+            let skip = rest.find('(').map(|i| i + 1).unwrap_or(0) as u32;
+            Point::new(point.row, after.column + skip)
+        })
+        .map_err(|_| closed())?;
+    let task = ide.project.update(cx, |p, cx| p.lsp_store().update(cx, |s, cx| s.signature_help(&buffer, inside, cx))).map_err(|_| closed())?;
+    let helps = task.await.unwrap_or_default();
+    let text = cx
+        .update(|_, cx| {
+            helps
+                .iter()
+                .flat_map(|h| h.signatures.iter())
+                .map(|sig| {
+                    let docs = sig.documentation.as_ref().map(|d| d.read(cx).source().trim().to_string()).filter(|d| !d.is_empty()).map(|d| format!("\n  {}", d.replace('\n', "\n  "))).unwrap_or_default();
+                    format!("- {}{docs}", sig.label)
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|_| closed())?;
+    if text.is_empty() {
+        return Ok(format!("The language server gives no signature for `{symbol}(` there."));
+    }
+    Ok(format!("`{symbol}`:\n{}", text.join("\n")))
 }
 
 /// Symbols (types, functions…) whose name matches `query`, across the project.

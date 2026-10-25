@@ -488,7 +488,7 @@ impl Render for AnchoredCard {
         let is_waiting = t.entries.iter().any(|e| matches!(e, Entry::Permission { resolved: None, .. } | Entry::Review { reply: Some(_), .. }));
         // The files the agent changed: keep or undo them from here too.
         let changes_row = (!t.changes.is_empty()).then(|| {
-            let (added, removed) = t.changes.iter().map(|c| c.stats()).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
+            let (added, removed) = t.changes.iter().map(|c| t.change_stats(c)).fold((0, 0), |(a, r), (x, y)| (a + x, r + y));
             let count = t.changes.len();
             let (keep, undo) = (handle.clone(), handle.clone());
             h_flex()
@@ -634,7 +634,7 @@ mod tests {
             env: vec![],
             cwd: Some(tmp.path().to_path_buf()),
         };
-        let config = crate::config::AgentsConfig { instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], default_agent: None, permissions: Default::default() };
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![agent], review_writes: true, verify_changes: true, mcp_servers: vec![], tool_timeout_seconds: None,default_agent: None, permissions: Default::default() };
         let thread = workspace.update_in(cx, |ws, window, cx| cx.new(|cx| Thread::with_config(ws, Some(config), tmp.path().join("history"), window, cx)));
         card.update_in(cx, |c, window, cx| c.start(thread.clone(), "what is this?", window, cx));
         wait_for(cx, &thread, "an answer", |t| t.status() == Status::Ready && t.entries.iter().any(|e| matches!(e, Entry::Agent(_)))).await;

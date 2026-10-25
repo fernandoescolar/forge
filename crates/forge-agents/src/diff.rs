@@ -98,6 +98,8 @@ pub fn apply_hunks(old: &str, new: &str, hunks: &[Hunk], accepted: &[bool]) -> S
 
 pub struct DiffView {
     pub edit: Edit,
+    /// `edit`'s (added, removed) lines, counted once: views show them on every repaint.
+    pub stats: (usize, usize),
     pub editor: Entity<Editor>,
     /// The proposed text; editable while a write waits for review.
     pub buffer: Entity<Buffer>,
@@ -201,7 +203,7 @@ impl DiffView {
                 *live_slot.borrow_mut() = Some(subscription);
             }
         });
-        Self { edit, editor, buffer: view_buffer, _build: build, _live: live }
+        Self { stats: edit.stats(), edit, editor, buffer: view_buffer, _build: build, _live: live }
     }
 }
 

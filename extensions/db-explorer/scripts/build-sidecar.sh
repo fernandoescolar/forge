@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the forge-sql sidecar and copy the binaries into extensions/db-explorer/bin/.
 #
-#   scripts/build-sidecar.sh             # macOS: aarch64-apple-darwin + x86_64-apple-darwin; Linux: this machine's
+#   scripts/build-sidecar.sh             # macOS: aarch64-apple-darwin + x86_64-apple-darwin; Linux and Windows (Git Bash): this machine's
 #   scripts/build-sidecar.sh --host-only # only the current architecture
 #   scripts/build-sidecar.sh --target x86_64-apple-darwin   # only that one
 set -euo pipefail
@@ -24,6 +24,7 @@ done
 case "$(uname -s)" in
   Darwin) vendor_os=apple-darwin ;;
   Linux) vendor_os=unknown-linux-gnu ;;
+  MINGW*|MSYS*|CYGWIN*) vendor_os=pc-windows-msvc ;;
   *) echo "unsupported host system: $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -46,12 +47,16 @@ for target in "${targets[@]}"; do
     x86_64-apple-darwin) dir=darwin-x64 ;;
     aarch64-unknown-linux-gnu) dir=linux-arm64 ;;
     x86_64-unknown-linux-gnu) dir=linux-x64 ;;
+    x86_64-pc-windows-msvc) dir=win32-x64 ;;
+    aarch64-pc-windows-msvc) dir=win32-arm64 ;;
     *) echo "unsupported target: $target" >&2; exit 2 ;;
   esac
   echo "==> building forge-sql for $target"
   cargo build --release --locked --manifest-path "$SIDECAR_DIR/Cargo.toml" --target "$target"
+  exe=forge-sql
+  [[ $target == *windows* ]] && exe=forge-sql.exe
   mkdir -p "$EXT_DIR/bin/$dir"
-  cp "$SIDECAR_DIR/target/$target/release/forge-sql" "$EXT_DIR/bin/$dir/forge-sql"
-  chmod +x "$EXT_DIR/bin/$dir/forge-sql"
-  echo "    -> bin/$dir/forge-sql ($(du -h "$EXT_DIR/bin/$dir/forge-sql" | cut -f1))"
+  cp "$SIDECAR_DIR/target/$target/release/$exe" "$EXT_DIR/bin/$dir/$exe"
+  chmod +x "$EXT_DIR/bin/$dir/$exe"
+  echo "    -> bin/$dir/$exe ($(du -h "$EXT_DIR/bin/$dir/$exe" | cut -f1))"
 done

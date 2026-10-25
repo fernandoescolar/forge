@@ -49,7 +49,7 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
         let id_path = canonical(&file);
         let tests: Vec<TestMethod> = found
             .into_iter()
-            .map(|(titles, row)| TestMethod { fqn: format!("{id_path} > {}", titles.join(" > ")), name: titles.join(" › "), file: file.clone(), row })
+            .map(|(titles, row)| TestMethod { fqn: format!("{id_path} > {}", titles.join(" > ")), name: titles.join(" › "), file: file.clone(), row, cases: Vec::new() })
             .collect();
         if tests.is_empty() {
             continue;
@@ -151,6 +151,7 @@ fn selection(scope: &Scope) -> (Vec<String>, Option<String>) {
     match scope {
         Scope::Project => (vec![], None),
         Scope::Class(file) => (vec![file.clone()], None),
+        Scope::Case { method, .. } => selection(&Scope::Methods(vec![method.clone()])),
         Scope::Methods(ids) => {
             let mut files: Vec<String> = ids.iter().map(|id| split_id(id).0.to_string()).collect();
             files.sort();
@@ -186,7 +187,7 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     command.env("FORCE_COLOR", "0").env("CI", "1").current_dir(project.dir());
     let output = runner::execute(command, live, None).await.context("failed to start the tests with npx; is Node.js installed?")?;
     let results = std::fs::read_to_string(&report_file).ok().map(|json| parse(&json)).unwrap_or_default();
-    Ok(RunOutput { results, log: output.log, success: output.success })
+    Ok(RunOutput { results, log: output.log, success: output.success, coverage: None })
 }
 
 /// The test runner's own entry point (`jest/bin/jest.js`, `vitest/vitest.mjs`), from the

@@ -17,6 +17,45 @@ pub struct DiscoveredTest {
     pub row: u32,
     /// Zero-based row of the class name.
     pub class_row: u32,
+    /// Its data rows: xUnit `[InlineData]`, NUnit `[TestCase]`, MSTest `[DataRow]`.
+    pub cases: Vec<DataCase>,
+}
+
+/// One data row of a data-driven test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataCase {
+    /// Zero-based row of the attribute.
+    pub row: u32,
+    /// Its arguments as written, e.g. `1, "two"`.
+    pub arguments: String,
+}
+
+/// Attributes that each add one data row to a test.
+const DATA_ATTRIBUTES: &[&str] = &["InlineData", "TestCase", "DataRow"];
+
+/// The data rows in the attributes of a method declaration.
+fn data_cases(method: tree_sitter::Node<'_>, source: &str) -> Vec<DataCase> {
+    let mut cases = Vec::new();
+    let mut lists = method.walk();
+    for list in method.children(&mut lists).filter(|n| n.kind() == "attribute_list") {
+        let mut attributes = list.walk();
+        for attribute in list.children(&mut attributes).filter(|n| n.kind() == "attribute") {
+            let Some(name) = attribute.child_by_field_name("name") else { continue };
+            // `Xunit.InlineData`, `InlineDataAttribute`…
+            let name = source[name.byte_range()].rsplit('.').next().unwrap_or_default();
+            if !DATA_ATTRIBUTES.contains(&name.trim_end_matches("Attribute")) {
+                continue;
+            }
+            let mut children = attribute.walk();
+            let arguments = attribute
+                .children(&mut children)
+                .find(|n| n.kind() == "attribute_argument_list")
+                .map(|list| source[list.byte_range()].trim_start_matches('(').trim_end_matches(')').split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default();
+            cases.push(DataCase { row: attribute.start_position().row as u32, arguments });
+        }
+    }
+    cases
 }
 
 impl DiscoveredTest {
@@ -69,6 +108,7 @@ pub fn csharp_tests(source: &str) -> Vec<DiscoveredTest> {
             method: source[method.byte_range()].to_string(),
             row: method.start_position().row as u32,
             class_row: class.start_position().row as u32,
+            cases: method.parent().map(|declaration| data_cases(declaration, source)).unwrap_or_default(),
         };
         // A method with several test attributes matches once per attribute.
         if !tests.contains(&test) {
@@ -96,5 +136,31 @@ mod tests {
             ]
         );
         assert!(csharp_tests("class Plain { void M() {} }").is_empty());
+        let rows: Vec<_> = tests[1].cases.iter().map(|c| (c.row, c.arguments.as_str())).collect();
+        assert_eq!(rows, [(8, "1"), (9, "2")]);
+        assert!(tests[0].cases.is_empty());
+    }
+
+    #[test]
+    fn finds_the_data_rows_of_each_framework() {
+        let source = r#"namespace N;
+public class T
+{
+    [Test]
+    [TestCase(1, "a b")]
+    [NUnit.Framework.TestCase(2,   "c")]
+    public void NUnit(int x, string s) {}
+
+    [TestMethod]
+    [DataRow(true, 1.5)]
+    [DataRowAttribute(false, 2.5)]
+    public void MsTest(bool b, double d) {}
+}
+"#;
+        let tests = csharp_tests(source);
+        let cases = |i: usize| tests[i].cases.iter().map(|c| c.arguments.clone()).collect::<Vec<_>>();
+        assert_eq!(cases(0), ["1, \"a b\"", "2, \"c\""]);
+        assert_eq!(cases(1), ["true, 1.5", "false, 2.5"]);
+        assert_eq!(tests[0].cases[0].row, 4);
     }
 }

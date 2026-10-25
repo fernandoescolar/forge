@@ -1,0 +1,18 @@
+{
+  "name": "colored-icons",
+  "displayName": "Colored Zed Icons",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Zed's icons in colour, for light and dark themes",
+  "forge": {
+    "iconThemes": [
+      "icon_themes"
+    ],
+    "files": [
+      "icon_themes",
+      "icons",
+      "README.md",
+      "LICENSES"
+    ]
+  }
+}

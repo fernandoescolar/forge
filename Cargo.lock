@@ -3381,6 +3381,7 @@ dependencies = [
  "db",
  "editor",
  "file_icons",
+ "forge-git",
  "forge-process",
  "forge-ui",
  "fs",
@@ -3392,6 +3393,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "ide-api",
+ "ignore",
  "imara-diff 0.1.8",
  "language",
  "log",
@@ -3402,6 +3404,7 @@ dependencies = [
  "paths",
  "picker",
  "project",
+ "regex",
  "release_channel",
  "remote_connection",
  "semver",
@@ -3436,6 +3439,7 @@ dependencies = [
  "dotnet-model",
  "editor",
  "file_icons",
+ "forge-languages",
  "forge-tests",
  "forge-ui",
  "fs",
@@ -3481,6 +3485,7 @@ dependencies = [
  "futures",
  "fuzzy",
  "gpui",
+ "ide-api",
  "language",
  "log",
  "markdown",
@@ -3492,6 +3497,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_json_lenient",
  "settings",
  "smol",
  "task",
@@ -3519,6 +3525,7 @@ dependencies = [
  "git_ui",
  "git_ui_core",
  "gpui",
+ "ide-api",
  "language",
  "log",
  "menu",
@@ -3545,6 +3552,7 @@ dependencies = [
  "forge-ui",
  "futures",
  "gpui",
+ "ide-api",
  "language",
  "log",
  "multi_buffer",
@@ -3608,6 +3616,7 @@ dependencies = [
  "language_core",
  "log",
  "lsp",
+ "paths",
  "project",
  "regex",
  "rust-embed",
@@ -3624,8 +3633,10 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-c-sharp",
  "tree-sitter-language",
+ "tree-sitter-make",
  "tree-sitter-xml",
  "util",
+ "workspace",
 ]
 
 [[package]]
@@ -3643,6 +3654,7 @@ dependencies = [
  "debugger_ui",
  "diagnostics",
  "editor",
+ "embed-resource",
  "env_logger 0.11.8",
  "file_finder",
  "file_icons",
@@ -3702,6 +3714,7 @@ dependencies = [
  "util",
  "uuid",
  "watch",
+ "windows 0.62.2",
  "workspace",
  "zed_actions",
 ]
@@ -3773,6 +3786,7 @@ version = "0.0.1-beta"
 dependencies = [
  "anyhow",
  "dap",
+ "db",
  "editor",
  "forge-languages",
  "forge-process",
@@ -3806,8 +3820,10 @@ dependencies = [
  "forge-ui",
  "fs",
  "gpui",
+ "log",
  "project",
  "serde_json",
+ "serde_json_lenient",
  "settings",
  "task",
  "tempfile",
@@ -3834,6 +3850,7 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
+ "tempfile",
  "theme",
  "ui",
  "util",
@@ -3851,6 +3868,7 @@ dependencies = [
  "futures",
  "gpui",
  "http_client",
+ "ide-api",
  "log",
  "project",
  "ring",
@@ -5321,8 +5339,10 @@ name = "ide-api"
 version = "0.0.1-beta"
 dependencies = [
  "async-trait",
+ "forge-process",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
 ]
@@ -12058,6 +12078,16 @@ dependencies = [
 name = "tree-sitter-language"
 version = "0.1.8"
 source = "git+https://github.com/tree-sitter/tree-sitter?rev=43623ec9bf0eaaf7113285c46e8a09018f181b18#43623ec9bf0eaaf7113285c46e8a09018f181b18"
+
+[[package]]
+name = "tree-sitter-make"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5998dc7cbcbdab19fae8aefef982bf2d6544513d8d2e69cc44aec4c63810104"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-md"

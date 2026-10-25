@@ -6,6 +6,7 @@ ember orange, like metal in a forge, and a warm yellow spark. Shapes are signed-
 so edges are anti-aliased.
 
     scripts/make-icon.py out.png [size]   # 1024 px unless a size is given
+    scripts/make-icon.py out.ico          # Windows icon: 16 to 256 px
 """
 import math, struct, sys, zlib
 
@@ -77,7 +78,7 @@ def png(rows, size):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
 
 
-def main(out, size=N):
+def render(size):
     scale = N / size
     rows = []
     for y in range(size):
@@ -86,8 +87,25 @@ def main(out, size=N):
             r, g, b, a = pixel((x + 0.5) * scale, (y + 0.5) * scale)
             row += [round(r * 255), round(g * 255), round(b * 255), round(a * 255)]
         rows.append(row)
+    return png(rows, size)
+
+
+def ico(sizes):
+    """An .ico holding a PNG of each size (Windows Vista and later read PNG entries)."""
+    images = [render(size) for size in sizes]
+    header = struct.pack("<HHH", 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    entries = b""
+    for size, data in zip(sizes, images):
+        entries += struct.pack("<BBBBHHII", size % 256, size % 256, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    return header + entries + b"".join(images)
+
+
+def main(out, size=N):
+    data = ico([16, 24, 32, 48, 64, 128, 256]) if out.endswith(".ico") else render(size)
     with open(out, "wb") as f:
-        f.write(png(rows, size))
+        f.write(data)
 
 
 if __name__ == "__main__":

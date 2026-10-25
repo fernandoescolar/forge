@@ -25,6 +25,8 @@ use serde_json::{Value, json};
 use task::{AttachRequest, BuildTaskDefinition, DebugScenario, SpawnInTerminal, TaskTemplate, ZedDebugConfig};
 use util::command::new_command;
 
+use crate::active_build::ActiveBuild;
+
 pub const ADAPTER_NAME: &str = "netcoredbg";
 const REPO: &str = "Samsung/netcoredbg";
 const LOCATOR_NAME: &str = "dotnet-test-locator";
@@ -212,7 +214,7 @@ impl DapLocator for DotnetTestLocator {
 
         let mut build = build_config.clone();
         build.label = format!("dotnet build {}", project.as_deref().unwrap_or_default());
-        build.args = ["build".to_string()].into_iter().chain(project).collect();
+        build.args = ["build".to_string()].into_iter().chain(project).chain(ActiveBuild::forwarded_args(&build_config.args)).collect();
         if let Some(filter) = filter {
             build.env.insert(FILTER_ENV.into(), filter);
         }
@@ -235,13 +237,14 @@ impl DapLocator for DotnetTestLocator {
     ) -> Result<DebugRequest> {
         let project = build_config.args.get(1).map(|arg| unquote(arg).to_string());
         let filter = build_config.env.get(FILTER_ENV).map(|filter| unquote(filter).to_string());
-        let framework = project
-            .as_deref()
-            .and_then(|project| target_frameworks(Path::new(project)).pop());
+        let build = ActiveBuild::from_args(&build_config.args);
+        let framework = build.framework.clone().or_else(|| project.as_deref().and_then(|project| target_frameworks(Path::new(project)).pop()));
 
         let mut args = vec!["test".to_string()];
         args.extend(project);
         args.push("--no-build".into());
+        // `--no-build` finds what the build step made only in the same configuration.
+        args.extend(build.configuration_args());
         if let Some(framework) = framework {
             // With several target frameworks every test host would wait for a debugger.
             args.extend(["--framework".into(), framework]);
@@ -341,7 +344,7 @@ impl DapLocator for DotnetRunLocator {
         };
         let mut build = build_config.clone();
         build.label = format!("dotnet build {}", project.as_deref().unwrap_or_default());
-        build.args = ["build".to_string()].into_iter().chain(project).collect();
+        build.args = ["build".to_string()].into_iter().chain(project).chain(ActiveBuild::forwarded_args(options)).collect();
         if let Some(profile) = profile {
             for (key, value) in profile.env {
                 build.env.entry(key).or_insert(value);
@@ -377,8 +380,16 @@ impl DapLocator for DotnetRunLocator {
             command.arg(project);
         }
         command.arg("-getProperty:TargetPath");
+        // The program of the configuration and framework the build step built.
+        let build = ActiveBuild::from_args(&build_config.args);
+        if let Some(configuration) = &build.configuration {
+            command.arg(format!("-p:Configuration={configuration}"));
+        }
+        if let Some(platform) = build.msbuild_platform() {
+            command.arg(format!("-p:Platform={platform}"));
+        }
         // A multi-targeted project has no TargetPath of its own; pick one framework.
-        if let Some(framework) = project.as_deref().and_then(|p| target_frameworks(p).pop()) {
+        if let Some(framework) = build.framework.clone().or_else(|| project.as_deref().and_then(|p| target_frameworks(p).pop())) {
             command.arg(format!("-p:TargetFramework={framework}"));
         }
         if let Some(cwd) = &build_config.cwd {
@@ -420,7 +431,7 @@ fn unquote(arg: &str) -> &str {
 }
 
 /// `<TargetFramework>` or `<TargetFrameworks>` of a project, in declaration order.
-fn target_frameworks(project: &Path) -> Vec<String> {
+pub fn target_frameworks(project: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(project) else {
         return Vec::new();
     };

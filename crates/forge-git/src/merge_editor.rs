@@ -314,9 +314,9 @@ impl MergeEditor {
 /// (merged by Forge) stay as they are.
 fn stage_if_unmerged(path: &Path) -> anyhow::Result<()> {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Ok(()) };
-    let unmerged = std::process::Command::new("git").arg("-C").arg(dir).args(["ls-files", "-u", "--"]).arg(name).output();
+    let unmerged = ide_api::std_command("git").arg("-C").arg(dir).args(["ls-files", "-u", "--"]).arg(name).output();
     if unmerged.is_ok_and(|o| o.status.success() && !o.stdout.is_empty()) {
-        let added = std::process::Command::new("git").arg("-C").arg(dir).args(["add", "--"]).arg(name).output()?;
+        let added = ide_api::std_command("git").arg("-C").arg(dir).args(["add", "--"]).arg(name).output()?;
         anyhow::ensure!(added.status.success(), "git add failed: {}", String::from_utf8_lossy(&added.stderr).trim());
     }
     Ok(())

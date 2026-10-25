@@ -1,5 +1,6 @@
 # Builds Forge and runs its tests (Rust crates, the extension API and the agy adapter) on
-# every push and pull request, on macOS and on Linux. Actions are pinned by commit.
+# every push and pull request, on macOS and on Linux; on Windows, checks that everything
+# compiles. Actions are pinned by commit.
 name: CI
 
 on:
@@ -12,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  check-macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -69,3 +70,26 @@ jobs:
         run: npm ci && npm test
       - name: Rust tests
         run: cargo test --workspace
+
+  # Windows is on its way: everything must keep compiling there too.
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      # Files exactly as they are in the repositories (Zed's included), not with CRLF:
+      # Forge's patches to Zed apply to them as they are.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Apply Forge's patches to Zed
+        shell: bash
+        run: scripts/apply-zed-patches.sh
+      - name: Check
+        run: cargo check --workspace --tests

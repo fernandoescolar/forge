@@ -10,12 +10,18 @@ use dotnet_model::msbuild::edit::{self, Position};
 use dotnet_model::solution::{self, SolutionEdit, SolutionFormat};
 use dotnet_model::{cli, paths, templates};
 use fs::{Fs, RemoveOptions};
-use gpui::{ClipboardItem, PathPromptOptions, PromptLevel};
+use gpui::{AsyncWindowContext, ClipboardItem, PathPromptOptions, PromptLevel, Task};
 use task::TaskTemplate;
+use workspace::tasks::ScheduledTaskResult;
 
 use super::*;
 use super::file_ops;
+use crate::build_problems;
+use forge_languages::active_build::ActiveBuild;
 use forge_ui::pick::{self, Choice};
+
+/// The `dotnet` commands whose errors and warnings go to the Problems panel.
+const BUILDS: [&str; 5] = ["build", "rebuild", "restore", "pack", "publish"];
 
 /// A piece of background work in a job.
 type Step = futures::future::BoxFuture<'static, Result<()>>;
@@ -514,9 +520,26 @@ impl SolutionExplorer {
     pub(crate) fn run_dotnet(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.command_target(cx) else { return };
         let config = self.config(cx);
-        let args = cli::command_line(command, &[("projectPath", &target.to_string_lossy())], &config.custom_commands);
-        let Some((program, args)) = args.split_first() else { return };
+        // The configuration and framework chosen in the title bar.
+        let build = ActiveBuild::get(cx);
+        let platform = build.msbuild_platform().map(|platform| format!("-p:Platform={platform}")).unwrap_or_default();
+        let framework = build.framework_for(&forge_languages::target_frameworks(&target)).unwrap_or_default();
+        let project_path = target.to_string_lossy();
+        let params = [
+            ("projectPath", project_path.as_ref()),
+            ("configuration", build.configuration.as_deref().unwrap_or_default()),
+            ("platformProperty", platform.as_str()),
+            ("framework", framework.as_str()),
+        ];
+        let mut args = cli::command_line(command, &params, &config.custom_commands);
         let cwd = target.parent().map(Path::to_path_buf).unwrap_or_default();
+        // Builds also log their errors and warnings for the Problems panel (when the
+        // command is still `dotnet`, which takes MSBuild's arguments).
+        let log = (BUILDS.contains(&command) && args.first().is_some_and(|program| program == "dotnet")).then(build_problems::new_log_path);
+        if let Some(log) = &log {
+            args.extend(build_problems::logger_args(log));
+        }
+        let Some((program, args)) = args.split_first() else { return };
         let template = TaskTemplate {
             label: format!("dotnet {command} {}", paths::file_name(&target)),
             command: program.clone(),
@@ -525,13 +548,31 @@ impl SolutionExplorer {
             save: task::SaveStrategy::All,
             ..TaskTemplate::default()
         };
-        let context = task::TaskContext { cwd: Some(cwd), ..Default::default() };
+        let context = task::TaskContext { cwd: Some(cwd.clone()), ..Default::default() };
         let Some(resolved) = template.resolve_task("forge-dotnet", &context) else { return };
-        if let Some(workspace) = self.workspace.upgrade() {
-            workspace.update(cx, |workspace, cx| {
-                workspace.schedule_resolved_task(project::TaskSourceKind::UserInput, resolved, false, window, cx);
-            });
-        }
+        let Some(workspace) = self.workspace.upgrade() else { return };
+        let project = workspace.read(cx).project().clone();
+        let clean = command == "clean";
+        let on_complete = move |result: ScheduledTaskResult, cx: &mut AsyncWindowContext| {
+            let finished = matches!(result, ScheduledTaskResult::Success | ScheduledTaskResult::Failure);
+            let problems = match log {
+                Some(log) if finished => cx.background_spawn(async move { build_problems::read_log(&log, &cwd, &target) }),
+                Some(log) => {
+                    std::fs::remove_file(log).ok();
+                    return;
+                }
+                None if clean && result == ScheduledTaskResult::Success => Task::ready(Vec::new()),
+                None => return,
+            };
+            cx.spawn(async move |cx| {
+                let problems = problems.await;
+                cx.update(|_, cx| build_problems::publish(&project, problems, cx)).ok();
+            })
+            .detach();
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.schedule_resolved_task_with_completion(project::TaskSourceKind::UserInput, resolved, false, on_complete, window, cx);
+        });
     }
 
     pub(super) fn build(&mut self, _: &Build, window: &mut Window, cx: &mut Context<Self>) {
@@ -578,6 +619,17 @@ impl SolutionExplorer {
         let project = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf));
         let model = self.model.clone();
         pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::nuget_view::open(workspace, model, project, window, cx));
+    }
+
+    pub(super) fn project_properties(&mut self, _: &ProjectProperties, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
+        let model = self.model.clone();
+        pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::project_properties::open(workspace, model, project, window, cx));
+    }
+
+    pub(super) fn explore_assemblies(&mut self, _: &ExploreAssemblies, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
+        pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::assembly_explorer::open(workspace, project, window, cx));
     }
 
     pub(super) fn add_project_reference(&mut self, _: &AddProjectReference, window: &mut Window, cx: &mut Context<Self>) {

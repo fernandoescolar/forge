@@ -1,0 +1,12 @@
+{
+  "name": "seti-icons",
+  "displayName": "Seti Icons",
+  "version": "0.0.1",
+  "private": true,
+  "description": "The Seti UI file icons",
+  "forge": {
+    "iconThemes": [
+      "icon_themes"
+    ]
+  }
+}

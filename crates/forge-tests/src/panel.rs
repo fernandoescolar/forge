@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use editor::Editor;
+use forge_languages::active_build::ActiveBuild;
 use gpui::TaskExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -29,11 +30,13 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use crate::cases;
+use crate::cobertura::Coverage;
 use crate::discovery::{self, TestProject};
 use crate::runner::{self, Scope};
 use crate::trx::{CaseResult, Outcome};
 
-actions!(forge_tests, [ToggleFocus, RunAllTests, RunFailedTests, RefreshTests]);
+actions!(forge_tests, [ToggleFocus, RunAllTests, RunAllTestsWithCoverage, ClearCoverage, RunFailedTests, RefreshTests]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -43,6 +46,16 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &RunAllTests, window, cx| {
             if let Some(panel) = workspace.focus_panel::<TestPanel>(window, cx) {
                 panel.update(cx, |panel, cx| panel.run_all(window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &RunAllTestsWithCoverage, window, cx| {
+            if let Some(panel) = workspace.focus_panel::<TestPanel>(window, cx) {
+                panel.update(cx, |panel, cx| panel.run_all_with_coverage(window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &ClearCoverage, _, cx| {
+            if let Some(panel) = workspace.panel::<TestPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.clear_coverage(cx));
             }
         });
         workspace.register_action(|workspace, _: &RunFailedTests, window, cx| {
@@ -70,6 +83,14 @@ pub enum Status {
 }
 
 impl Status {
+    fn of(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Failed => Status::Failed,
+            Outcome::Passed => Status::Passed,
+            Outcome::Skipped => Status::Skipped,
+        }
+    }
+
     fn icon(self) -> (IconName, Color) {
         match self {
             Status::NotRun => (IconName::Circle, Color::Muted),
@@ -96,11 +117,26 @@ impl Status {
     }
 }
 
+/// Where the `.runsettings` choice of a workspace is kept.
+fn settings_key(roots: &[PathBuf]) -> String {
+    format!("forge-tests-runsettings:{}", roots.iter().map(|r| r.to_string_lossy()).collect::<Vec<_>>().join("|"))
+}
+
+/// A row of the tree, by its place in `projects` (and, for a data row, its label).
+enum TreeRow {
+    Project(usize),
+    Class(usize, usize),
+    Method(usize, usize, usize),
+    Case(usize, usize, usize, String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum NodeKey {
     Project(PathBuf),
     Class(String),
     Method(String),
+    /// A data row of a test method: the method's FQN and the row's label.
+    Case(String, String),
 }
 
 struct Run {
@@ -110,9 +146,47 @@ struct Run {
     current: Option<(String, std::time::Instant)>,
     /// What it has printed so far.
     live: runner::LiveLog,
+    /// Rust tests by what libtest calls them (`tests::adds`), to show each one's outcome as
+    /// soon as libtest prints it: a run's results come when the whole command ends, and a
+    /// test that hangs, or doc-tests that take long to build, would hold back every other.
+    live_names: HashMap<String, Vec<String>>,
+    /// Outcomes printed so far, by method.
+    live_outcomes: HashMap<String, Outcome>,
+    /// How much of `live` has been read for them, and in which job.
+    live_read: (usize, Option<std::time::Instant>),
     _task: Task<()>,
     /// Repaints the elapsed time and the live output.
     _ticker: Task<()>,
+}
+
+impl Run {
+    /// Reads the outcomes the Rust tests printed since the last time (see `live_names`).
+    fn read_live_outcomes(&mut self) {
+        if self.live_names.is_empty() {
+            return;
+        }
+        let log = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let job = self.current.as_ref().map(|(_, started)| *started);
+        let (read, read_job) = &mut self.live_read;
+        // Each job's output starts over.
+        if *read_job != job || *read > log.len() {
+            *read = 0;
+            *read_job = job;
+        }
+        let Some(unread) = log.get(*read..) else {
+            *read = 0;
+            return;
+        };
+        // Whole lines only: the last may still be coming.
+        let Some(end) = unread.rfind('\n') else { return };
+        for line in unread[..end].lines() {
+            let Some((name, outcome)) = crate::rust::live_result(line.trim_start()) else { continue };
+            for method in self.live_names.get(name).into_iter().flatten() {
+                self.live_outcomes.insert(method.clone(), outcome);
+            }
+        }
+        *read += end + 1;
+    }
 }
 
 pub struct TestPanel {
@@ -125,6 +199,8 @@ pub struct TestPanel {
     /// Rediscovers shortly after source files change.
     discovery_task: Option<Task<()>>,
     collapsed: HashSet<NodeKey>,
+    /// Data-driven methods showing their rows (they start folded).
+    expanded: HashSet<NodeKey>,
     /// Last results per method FQN; one entry per theory row and target framework.
     results: HashMap<String, Vec<CaseResult>>,
     run: Option<Run>,
@@ -132,6 +208,10 @@ pub struct TestPanel {
     /// Output of the last `dotnet test`, shown on demand and after build failures.
     last_log: Option<String>,
     show_log: bool,
+    /// Shows the output in a read-only editor (so it can be selected and copied), and the
+    /// text it holds.
+    log_view: Entity<Editor>,
+    log_shown: String,
     error: Option<String>,
     list_scroll: UniformListScrollHandle,
     details_scroll: ScrollHandle,
@@ -140,6 +220,11 @@ pub struct TestPanel {
     locations: RefCell<HashMap<(Option<PathBuf>, String), Option<(PathBuf, u32)>>>,
     /// Files this panel last colored in the gutter, so stale entries can be cleared.
     published_files: HashSet<PathBuf>,
+    /// What the last run with coverage covered.
+    coverage: Option<Coverage>,
+    /// The `.runsettings` files in the workspace, and the one .NET tests run with.
+    settings_files: Vec<PathBuf>,
+    settings: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -168,16 +253,27 @@ impl TestPanel {
             discovering: false,
             discovery_task: None,
             collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             results: HashMap::new(),
             run: None,
             selected: None,
             last_log: None,
             show_log: false,
+            log_view: cx.new(|cx| {
+                let mut editor = Editor::multi_line(window, cx);
+                editor.set_read_only(true);
+                editor.set_show_gutter(false, cx);
+                editor
+            }),
+            log_shown: String::new(),
             error: None,
             list_scroll: UniformListScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
             locations: Default::default(),
             published_files: HashSet::new(),
+            coverage: None,
+            settings_files: Vec::new(),
+            settings: None,
             _subscriptions: vec![subscription],
         };
         panel.discover(window, cx);
@@ -188,21 +284,33 @@ impl TestPanel {
         self.project.read(cx).visible_worktrees(cx).map(|tree| tree.read(cx).abs_path().to_path_buf()).collect()
     }
 
-    /// Rescans the project for test projects and tests, debounced.
-    /// Finds the tests again, from the worktrees' files as Zed indexed them (what
-    /// `.gitignore` ignores left out); test files that didn't change aren't parsed again.
+    /// Rescans the project for test projects and tests, debounced: from the worktrees'
+    /// files as Zed indexed them (what `.gitignore` ignores left out); test files that
+    /// didn't change aren't parsed again.
     pub fn discover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.project.clone();
+        let roots = self.roots(cx);
         self.discovering = true;
         cx.notify();
+        let key = settings_key(&roots);
+        let saved = db::kvp::KeyValueStore::global(cx).read_kvp(&key).ok().flatten().map(PathBuf::from);
         self.discovery_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
             let Ok(listed) = cx.update(|_, cx| discovery::worktree_files(&project, cx)) else { return };
             let listed = listed.await;
-            let projects = cx
-                .background_spawn(async move { listed.into_iter().flat_map(|(root, files)| discovery::discover_in(&root, files)).collect::<Vec<_>>() })
+            let (projects, settings_files) = cx
+                .background_spawn(async move {
+                    let settings = listed.iter().flat_map(|(_, files)| files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("runsettings"))).cloned()).collect::<Vec<_>>();
+                    let projects = listed.into_iter().flat_map(|(root, files)| discovery::discover_in(&root, files)).collect::<Vec<_>>();
+                    (projects, settings)
+                })
                 .await;
             this.update(cx, |this, cx| {
+                // The file chosen before, while it is still there.
+                if this.settings.is_none() {
+                    this.settings = saved.filter(|path| settings_files.contains(path));
+                }
+                this.settings_files = settings_files;
                 // Freshly found classes start collapsed when there are many of them.
                 let class_count: usize = projects.iter().map(|p| p.classes.len()).sum();
                 if this.projects.is_empty() && class_count > 12 {
@@ -238,16 +346,24 @@ impl TestPanel {
         crate::gutter::publish(files, statuses, self.workspace.upgrade().as_ref(), cx);
     }
 
+    /// Runs .NET tests with `settings` (a `.runsettings` file), or without one, from now on.
+    pub fn select_settings(&mut self, settings: Option<PathBuf>, cx: &mut Context<Self>) {
+        let key = settings_key(&self.roots(cx));
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let value = settings.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        cx.background_spawn(async move { kvp.write_kvp(key, value).await.ok() }).detach();
+        self.settings = settings;
+        cx.notify();
+    }
+
     fn method_status(&self, fqn: &str) -> Status {
-        if self.run.as_ref().is_some_and(|run| run.methods.contains(fqn)) {
-            return Status::Running;
+        if let Some(run) = self.run.as_ref().filter(|run| run.methods.contains(fqn)) {
+            return run.live_outcomes.get(fqn).map_or(Status::Running, |outcome| Status::of(*outcome));
         }
         match self.results.get(fqn) {
             None => Status::NotRun,
             Some(cases) => match cases.iter().map(|c| c.outcome).max() {
-                Some(Outcome::Failed) => Status::Failed,
-                Some(Outcome::Passed) => Status::Passed,
-                Some(Outcome::Skipped) => Status::Skipped,
+                Some(outcome) => Status::of(outcome),
                 None => Status::NotRun,
             },
         }
@@ -267,6 +383,29 @@ impl TestPanel {
             Scope::Project => classes.flat_map(|c| c.tests.iter().map(|t| t.fqn.clone())).collect(),
             Scope::Class(fqn) => classes.filter(|c| &c.fqn == fqn).flat_map(|c| c.tests.iter().map(|t| t.fqn.clone())).collect(),
             Scope::Methods(methods) => methods.iter().cloned().collect(),
+            Scope::Case { method, .. } => HashSet::from([method.clone()]),
+        }
+    }
+
+    fn method(&self, fqn: &str) -> Option<&discovery::TestMethod> {
+        self.projects.iter().flat_map(|p| &p.classes).flat_map(|c| &c.tests).find(|t| t.fqn == fqn)
+    }
+
+    /// The data rows of a method, with their last results (empty for a plain test).
+    fn case_rows(&self, fqn: &str) -> Vec<cases::CaseRow<'_>> {
+        let Some(method) = self.method(fqn) else { return Vec::new() };
+        cases::rows(method, self.results_for(fqn))
+    }
+
+    fn case_status(&self, fqn: &str, row: &cases::CaseRow<'_>) -> Status {
+        if self.run.as_ref().is_some_and(|run| run.methods.contains(fqn)) {
+            return Status::Running;
+        }
+        match row.results.iter().map(|c| c.outcome).max() {
+            Some(Outcome::Failed) => Status::Failed,
+            Some(Outcome::Passed) => Status::Passed,
+            Some(Outcome::Skipped) => Status::Skipped,
+            None => Status::NotRun,
         }
     }
 
@@ -295,25 +434,26 @@ impl TestPanel {
         let Some(project) = self.project_of(key) else {
             return;
         };
-        let scope = match key {
-            NodeKey::Project(_) => Scope::Project,
-            NodeKey::Class(fqn) => Scope::Class(fqn.clone()),
-            NodeKey::Method(fqn) => Scope::Methods(vec![fqn.clone()]),
-        };
+        let scope = self.scope_of(key);
         self.start(vec![(project, scope)], window, cx);
     }
 
-    fn scope_of(key: &NodeKey) -> Scope {
+    fn scope_of(&self, key: &NodeKey) -> Scope {
         match key {
             NodeKey::Project(_) => Scope::Project,
             NodeKey::Class(fqn) => Scope::Class(fqn.clone()),
             NodeKey::Method(fqn) => Scope::Methods(vec![fqn.clone()]),
+            // A row runs alone once a run has named it; before that, with its method.
+            NodeKey::Case(fqn, label) => match self.case_rows(fqn).iter().find(|row| &row.label == label).and_then(|row| row.filter(fqn)) {
+                Some(filter) => Scope::Case { method: fqn.clone(), filter },
+                None => Scope::Methods(vec![fqn.clone()]),
+            },
         }
     }
 
     /// Whether the debugger can run the tests under `key` (not Jest or Vitest).
     fn can_debug(&self, key: &NodeKey) -> bool {
-        self.project_of(key).and_then(|p| runner::debug_plan(&self.projects[p], &Self::scope_of(key))).is_some()
+        self.project_of(key).and_then(|p| runner::debug_plan(&self.projects[p], &self.scope_of(key), &ActiveBuild::default())).is_some()
     }
 
     /// Runs the tests under `key` in the debugger, stopping at breakpoints.
@@ -321,16 +461,18 @@ impl TestPanel {
         let Some(project) = self.project_of(key).map(|p| self.projects[p].clone()) else { return };
         let label = match key {
             NodeKey::Method(fqn) => format!("Debug {}", fqn.rsplit(['.', ':', '>']).next().unwrap_or(fqn).trim()),
+            NodeKey::Case(fqn, label) => format!("Debug {}{label}", fqn.rsplit('.').next().unwrap_or(fqn)),
             _ => format!("Debug {}", project.name),
         };
-        self.debug_scope(&project.path, Self::scope_of(key), label.into(), window, cx);
+        let scope = self.scope_of(key);
+        self.debug_scope(&project.path, scope, label.into(), window, cx);
     }
 
     /// Runs `scope` of the project whose manifest is `manifest` in the debugger (as a test's
     /// Debug button does). False when Forge can't debug those tests (Jest, Vitest).
     pub fn debug_scope(&mut self, manifest: &std::path::Path, scope: Scope, label: gpui::SharedString, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(project) = self.projects.iter().find(|p| p.path == manifest).cloned() else { return false };
-        let Some(plan) = runner::debug_plan(&project, &scope) else { return false };
+        let Some(plan) = runner::debug_plan(&project, &scope, &ActiveBuild::get(cx)) else { return false };
         let Some(workspace) = self.workspace.upgrade() else { return false };
         let worktree_id = self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).id());
         let scenario = match plan {
@@ -360,26 +502,57 @@ impl TestPanel {
         self.projects.iter().position(|project| match key {
             NodeKey::Project(path) => &project.path == path,
             NodeKey::Class(fqn) => project.classes.iter().any(|c| &c.fqn == fqn),
-            NodeKey::Method(fqn) => project.classes.iter().any(|c| c.tests.iter().any(|t| &t.fqn == fqn)),
+            NodeKey::Method(fqn) | NodeKey::Case(fqn, _) => project.classes.iter().any(|c| c.tests.iter().any(|t| &t.fqn == fqn)),
         })
     }
 
     /// Runs each `(project, scope)` in turn; one run at a time.
     fn start(&mut self, jobs: Vec<(usize, Scope)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_with(jobs, false, window, cx);
+    }
+
+    /// Runs every test and collects code coverage, shown in the editors' gutters.
+    pub fn run_all_with_coverage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let jobs = (0..self.projects.len()).filter(|&p| self.projects[p].kind == discovery::Kind::Dotnet).map(|p| (p, Scope::Project)).collect();
+        self.start_with(jobs, true, window, cx);
+    }
+
+    /// Forgets the coverage of the last run and takes it off the gutters.
+    pub fn clear_coverage(&mut self, cx: &mut Context<Self>) {
+        self.coverage = None;
+        crate::coverage_view::show(None, self.workspace.upgrade().as_ref(), cx);
+        cx.notify();
+    }
+
+    /// Runs each `(project, scope)` in turn, with coverage when asked (for .NET tests).
+    fn start_with(&mut self, jobs: Vec<(usize, Scope)>, coverage: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.run.is_some() || jobs.is_empty() {
             return;
+        }
+        if coverage {
+            self.coverage = Some(Coverage::default());
         }
         let jobs: Vec<_> = jobs
             .into_iter()
             .map(|(p, scope)| (self.projects[p].clone(), self.methods_in(p, &scope), scope))
             .collect();
         let methods = jobs.iter().flat_map(|(_, methods, _)| methods.iter().cloned()).collect();
+        let mut live_names: HashMap<String, Vec<String>> = HashMap::new();
+        for (_, methods, _) in jobs.iter().filter(|(project, _, _)| matches!(project.kind, discovery::Kind::Rust { .. })) {
+            for method in methods {
+                if let Some(name) = crate::rust::libtest_name(method) {
+                    live_names.entry(name.to_string()).or_default().push(method.clone());
+                }
+            }
+        }
         self.error = None;
         let live = runner::LiveLog::default();
         let task_live = live.clone();
+        let options = runner::RunOptions { build: ActiveBuild::get(cx), coverage, settings: self.settings.clone() };
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut log = String::new();
             for (project, methods, scope) in jobs {
+                let partial = matches!(scope, Scope::Case { .. });
                 let name = project.name.clone();
                 this.update(cx, |this, cx| {
                     if let Some(run) = &mut this.run {
@@ -400,10 +573,11 @@ impl TestPanel {
                     Some(task) => task.await.map(|env| env.into_iter().collect()).unwrap_or_default(),
                     None => Default::default(),
                 };
-                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env).await }).await;
+                let job_options = options.clone();
+                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_options).await }).await;
                 let keep_going = this
                     .update(cx, |this, cx| {
-                        let keep_going = this.finish_job(methods, output, &mut log);
+                        let keep_going = this.finish_job(methods, output, partial, &mut log);
                         this.publish_gutter(cx);
                         cx.notify();
                         keep_going
@@ -417,6 +591,9 @@ impl TestPanel {
                 this.run = None;
                 this.last_log = Some(log);
                 this.publish_gutter(cx);
+                if coverage {
+                    crate::coverage_view::show(this.coverage.clone().map(Arc::new), this.workspace.upgrade().as_ref(), cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -425,6 +602,9 @@ impl TestPanel {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
                 let running = this.update(cx, |this, cx| {
+                    if let Some(run) = &mut this.run {
+                        run.read_live_outcomes();
+                    }
                     cx.notify();
                     this.run.is_some()
                 });
@@ -435,13 +615,14 @@ impl TestPanel {
         });
         // Files may have moved since: failure lines are looked up again.
         self.locations.borrow_mut().clear();
-        self.run = Some(Run { methods, current: None, live, _task: task, _ticker: ticker });
+        self.run = Some(Run { methods, current: None, live, live_names, live_outcomes: HashMap::new(), live_read: (0, None), _task: task, _ticker: ticker });
         self.publish_gutter(cx);
         cx.notify();
     }
 
-    /// Records one project's results. Returns whether to run the next project.
-    fn finish_job(&mut self, methods: HashSet<String>, output: anyhow::Result<runner::RunOutput>, log: &mut String) -> bool {
+    /// Records one project's results. Returns whether to run the next project. A run of one
+    /// data row (`partial`) replaces that row's results and keeps the method's others.
+    fn finish_job(&mut self, methods: HashSet<String>, output: anyhow::Result<runner::RunOutput>, partial: bool, log: &mut String) -> bool {
         if let Some(run) = &mut self.run {
             run.methods.retain(|m| !methods.contains(m));
         }
@@ -453,13 +634,25 @@ impl TestPanel {
             }
         };
         log.push_str(&output.log);
+        if let (Some(total), Some(coverage)) = (&mut self.coverage, output.coverage) {
+            total.merge(coverage);
+        }
         if output.results.is_empty() && !output.success {
             self.error = Some("The tests didn't run (a build error?); see the output".into());
             self.show_log = true;
             return true;
         }
-        for method in &methods {
-            self.results.remove(method);
+        if partial {
+            let names: HashSet<&str> = output.results.iter().map(|r| r.display_name.as_str()).collect();
+            for method in &methods {
+                if let Some(results) = self.results.get_mut(method) {
+                    results.retain(|r| !names.contains(r.display_name.as_str()));
+                }
+            }
+        } else {
+            for method in &methods {
+                self.results.remove(method);
+            }
         }
         for case in output.results {
             self.results.entry(case.method_fqn.clone()).or_default().push(case);
@@ -509,6 +702,10 @@ impl TestPanel {
                 .flat_map(|c| &c.tests)
                 .find(|t| &t.fqn == fqn)
                 .map(|t| (t.file.clone(), t.row)),
+            NodeKey::Case(fqn, label) => {
+                let row = self.case_rows(fqn).into_iter().find(|row| &row.label == label && row.row != discovery::NO_ROW);
+                row.map(|row| (row.file, row.row)).or_else(|| self.location(&NodeKey::Method(fqn.clone())))
+            }
         })
     }
 
@@ -575,7 +772,10 @@ impl TestPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
-        let collapsed = self.collapsed.contains(&key);
+        // Methods fold their data rows away unless opened; the rest show their children
+        // unless closed.
+        let folds_by_default = matches!(key, NodeKey::Method(_));
+        let collapsed = if folds_by_default { !self.expanded.contains(&key) } else { self.collapsed.contains(&key) };
         let selected = self.selected.as_ref() == Some(&key);
         let running = self.run.is_some();
         let (icon, color) = status.icon();
@@ -583,6 +783,9 @@ impl TestPanel {
         let group = SharedGroup::name(&id);
         let duration = match &key {
             NodeKey::Method(fqn) => self.results.get(fqn).map(|cases| cases.iter().map(|c| c.duration).sum::<Duration>()).filter(|d| !d.is_zero()),
+            NodeKey::Case(fqn, label) => {
+                self.case_rows(fqn).into_iter().find(|row| &row.label == label).map(|row| row.results.iter().map(|c| c.duration).sum::<Duration>()).filter(|d| !d.is_zero())
+            }
             _ => None,
         };
         let kind = match &key {
@@ -622,8 +825,9 @@ impl TestPanel {
                         IconButton::new("toggle", if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
                             .icon_size(IconSize::XSmall)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed.remove(&toggle_key) {
-                                    this.collapsed.insert(toggle_key.clone());
+                                let set = if folds_by_default { &mut this.expanded } else { &mut this.collapsed };
+                                if !set.remove(&toggle_key) {
+                                    set.insert(toggle_key.clone());
                                 }
                                 cx.notify();
                             })),
@@ -659,19 +863,24 @@ impl TestPanel {
 
     /// The rows the tree shows (what isn't inside a collapsed node), as places in
     /// `projects`: (project, class, test).
-    fn visible_rows(&self) -> Vec<(usize, Option<usize>, Option<usize>)> {
+    fn visible_rows(&self) -> Vec<TreeRow> {
         let mut rows = Vec::new();
         for (p, project) in self.projects.iter().enumerate() {
-            rows.push((p, None, None));
+            rows.push(TreeRow::Project(p));
             if self.collapsed.contains(&NodeKey::Project(project.path.clone())) {
                 continue;
             }
             for (c, class) in project.classes.iter().enumerate() {
-                rows.push((p, Some(c), None));
+                rows.push(TreeRow::Class(p, c));
                 if self.collapsed.contains(&NodeKey::Class(class.fqn.clone())) {
                     continue;
                 }
-                rows.extend((0..class.tests.len()).map(|t| (p, Some(c), Some(t))));
+                for (t, test) in class.tests.iter().enumerate() {
+                    rows.push(TreeRow::Method(p, c, t));
+                    if self.expanded.contains(&NodeKey::Method(test.fqn.clone())) {
+                        rows.extend(self.case_rows(&test.fqn).into_iter().map(|row| TreeRow::Case(p, c, t, row.label.to_string())));
+                    }
+                }
             }
         }
         rows
@@ -684,18 +893,24 @@ impl TestPanel {
         rows.get(range.start.min(rows.len())..range.end.min(rows.len()))
             .unwrap_or_default()
             .iter()
-            .map(|&(p, class, test)| {
-                let project = &self.projects[p];
-                match (class, test) {
-                    (None, _) => self.render_row(NodeKey::Project(project.path.clone()), 0, project.name.clone(), self.project_status(p), true, cx),
-                    (Some(c), None) => {
-                        let class = &project.classes[c];
-                        self.render_row(NodeKey::Class(class.fqn.clone()), 1, class.name.clone(), self.class_status(p, c), true, cx)
-                    }
-                    (Some(c), Some(t)) => {
-                        let test = &project.classes[c].tests[t];
-                        self.render_row(NodeKey::Method(test.fqn.clone()), 2, test.name.clone(), self.method_status(&test.fqn), false, cx)
-                    }
+            .map(|row| match row {
+                TreeRow::Project(p) => {
+                    let project = &self.projects[*p];
+                    self.render_row(NodeKey::Project(project.path.clone()), 0, project.name.clone(), self.project_status(*p), true, cx)
+                }
+                TreeRow::Class(p, c) => {
+                    let class = &self.projects[*p].classes[*c];
+                    self.render_row(NodeKey::Class(class.fqn.clone()), 1, class.name.clone(), self.class_status(*p, *c), true, cx)
+                }
+                TreeRow::Method(p, c, t) => {
+                    let test = &self.projects[*p].classes[*c].tests[*t];
+                    let has_cases = !self.case_rows(&test.fqn).is_empty();
+                    self.render_row(NodeKey::Method(test.fqn.clone()), 2, test.name.clone(), self.method_status(&test.fqn), has_cases, cx)
+                }
+                TreeRow::Case(p, c, t, label) => {
+                    let fqn = self.projects[*p].classes[*c].tests[*t].fqn.clone();
+                    let status = self.case_status(&fqn, self.case_rows(&fqn).iter().find(|row| row.label.to_string() == *label).expect("a row it listed"));
+                    self.render_row(NodeKey::Case(fqn, label.clone()), 3, label.clone(), status, false, cx)
                 }
             })
             .collect()
@@ -712,20 +927,48 @@ impl TestPanel {
         found
     }
 
-    fn render_details(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Puts the current output in `log_view`: what was added when it only grew (a run
+    /// printing), all of it otherwise. Follows the end unless the user is in it (selecting).
+    fn sync_log_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let log = match &self.run {
+            Some(run) => run.live.lock().map(|l| l.clone()).unwrap_or_default(),
+            None => self.last_log.clone().unwrap_or_default(),
+        };
+        if log == self.log_shown {
+            return;
+        }
+        let follow = !self.log_view.focus_handle(cx).contains_focused(window, cx);
+        self.log_view.update(cx, |editor, cx| {
+            match log.strip_prefix(self.log_shown.as_str()).filter(|_| !self.log_shown.is_empty()) {
+                Some(added) => editor.buffer().update(cx, |buffer, cx| {
+                    let end = buffer.len(cx);
+                    buffer.edit([(end..end, added.to_string())], None, cx);
+                }),
+                None => editor.set_text(log.clone(), window, cx),
+            }
+            if follow {
+                editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            }
+        });
+        self.log_shown = log;
+    }
+
+    fn render_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let border = cx.theme().colors().border;
-        let body: AnyElement = if self.show_log {
-            // Long build logs: the end is what matters, and only it is copied.
-            let log = match &self.run {
-                Some(run) => run.live.lock().map(|l| last_lines(&l, 400).to_string()).unwrap_or_default(),
-                None => self.last_log.as_deref().map(|l| last_lines(l, 400).to_string()).unwrap_or_default(),
+        if self.show_log {
+            self.sync_log_view(window, cx);
+            // The editor scrolls itself; it needs a height of its own.
+            return Some(div().flex_shrink_0().h(px(260.)).border_t_1().border_color(border).pl_2().child(self.log_view.clone()).into_any_element());
+        }
+        let body: AnyElement = {
+            let (fqn, cases): (&String, Vec<&CaseResult>) = match &self.selected {
+                Some(NodeKey::Method(fqn)) => (fqn, self.results.get(fqn)?.iter().collect()),
+                Some(NodeKey::Case(fqn, label)) => (fqn, self.case_rows(fqn).into_iter().find(|row| &row.label == label)?.results),
+                _ => return None,
             };
-            v_flex().children(log.lines().map(|line| Label::new(line.to_string()).size(LabelSize::XSmall).buffer_font(cx))).into_any_element()
-        } else {
-            let Some(NodeKey::Method(fqn)) = &self.selected else {
+            if cases.is_empty() {
                 return None;
-            };
-            let cases = self.results.get(fqn)?;
+            }
             let mut column = v_flex().gap_2();
             if let Some(prompt) = self.fix_prompt(fqn, cx) {
                 column = column.child(
@@ -845,15 +1088,6 @@ impl TestPanel {
     }
 }
 
-/// The last `count` lines of `text`, without splitting the rest.
-fn last_lines(text: &str, count: usize) -> &str {
-    let trimmed = text.trim_end_matches('\n');
-    match trimmed.rmatch_indices('\n').nth(count.saturating_sub(1)) {
-        Some((at, _)) => &trimmed[at + 1..],
-        None => trimmed,
-    }
-}
-
 /// The source file and zero-based line a failure line points at, if it names one that
 /// exists.
 fn source_location(line: &str, root: Option<&std::path::Path>) -> Option<(PathBuf, u32)> {
@@ -904,12 +1138,51 @@ impl SharedGroup {
     }
 }
 
+impl TestPanel {
+    /// The `.runsettings` the .NET tests run with, when the workspace has some.
+    fn render_settings_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.settings_files.is_empty() {
+            return None;
+        }
+        let name = |path: &PathBuf| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let label = self.settings.as_ref().map(name).unwrap_or_else(|| "No runsettings".into());
+        let (files, current, panel) = (self.settings_files.clone(), self.settings.clone(), cx.entity().downgrade());
+        Some(
+            ui::PopoverMenu::new("runsettings-menu")
+                .trigger(
+                    Button::new("runsettings", label)
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text("The .runsettings file .NET tests run with")),
+                )
+                .menu(move |window, cx| {
+                    let (files, current, panel) = (files.clone(), current.clone(), panel.clone());
+                    Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        let options = std::iter::once(None).chain(files.into_iter().map(Some));
+                        for option in options {
+                            let label = option.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| "None".into());
+                            let checked = option == current;
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(label, checked, ui::IconPosition::Start, None, move |_, cx| {
+                                panel.update(cx, |panel, cx| panel.select_settings(option.clone(), cx)).ok();
+                            });
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for TestPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
         let running = self.run.is_some();
         let (passed, failed, not_run) = self.summary();
         let has_failed = failed > 0;
+        let coverage_percent = self.coverage.as_ref().filter(|_| !running).and_then(|c| c.percent(None));
 
         let header = h_flex()
             .justify_between()
@@ -926,17 +1199,37 @@ impl Render for TestPanel {
                         row.child(Label::new(format!("{passed} passed")).size(LabelSize::XSmall).color(Color::Success))
                             .when(has_failed, |row| row.child(Label::new(format!("{failed} failed")).size(LabelSize::XSmall).color(Color::Error)))
                             .when(not_run > 0, |row| row.child(Label::new(format!("{not_run} not run")).size(LabelSize::XSmall).color(Color::Muted)))
+                    })
+                    .when_some(coverage_percent, |row, percent| {
+                        row.child(
+                            Button::new("coverage-clear", format!("{percent:.0}% covered"))
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .label_size(LabelSize::XSmall)
+                                .tooltip(Tooltip::text("Lines run by the last run with coverage; click to take it off the editors"))
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_coverage(cx))),
+                        )
                     }),
             )
             .child(
                 h_flex()
                     .gap_0p5()
+                    .children(self.render_settings_picker(cx))
                     .child(
                         IconButton::new("run-all", IconName::PlayFilled)
                             .icon_color(Color::Success)
                             .disabled(running || self.projects.is_empty())
                             .tooltip(Tooltip::text("Run all tests"))
                             .on_click(cx.listener(|this, _, window, cx| this.run_all(window, cx))),
+                    )
+                    .child(
+                        Button::new("run-coverage", "Coverage")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(running || !self.projects.iter().any(|p| p.kind == discovery::Kind::Dotnet))
+                            .tooltip(Tooltip::text("Run all .NET tests with code coverage, shown in the editors' gutters"))
+                            .on_click(cx.listener(|this, _, window, cx| this.run_all_with_coverage(window, cx))),
                     )
                     .child(
                         IconButton::new("run-failed", IconName::Rerun)
@@ -1092,12 +1385,6 @@ impl Panel for TestPanel {
 mod tests {
     use super::*;
 
-    #[test]
-    fn keeps_the_last_lines() {
-        assert_eq!(last_lines("a\nb\nc\n", 2), "b\nc");
-        assert_eq!(last_lines("a\nb", 5), "a\nb");
-        assert_eq!(last_lines("", 3), "");
-    }
     use gpui::{TestAppContext, VisualTestContext, point, size};
     use std::time::Instant;
 
@@ -1190,7 +1477,7 @@ mod tests {
             (test_project(Kind::Python, "/py/pyproject.toml"), Scope::Methods(vec!["/py/test_a.py::test_b".into()])),
         ];
         for (test_project, scope) in cases {
-            let (template, adapter) = runner::debug_task(&test_project, &scope).unwrap();
+            let (template, adapter) = runner::debug_task(&test_project, &scope, &ActiveBuild::default()).unwrap();
             let scenario = project
                 .read_with(cx, |p, _| p.dap_store())
                 .update(cx, |store, cx| store.debug_scenario_for_build_task(template.clone(), dap::adapters::DebugAdapterName(adapter.into()), "t".into(), cx))
@@ -1218,7 +1505,7 @@ mod tests {
         panel.update(&mut cx, |p, _| {
             let methods = p.methods_in(0, &Scope::Project);
             let mut log = String::new();
-            p.finish_job(methods, Ok(runner::RunOutput { results, log: "build log".into(), success: false }), &mut log);
+            p.finish_job(methods, Ok(runner::RunOutput { results, log: "build log".into(), success: false, coverage: None }), false, &mut log);
             p.selected = Some(NodeKey::Method("Demo.Tests.MathTests.Doubles".into()));
         });
         panel.read_with(&cx, |p, _| {
@@ -1227,7 +1514,27 @@ mod tests {
             assert_eq!(p.method_status("Demo.Tests.MathTests.Skipped"), Status::Skipped);
             assert_eq!(p.class_status(0, 0), Status::Failed);
             assert_eq!(p.summary(), (1, 2, 0));
+            // Each [InlineData] row is a child with its own result, and runs alone.
+            let doubles = "Demo.Tests.MathTests.Doubles";
+            let rows = p.case_rows(doubles);
+            let statuses: Vec<_> = rows.iter().map(|row| (row.label.clone(), row.row, p.case_status(doubles, row))).collect();
+            assert_eq!(statuses, [("(1, 2)".to_string(), 11, Status::Passed), ("(2, 5)".to_string(), 12, Status::Failed)]);
+            assert_eq!(
+                p.scope_of(&NodeKey::Case(doubles.into(), "(2, 5)".into())),
+                Scope::Case { method: doubles.into(), filter: "FullyQualifiedName=Demo.Tests.MathTests.Doubles&DisplayName~x: 2, expected: 5".into() }
+            );
+            assert!(p.case_rows("Demo.Tests.MathTests.Adds").is_empty());
         });
+        // Running the failing row again keeps the other row's result.
+        let rerun = crate::trx::parse(include_str!("../fixtures/demo_net10.0.trx"), Some("net10.0")).unwrap().into_iter().filter(|r| r.display_name.contains("x: 2")).collect();
+        panel.update(&mut cx, |p, _| {
+            let methods = HashSet::from(["Demo.Tests.MathTests.Doubles".to_string()]);
+            p.finish_job(methods, Ok(runner::RunOutput { results: rerun, log: String::new(), success: false, coverage: None }), true, &mut String::new());
+            assert_eq!(p.results_for("Demo.Tests.MathTests.Doubles").len(), 2, "both rows still have a result");
+            p.expanded.insert(NodeKey::Method("Demo.Tests.MathTests.Doubles".into()));
+            p.selected = Some(NodeKey::Case("Demo.Tests.MathTests.Doubles".into(), "(2, 5)".into()));
+        });
+        draw(&panel, &mut cx);
         panel.update(&mut cx, |p, cx| p.publish_gutter(cx));
         let file = tests_dir.join("MathTests.cs");
         assert_eq!(crate::gutter::status_at(&file, 5), Some(Status::Passed), "Adds");

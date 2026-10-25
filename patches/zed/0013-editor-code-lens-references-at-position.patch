@@ -1,0 +1,34 @@
+diff --git a/crates/editor/src/code_lens.rs b/crates/editor/src/code_lens.rs
+--- a/crates/editor/src/code_lens.rs
++++ b/crates/editor/src/code_lens.rs
+@@ -14,7 +14,7 @@
+
+ use crate::{
+     Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT, SelectionEffects,
+-    actions::ToggleCodeLens,
++    actions::{FindAllReferences, ToggleCodeLens},
+     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock},
+     hover_links::HoverLink,
+     runnables::RunnableTaskStatus,
+@@ -182,8 +182,20 @@
+     window: &mut Window,
+     cx: &mut Context<Editor>,
+ ) -> bool {
++    // A command that names a position but carries no locations (Roslyn's
++    // `roslyn.client.peekReferences`): find the references of the symbol there.
+     if arguments.len() < 3 {
+-        return false;
++        let snapshot = editor.buffer().read(cx).snapshot(cx);
++        let Some(position) = snapshot.anchor_in_excerpt(action.range.start) else {
++            return false;
++        };
++        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
++            s.select_anchor_ranges([position..position]);
++        });
++        if let Some(task) = editor.find_all_references(&FindAllReferences::default(), window, cx) {
++            task.detach_and_log_err(cx);
++        }
++        return true;
+     }
+     let Ok(locations) = serde_json::from_value::<Vec<lsp::Location>>(arguments[2].clone()) else {
+         return false;

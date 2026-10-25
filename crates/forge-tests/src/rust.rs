@@ -56,7 +56,7 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
                 row: NO_ROW,
                 tests: Vec::new(),
             });
-            class.tests.push(TestMethod { fqn: format!("{package}|{target}|{path}"), name: test.name, file: file.clone(), row: test.row });
+            class.tests.push(TestMethod { fqn: format!("{package}|{target}|{path}"), name: test.name, file: file.clone(), row: test.row, cases: Vec::new() });
         }
     };
     let src = dir.join("src");
@@ -249,9 +249,12 @@ fn split_id(id: &str) -> Option<(&str, &str)> {
 
 /// The `cargo test` arguments for `scope`.
 pub(crate) fn args(package: &str, scope: &Scope) -> Vec<String> {
+    if let Scope::Case { method, .. } = scope {
+        return args(package, &Scope::Methods(vec![method.clone()]));
+    }
     let mut args: Vec<String> = vec!["test".into(), "-p".into(), package.into(), "--no-fail-fast".into()];
     match scope {
-        Scope::Project => {}
+        Scope::Project | Scope::Case { .. } => {}
         Scope::Class(id) => {
             let Some((target, module)) = split_id(id) else { return args };
             if !target.is_empty() {
@@ -283,10 +286,28 @@ pub async fn run(project: &TestProject, scope: &Scope, live: LiveLog, env: &runn
     let mut command = runner::command("cargo", env);
     command.args(args(package, scope)).env("CARGO_TERM_COLOR", "never").current_dir(project.dir());
     let output = runner::execute(command, live, None).await.context("failed to start `cargo test`; is Rust installed?")?;
-    Ok(RunOutput { results: parse(package, &output.stdout, &output.stderr), log: output.log, success: output.success })
+    Ok(RunOutput { results: parse(package, &output.stdout, &output.stderr), log: output.log, success: output.success, coverage: None })
 }
 
 static RESULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^test (\S+) \.\.\. (ok|FAILED|ignored)").unwrap());
+
+/// A test's outcome as libtest prints it while the run goes on (`test a::b ... ok`): what
+/// libtest calls the test, and how it ended. The full results come from [`parse`] at the
+/// end, which knows each test's target.
+pub fn live_result(line: &str) -> Option<(&str, Outcome)> {
+    let captures = RESULT.captures(line)?;
+    let outcome = match captures.get(2)?.as_str() {
+        "ok" => Outcome::Passed,
+        "FAILED" => Outcome::Failed,
+        _ => Outcome::Skipped,
+    };
+    Some((captures.get(1)?.as_str(), outcome))
+}
+
+/// What libtest calls the test with id `id` (`package|target|path` → `path`).
+pub fn libtest_name(id: &str) -> Option<&str> {
+    split_id(id).map(|(_, path)| path)
+}
 
 /// Results from libtest's output. Cargo names each test binary on stderr (`Running
 /// unittests src/lib.rs`, `Running tests/api.rs`, `Doc-tests`) in the order their
@@ -421,6 +442,15 @@ fn at_root() {}
         let summary: Vec<(&str, Outcome)> = results.iter().map(|r| (r.method_fqn.as_str(), r.outcome)).collect();
         assert_eq!(summary, [("calc||tests::adds", Outcome::Passed), ("calc||tests::fails", Outcome::Failed), ("calc|api|checks_api", Outcome::Skipped)]);
         assert!(results[1].message.as_deref().unwrap().contains("panicked at src/lib.rs:12:9"));
+    }
+
+    #[test]
+    fn reads_results_as_they_come() {
+        assert_eq!(live_result("test parser::tests::adds ... ok"), Some(("parser::tests::adds", Outcome::Passed)));
+        assert_eq!(live_result("test slow ... FAILED"), Some(("slow", Outcome::Failed)));
+        assert_eq!(live_result("test later ... ignored, not today"), Some(("later", Outcome::Skipped)));
+        assert_eq!(live_result("test result: ok. 3 passed"), None);
+        assert_eq!(libtest_name("calc|api|tests::adds"), Some("tests::adds"));
     }
 
     /// Runs `cargo test` for real on a small package.

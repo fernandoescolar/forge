@@ -107,6 +107,10 @@ pub fn init(cx: &mut App) {
             .register_action(|_, _: &Zoom, window, _| window.zoom_window())
             .register_action(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen())
             .register_action(|_, _: &About, window, cx| about(window, cx))
+            // Zed's "Install Themes" buttons and the like: Forge's extensions are in its panel.
+            .register_action(|ws, _: &zed_actions::Extensions, window, cx| {
+                ws.focus_panel::<forge_extension_host::ExtensionsPanel>(window, cx);
+            })
             .register_action(|ws, _: &SelectRunTarget, window, cx| select_run_target(ws, window, cx))
             .register_action(|ws, _: &workspace::ReloadActiveItem, window, cx| {
                 if let Some(item) = ws.active_item(cx) {
@@ -271,20 +275,13 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
     use editor::actions as ed;
     let extensions = extension_entries(cx);
 
-    // Every panel, built in or from an extension, by name.
-    let mut panels: Vec<(String, MenuItem)> = vec![
-        ("Debug".into(), MenuItem::action("Debug", zed_actions::debug_panel::ToggleFocus)),
-        ("Extensions".into(), MenuItem::action("Extensions", forge_extension_host::panel::ToggleFocus)),
-        ("Git Changes".into(), MenuItem::action("Git Changes", zed_actions::git_panel::ToggleFocus)),
-        ("Open Editors".into(), MenuItem::action("Open Editors", crate::open_editors::ToggleFocus)),
-        ("Output".into(), MenuItem::action("Output", forge_output::panel::ToggleFocus)),
-        ("Problems".into(), MenuItem::action("Problems", diagnostics::Deploy)),
-        ("Project".into(), MenuItem::action("Project", zed_actions::project_panel::ToggleFocus)),
-        ("Solution Explorer".into(), MenuItem::action("Solution Explorer", forge_dotnet::explorer::ToggleFocus)),
-        ("Terminal".into(), MenuItem::action("Terminal", terminal_view::terminal_panel::ToggleFocus)),
-        ("Tests".into(), MenuItem::action("Tests", forge_tests::panel::ToggleFocus)),
-        ("Threads".into(), MenuItem::action("Threads", forge_agents::ToggleThreadsPanel)),
-    ];
+    // Every panel, built in or from an extension, by name. Built-in ones are shown even when
+    // hidden from the side bars; Problems is a tab, not a panel.
+    let mut panels: Vec<(String, MenuItem)> = crate::docks::BUILT_IN_PANELS
+        .iter()
+        .map(|(title, name)| (name.to_string(), MenuItem::action(*name, crate::docks::OpenPanel { title: title.to_string() })))
+        .collect();
+    panels.push(("Problems".into(), MenuItem::action("Problems", diagnostics::Deploy)));
     for (title, id) in &extensions.panels {
         panels.push((title.clone(), MenuItem::action(title.clone(), forge_extension_host::panel::ShowPanel { id: id.clone() })));
     }
@@ -319,6 +316,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
                 MenuItem::action("Open Default Key Bindings", OpenDefaultKeymap),
             ])),
             MenuItem::action("Select Theme…", zed_actions::theme_selector::Toggle::default()),
+            MenuItem::action("Select Icon Theme…", zed_actions::icon_theme_selector::Toggle::default()),
             MenuItem::action("Colour Palettes…", OpenPalettesFolder),
         ]
     };
@@ -485,6 +483,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Go to Type Definition", ed::GoToTypeDefinition::default()),
             MenuItem::action("Go to Implementation", ed::GoToImplementation::default()),
             MenuItem::action("Find All References", ed::FindAllReferences::default()),
+            MenuItem::action("Type Hierarchy", forge_languages::type_hierarchy::ShowTypeHierarchy),
             MenuItem::separator(),
             MenuItem::action("Next Problem", ed::GoToDiagnostic::default()),
             MenuItem::action("Previous Problem", ed::GoToPreviousDiagnostic::default()),
@@ -504,6 +503,8 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Clear All Breakpoints", debugger_ui::ClearAllBreakpoints),
             MenuItem::separator(),
             MenuItem::action("Run All Tests", forge_tests::panel::RunAllTests),
+            MenuItem::action("Run All Tests with Coverage", forge_tests::panel::RunAllTestsWithCoverage),
+            MenuItem::action("Clear Coverage", forge_tests::panel::ClearCoverage),
             MenuItem::action("Run Failed Tests", forge_tests::panel::RunFailedTests),
             MenuItem::action("Find Tests Again", forge_tests::panel::RefreshTests),
             MenuItem::separator(),
@@ -515,6 +516,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             ])),
             MenuItem::submenu(Menu::new(".NET").items([
                 MenuItem::action("Manage NuGet Packages", forge_dotnet::explorer::ManagePackages),
+                MenuItem::action("Code Analysis", forge_dotnet::code_analysis::OpenCodeAnalysis),
             ])),
         ]),
         Menu::new("Git").items([
@@ -524,6 +526,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Commit…", git::Commit),
             MenuItem::action("Write Commit Message with the Agent", forge_agents::commit_message::WriteCommitMessage),
+            MenuItem::action("Sign Off Commits in This Project", forge_git::signoff::ToggleSignOff),
             MenuItem::action("Pull", git::Pull),
             MenuItem::action("Push", git::Push),
             MenuItem::action("Fetch", git::Fetch),
@@ -556,6 +559,10 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Ask About This Code", forge_agents::AskHere),
             MenuItem::action("Fix the Problem at the Cursor", forge_agents::FixProblemAtCursor),
+            MenuItem::action("Fix the Problems in This File", forge_agents::FixProblemsInFile),
+            MenuItem::action("Fix the Problems in the Project", forge_agents::FixProblemsInProject),
+            MenuItem::separator(),
+            MenuItem::action("Set Up Forge with an Agent…", forge_agents::ConfigureForge),
             MenuItem::action("Ask About the Terminal Output", forge_agents::context::AskAboutTerminal),
             MenuItem::separator(),
             MenuItem::action("Stop the Agent", forge_agents::Cancel),
@@ -728,6 +735,8 @@ mod tests {
             forge_git::init(cx);
             forge_dotnet::init(cx);
             forge_toolchain::init(cx);
+            // The app runs it from `forge_languages::init`, which needs the language registry.
+            forge_languages::type_hierarchy::init(cx);
             init(cx);
             crate::open_editors::init(cx);
             crate::docks::init(cx);

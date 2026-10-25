@@ -184,11 +184,22 @@ fn tail(content: String, limit: Option<usize>) -> (String, bool) {
 }
 
 fn to_exit(status: Option<ExitStatus>) -> TerminalExit {
-    use std::os::unix::process::ExitStatusExt as _;
     match status {
-        Some(s) => TerminalExit { exit_code: s.code().map(|c| c as u32), signal: s.signal().map(|n| n.to_string()) },
+        Some(s) => TerminalExit { exit_code: s.code().map(|c| c as u32), signal: signal(&s) },
         None => TerminalExit::default(),
     }
+}
+
+/// The signal that ended the command (Unix only: Windows has none).
+#[cfg(unix)]
+fn signal(status: &ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal().map(|n| n.to_string())
+}
+
+#[cfg(not(unix))]
+fn signal(_: &ExitStatus) -> Option<String> {
+    None
 }
 
 #[async_trait]

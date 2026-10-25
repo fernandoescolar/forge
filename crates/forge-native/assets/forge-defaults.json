@@ -9,7 +9,8 @@
   "ui_font_family": ".SystemUIFont",
   "buffer_font_family": "Hack Nerd Font Mono",
   "buffer_font_features": { "calt": true },
-  "icon_theme": "Forge",
+  // Forge's file icons (the Forge Icons extension, from Catppuccin), following the system too.
+  "icon_theme": { "mode": "system", "dark": "Forge Dark", "light": "Forge Light" },
   // Agents come in through ACP (Agents › Threads); the built-in AI features are off.
   "disable_ai": true,
   "telemetry": { "diagnostics": false, "metrics": false },
@@ -28,6 +29,10 @@
   // Same density as the Solution Explorer, and VS Code-style git letters (M, U, A, D).
   "project_panel": { "entry_spacing": "standard", "indent_size": 12, "git_status_indicator": true },
   "terminal": { "font_family": "Hack Nerd Font Mono", "font_size": 13, "blinking": "off" },
-  // OmniSharp sends parameter-name and inferred-type hints (see forge-languages/src/omnisharp.rs).
-  "languages": { "C#": { "inlay_hints": { "enabled": true } } }
+  // "N references" above C# types and members (Roslyn), like Visual Studio.
+  "code_lens": "on",
+  // The C# servers send parameter-name and inferred-type hints (see forge-languages/src/roslyn.rs and omnisharp.rs).
+  "languages": { "C#": { "inlay_hints": { "enabled": true } } },
+  // Helm charts: their templates are Go templates over YAML (forge-languages/src/helm).
+  "file_types": { "Helm": ["**/templates/**/*.yaml", "**/templates/**/*.yml", "**/templates/**/*.tpl", "**/templates/NOTES.txt"] }
 }

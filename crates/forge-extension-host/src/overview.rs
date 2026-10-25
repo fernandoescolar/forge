@@ -124,6 +124,11 @@ impl ExtensionsPanel {
         if let Some(description) = &extension.description {
             card = card.child(Label::new(description.clone()).size(LabelSize::Small).color(Color::Muted));
         }
+        for (kind, names) in [("Themes", &extension.themes.themes), ("Icon themes", &extension.themes.icon_themes)] {
+            if !names.is_empty() {
+                card = card.child(Label::new(format!("{kind}: {}", names.join(", "))).size(LabelSize::Small).color(Color::Muted));
+            }
+        }
         if !panels.is_empty() {
             let mut row = h_flex().gap_1().flex_wrap();
             for (i, panel) in panels.iter().enumerate() {

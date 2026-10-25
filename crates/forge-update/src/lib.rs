@@ -1,5 +1,5 @@
 //! Forge updates itself from the GitHub releases of its repository: a release tagged
-//! `v<version>` with a `Forge-<version>-<arch>.zip` asset on macOS (what
+//! `v<version>` with a `Forge-<version>-macos-<arch>.zip` asset on macOS (what
 //! `scripts/bundle-macos.sh` makes) or `Forge-<version>-linux-<arch>.tar.gz` on Linux
 //! (`scripts/bundle-linux.sh`). The repository is Forge's own (`fernandoescolar/forge`), or the one set with
 //! `FORGE_UPDATE_REPOSITORY` when Forge is built (for forks). Release builds check on their
@@ -8,9 +8,9 @@
 //! An update is downloaded, unpacked and checked next to the running Forge, then swapped
 //! in; it runs from the next start. On macOS it must be a signed Forge.app; on Linux its
 //! SHA-256 must be the one GitHub lists for the asset, and the folder it replaces must be
-//! one the tarball made (`bin/forge` and `share/forge`). Forge then asks, in a
-//! dialog, whether to restart now: restarting saves (or asks about) unsaved work and
-//! reopens the projects that were open.
+//! one the tarball made (`bin/forge` and `share/forge`). Forge then offers, in a
+//! notification in every window, to restart now: restarting saves (or asks about) unsaved
+//! work and reopens the projects that were open.
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -19,10 +19,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use futures::AsyncReadExt as _;
-use gpui::{App, AppContext as _, Global, PromptLevel, WindowHandle, actions};
+use gpui::{App, AppContext as _, Global, WindowHandle, actions};
 use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, RedirectPolicy};
 use serde_json::Value;
-use workspace::{MultiWorkspace, Workspace, notifications::NotificationId};
+use workspace::{
+    MultiWorkspace, Workspace,
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
+};
 
 actions!(forge, [
     /// Looks for a newer Forge release and installs it.
@@ -39,18 +42,18 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub fn init(cx: &mut App) {
     cx.set_global(UpdateState::default());
-    cx.observe_new(|workspace: &mut Workspace, _, cx| {
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|_, _: &CheckForUpdates, _, cx| check(true, cx));
-        // An update installed before any window was open asks in the first one.
-        if cx.global::<UpdateState>().unanswered {
-            if let Some(version) = cx.global::<UpdateState>().installed.clone() {
-                offer_restart(&version, cx);
-            }
-        }
     })
     .detach();
     // Release builds look on their own, at startup and every few hours.
     if !cfg!(debug_assertions) {
+        // Windows: what the last update moved aside can go now.
+        if cfg!(windows) {
+            if let Some(prefix) = current_install() {
+                cx.background_spawn(async move { remove_old_files(&prefix) }).detach();
+            }
+        }
         cx.spawn(async move |cx| {
             loop {
                 cx.update(|cx| check(false, cx));
@@ -69,10 +72,6 @@ struct UpdateState {
     /// What to start on restart: the update's app bundle or `bin/forge`. The running
     /// executable's own path no longer works then, as the old copy is gone.
     restart_path: Option<PathBuf>,
-    /// The restart dialog for `installed` couldn't be shown yet (no window was open).
-    unanswered: bool,
-    /// The restart dialog is on screen.
-    asking: bool,
 }
 impl Global for UpdateState {}
 
@@ -113,7 +112,8 @@ fn sha256_hex(data: &[u8]) -> String {
 /// The release asset for this kind of machine.
 pub fn asset_name(version: &str, os: &str, arch: &str) -> String {
     match os {
-        "macos" => format!("Forge-{version}-{arch}.zip"),
+        "macos" => format!("Forge-{version}-macos-{arch}.zip"),
+        "windows" => format!("Forge-{version}-windows-{arch}.zip"),
         os => format!("Forge-{version}-{os}-{arch}.tar.gz"),
     }
 }
@@ -174,13 +174,11 @@ pub fn newer_release(json: &str, current: &str, os: &str, arch: &str) -> Result<
         return Ok(None);
     }
     let wanted = asset_name(&version, os, arch);
-    let asset = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(wanted.as_str()))
-        .with_context(|| format!("release {tag} has no {wanted}"))?;
+    // Releases up to 0.0.1-rc.4 named the macOS zip without the system: `Forge-<v>-<arch>.zip`.
+    let legacy = (os == "macos").then(|| format!("Forge-{version}-{arch}.zip"));
+    let assets: Vec<&Value> = release.get("assets").and_then(Value::as_array).into_iter().flatten().collect();
+    let named = |name: &str| assets.iter().copied().find(|asset| asset.get("name").and_then(Value::as_str) == Some(name));
+    let asset = named(&wanted).or_else(|| legacy.as_deref().and_then(named)).with_context(|| format!("release {tag} has no {wanted}"))?;
     let download = asset.get("browser_download_url").and_then(Value::as_str).with_context(|| format!("release {tag} has no {wanted}"))?;
     let sha256 = asset.get("digest").and_then(Value::as_str).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase);
     let signature = release
@@ -256,15 +254,18 @@ pub fn install(zip: &Path, app: &Path) -> Result<()> {
 /// The designated requirement of the app at `app` (`codesign -d -r-`): what a signature
 /// of the same app must satisfy.
 fn designated_requirement(app: &Path) -> Option<String> {
-    let output = std::process::Command::new("codesign").args(["-d", "-r-"]).arg(app).output().ok()?;
+    let output = forge_process::std_command("codesign").args(["-d", "-r-"]).arg(app).output().ok()?;
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     text.lines().find_map(|l| l.strip_prefix("designated => ")).map(|r| r.trim().to_string())
 }
 
-/// Unpacks the Linux tarball `tarball` (a `forge/` folder) and puts it in place of the
-/// installation at `prefix`, once its SHA-256 is `sha256`. The old one is kept until the
-/// new one is in place.
-pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
+/// Unpacks `archive` (the Linux tarball or the Windows zip: a `forge/` folder) and puts it in
+/// place of the installation at `prefix`, once its SHA-256 is `sha256`. On Linux the old
+/// folder is kept until the new one is in place. Windows doesn't let a folder with a running
+/// program in it move, nor that program be overwritten, but it does let it be renamed: there
+/// each file is swapped in on its own ([`swap_in`]).
+pub fn install_tree(archive: &Path, sha256: Option<&str>, prefix: &Path) -> Result<()> {
+    let tarball = archive;
     let expected = sha256.context("the release doesn't list the download's SHA-256")?;
     let actual = sha256_hex(&std::fs::read(tarball)?);
     if actual != expected {
@@ -275,10 +276,14 @@ pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Resu
     }
     let parent = prefix.parent().context("the installation has no folder")?;
     let staging = tempfile::Builder::new().prefix(".forge-update-").tempdir_in(parent).context("cannot write next to the installation")?;
-    run("tar", &["-xzf".as_ref(), tarball.as_os_str(), "-C".as_ref(), staging.path().as_os_str()])?;
+    // GNU tar reads the gzip of the tarball; Windows' tar (bsdtar) reads the zip.
+    run("tar", &["-xf".as_ref(), tarball.as_os_str(), "-C".as_ref(), staging.path().as_os_str()])?;
     let new_tree = staging.path().join("forge");
     if !is_installation(&new_tree) {
         bail!("the download isn't a Forge tarball");
+    }
+    if cfg!(windows) {
+        return swap_in(&new_tree, prefix);
     }
     let old = staging.path().join("previous");
     std::fs::rename(prefix, &old).context("cannot move the current installation aside")?;
@@ -289,13 +294,75 @@ pub fn install_tree(tarball: &Path, sha256: Option<&str>, prefix: &Path) -> Resu
     Ok(())
 }
 
-/// A folder laid out like the Linux tarball: `bin/forge` and `share/forge`.
+/// What files the update replaces are renamed to, until the next start removes them.
+const OLD: &str = ".forge-old";
+
+/// Puts each file of `new_tree` in its place under `prefix`: the file there is renamed to
+/// `<name>.forge-old` first (a running program can be renamed, not overwritten), and so are
+/// the files the new version no longer has. [`remove_old_files`] deletes them later.
+pub(crate) fn swap_in(new_tree: &Path, prefix: &Path) -> Result<()> {
+    fn files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                files(root, &path, out)?;
+            } else if !path.to_string_lossy().ends_with(OLD) {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let aside = |target: &Path| -> Result<()> {
+        if target.exists() {
+            let old = PathBuf::from(format!("{}{OLD}", target.display()));
+            std::fs::remove_file(&old).ok();
+            std::fs::rename(target, &old).with_context(|| format!("cannot move {} aside", target.display()))?;
+        }
+        Ok(())
+    };
+    let (mut new_files, mut current) = (Vec::new(), Vec::new());
+    files(new_tree, new_tree, &mut new_files)?;
+    files(prefix, prefix, &mut current)?;
+    for relative in &new_files {
+        let target = prefix.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        aside(&target)?;
+        std::fs::rename(new_tree.join(relative), &target).with_context(|| format!("cannot put {} in place", target.display()))?;
+    }
+    for gone in current.iter().filter(|f| !new_files.contains(f)) {
+        aside(&prefix.join(gone))?;
+    }
+    Ok(())
+}
+
+/// Deletes what an update on Windows left aside ([`swap_in`]); files still in use stay
+/// for the next time.
+pub fn remove_old_files(prefix: &Path) {
+    fn walk(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                walk(&path);
+            } else if path.to_string_lossy().ends_with(OLD) {
+                std::fs::remove_file(&path).ok();
+            }
+        }
+    }
+    walk(prefix);
+}
+
+/// The program in an installation's `bin` folder.
+const EXE: &str = if cfg!(windows) { "forge.exe" } else { "forge" };
+
+/// A folder laid out like the Linux tarball or the Windows zip: `bin/forge` and `share/forge`.
 fn is_installation(prefix: &Path) -> bool {
-    prefix.join("bin/forge").is_file() && prefix.join("share/forge").is_dir()
+    prefix.join("bin").join(EXE).is_file() && prefix.join("share/forge").is_dir()
 }
 
 /// What an update replaces: the running app bundle (`…/Forge.app`) on macOS, the folder
-/// the tarball made (`…/forge`, with `bin/forge`) elsewhere; `None` when Forge doesn't run
+/// the tarball or zip made (`…/forge`, with `bin/forge`) elsewhere; `None` when Forge doesn't run
 /// from one (a development build).
 fn current_install() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -327,39 +394,27 @@ fn notify(message: impl Into<String>, cx: &mut App) {
     workspace.update(cx, |ws, cx| ws.show_toast(toast, cx));
 }
 
-/// Asks whether to restart into the installed `version` now; asks in the first window
-/// that opens when none is open yet. Check for Updates runs while its window is being
-/// updated, and the dialog needs that window: ask right after.
+/// Offers to restart into the installed `version` in a notification in every window
+/// (and in windows opened later, when none is open yet). Closing it is "later": Check for
+/// Updates offers again.
 fn offer_restart(version: &str, cx: &mut App) {
-    let version = version.to_string();
-    cx.defer(move |cx| ask_to_restart(&version, cx));
+    let message = format!("Forge {version} is installed. Restart now to use it: Forge reopens your projects, and asks first about unsaved changes.");
+    workspace::notifications::show_app_notification(restart_notification_id(), cx, move |cx| {
+        let message = message.clone();
+        cx.new(move |cx| {
+            MessageNotification::new(message, cx)
+                .with_title("Update ready")
+                .show_suppress_button(false)
+                .primary_message("Restart Now")
+                .primary_on_click(|_, cx| cx.spawn(async move |_, cx| restart_forge(cx).await).detach())
+                .secondary_message("Later")
+                .secondary_on_click(|_, _| {})
+        })
+    });
 }
 
-fn ask_to_restart(version: &str, cx: &mut App) {
-    let state = cx.global_mut::<UpdateState>();
-    if state.asking {
-        return;
-    }
-    let Some(window) = windows(cx).into_iter().next() else {
-        cx.global_mut::<UpdateState>().unanswered = true;
-        return;
-    };
-    let message = format!("Forge {version} is installed");
-    let detail = "Restart now to use it. Forge reopens your projects, and asks first about unsaved changes.";
-    let Ok(answer) = window.update(cx, |_, window, cx| window.prompt(PromptLevel::Info, &message, Some(detail), &["Restart Now", "Later"], cx)) else {
-        return;
-    };
-    let state = cx.global_mut::<UpdateState>();
-    state.asking = true;
-    state.unanswered = false;
-    cx.spawn(async move |cx| {
-        let restart = answer.await == Ok(0);
-        cx.update(|cx| cx.global_mut::<UpdateState>().asking = false);
-        if restart {
-            restart_forge(cx).await;
-        }
-    })
-    .detach();
+fn restart_notification_id() -> NotificationId {
+    NotificationId::named("forge-update-restart".into())
 }
 
 /// Restarts into the installed update once every window is ready to close (unsaved work
@@ -406,9 +461,9 @@ pub fn check(asked: bool, cx: &mut App) {
                 verify_signature(key, &bytes, &get(&client, url).await?)?;
             }
             let version = release.version.clone();
-            let restart_path = if cfg!(target_os = "macos") { target.clone() } else { target.join("bin/forge") };
+            let restart_path = if cfg!(target_os = "macos") { target.clone() } else if cfg!(windows) { target.join("bin/forge.exe") } else { target.join("bin/forge") };
             cx.background_spawn(async move {
-                let download = tempfile::Builder::new().suffix(if cfg!(target_os = "macos") { ".zip" } else { ".tar.gz" }).tempfile()?;
+                let download = tempfile::Builder::new().suffix(if cfg!(any(target_os = "macos", windows)) { ".zip" } else { ".tar.gz" }).tempfile()?;
                 std::fs::write(download.path(), &bytes)?;
                 if cfg!(target_os = "macos") { install(download.path(), &target) } else { install_tree(download.path(), release.sha256.as_deref(), &target) }
             })
@@ -457,12 +512,15 @@ mod tests {
     #[test]
     fn picks_the_asset_for_this_machine() {
         let json = r#"{"tag_name": "v0.3.0", "html_url": "https://github.com/o/forge/releases/tag/v0.3.0", "assets": [
-            {"name": "Forge-0.3.0-x86_64.zip", "browser_download_url": "https://x/intel.zip"},
-            {"name": "Forge-0.3.0-aarch64.zip", "browser_download_url": "https://x/arm.zip"}]}"#;
+            {"name": "Forge-0.3.0-macos-x86_64.zip", "browser_download_url": "https://x/intel.zip"},
+            {"name": "Forge-0.3.0-macos-aarch64.zip", "browser_download_url": "https://x/arm.zip"}]}"#;
         let release = newer_release(json, "0.2.0", "macos", "aarch64").unwrap().unwrap();
         assert_eq!((release.version.as_str(), release.download.as_str()), ("0.3.0", "https://x/arm.zip"));
         assert_eq!(newer_release(json, "0.3.0", "macos", "aarch64").unwrap(), None, "already up to date");
-        assert!(newer_release(json, "0.2.0", "macos", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-riscv64.zip"));
+        assert!(newer_release(json, "0.2.0", "macos", "riscv64").unwrap_err().to_string().contains("no Forge-0.3.0-macos-riscv64.zip"));
+        // Releases from before the macOS zip said so in its name.
+        let legacy = r#"{"tag_name": "v0.3.0", "assets": [{"name": "Forge-0.3.0-aarch64.zip", "browser_download_url": "https://x/old-arm.zip"}]}"#;
+        assert_eq!(newer_release(legacy, "0.2.0", "macos", "aarch64").unwrap().unwrap().download, "https://x/old-arm.zip");
 
         let linux = r#"{"tag_name": "v0.3.0", "assets": [
             {"name": "Forge-0.3.0-linux-x86_64.tar.gz", "browser_download_url": "https://x/linux.tar.gz", "digest": "sha256:ABC123"}]}"#;
@@ -513,6 +571,35 @@ mod tests {
         verify_signature(&public, b"the zip", &std::fs::read(dir.path().join("asset.sig")).unwrap()).unwrap();
     }
 
+    /// Windows' way: file by file, the replaced ones moved aside until the next start.
+    #[test]
+    fn swaps_files_in_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (prefix, new) = (dir.path().join("installed"), dir.path().join("new"));
+        for (root, files) in [(&prefix, &[("bin/forge.exe", "0.2.0"), ("share/forge/extensions/old/package.json", "gone")][..]), (&new, &[("bin/forge.exe", "0.3.0"), ("share/forge/extensions/db/package.json", "db")][..])] {
+            for (file, text) in files {
+                std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+                std::fs::write(root.join(file), text).unwrap();
+            }
+        }
+        swap_in(&new, &prefix).unwrap();
+        let read = |file: &str| std::fs::read_to_string(prefix.join(file)).ok();
+        assert_eq!(read("bin/forge.exe").as_deref(), Some("0.3.0"));
+        assert_eq!(read("bin/forge.exe.forge-old").as_deref(), Some("0.2.0"), "the running one is renamed, not overwritten");
+        assert_eq!(read("share/forge/extensions/db/package.json").as_deref(), Some("db"));
+        assert_eq!(read("share/forge/extensions/old/package.json"), None, "what the new version doesn't have is moved aside too");
+
+        // An update over one that left files aside replaces those too.
+        std::fs::write(new.join("bin/forge.exe"), "0.4.0").unwrap();
+        swap_in(&new, &prefix).unwrap();
+        assert_eq!(read("bin/forge.exe.forge-old").as_deref(), Some("0.3.0"));
+
+        remove_old_files(&prefix);
+        assert_eq!(read("bin/forge.exe").as_deref(), Some("0.4.0"));
+        assert_eq!(read("bin/forge.exe.forge-old"), None, "the next start removes them");
+        assert_eq!(read("share/forge/extensions/old/package.json.forge-old"), None);
+    }
+
     /// The Linux tarball replaces the folder it made before, when its SHA-256 matches.
     #[test]
     fn installs_a_tarball_over_the_installed_one() {
@@ -559,7 +646,7 @@ mod tests {
     }
 
     /// A real release zip over a copy of an installed app:
-    /// `FORGE_UPDATE_ZIP=dist/Forge-<v>-<arch>.zip FORGE_UPDATE_APP=/tmp/x/Forge.app cargo test -p forge-update -- --ignored`
+    /// `FORGE_UPDATE_ZIP=dist/Forge-<v>-macos-<arch>.zip FORGE_UPDATE_APP=/tmp/x/Forge.app cargo test -p forge-update -- --ignored`
     #[test]
     #[ignore]
     #[cfg(target_os = "macos")]
@@ -571,10 +658,11 @@ mod tests {
         assert!(Path::new(&app).join("Contents/MacOS/forge").is_file());
     }
 
-    /// An update found before any window is open asks in the first one; Later keeps
-    /// Forge running, and Check for Updates asks again and restarts.
+    /// An update found before any window is open is offered in the first one, in the
+    /// window rather than in a dialog; Later keeps Forge running, and Check for Updates
+    /// offers again.
     #[gpui::test]
-    async fn asks_to_restart_into_an_installed_update(cx: &mut gpui::TestAppContext) {
+    async fn offers_to_restart_into_an_installed_update(cx: &mut gpui::TestAppContext) {
         let params = cx.update(workspace::AppState::test);
         cx.update(|cx| {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
@@ -585,29 +673,24 @@ mod tests {
             offer_restart("9.9.9", cx);
         });
         cx.run_until_parked();
-        assert!(cx.update(|cx| cx.global::<UpdateState>().unanswered), "no window to ask in yet");
 
         params.fs.as_fake().insert_tree("/root", serde_json::json!({ "a.txt": "" })).await;
         let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
         let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let (message, _) = cx.pending_prompt().expect("asks as soon as a window opens");
-        assert!(message.contains("Forge 9.9.9 is installed"), "{message}");
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let shown = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |ws, _| ws.has_notification(&restart_notification_id()));
+        assert!(shown(cx), "offered as soon as a window opens");
+        assert!(!cx.has_pending_prompt(), "not in a dialog");
 
-        cx.simulate_prompt_answer("Later");
+        workspace.update(cx, |ws, cx| ws.dismiss_notification(&restart_notification_id(), cx));
         cx.run_until_parked();
-        assert!(!cx.has_pending_prompt());
-        assert!(!cx.update(|_, cx| cx.global::<UpdateState>().asking));
+        assert!(!shown(cx));
 
-        let restarted = cx.expect_restart();
         cx.update(|_, cx| check(true, cx));
         cx.run_until_parked();
-        cx.simulate_prompt_answer("Restart Now");
-        cx.run_until_parked();
-        let (path, args) = restarted.await.expect("Forge restarts");
-        assert_eq!(path, Some(PathBuf::from("/opt/forge/bin/forge")), "the updated copy starts, not the running one (gone by now)");
-        assert!(args.is_empty(), "the new Forge starts plain, restoring the last session");
+        assert!(shown(cx), "Check for Updates offers again");
     }
 
     #[test]

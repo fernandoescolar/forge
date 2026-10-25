@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use settings::SettingsStore;
 use theme::{ActiveTheme as _, ThemeRegistry};
 use ui::{
-    Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu, Headline, HeadlineSize, Icon, IconButton, IconName,
+    Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu, FixedWidth as _, Headline, HeadlineSize, Icon, IconButton, IconName,
     IconPosition, IconSize, Indicator, Label, LabelCommon as _, LabelSize, PopoverMenu, Switch, ToggleState, Tooltip, h_flex, v_flex,
 };
 use workspace::{Item, OpenOptions, Workspace, item::ItemEvent};
@@ -48,7 +48,8 @@ pub fn open(workspace: &mut Workspace, page: Option<&str>, window: &mut Window, 
         workspace.activate_item(&existing, true, true, window, cx);
         return;
     }
-    let view = cx.new(|cx| SettingsView::new(workspace.weak_handle(), window, cx));
+    let project = workspace.visible_worktrees(cx).next().map(|tree| tree.read(cx).abs_path().to_path_buf());
+    let view = cx.new(|cx| SettingsView::new(workspace.weak_handle(), project, window, cx));
     if let Some(page) = page {
         view.update(cx, |view, cx| view.select_page(page.to_string(), cx));
     }
@@ -134,6 +135,10 @@ fn register_core_pages(cx: &mut App) {
         deprecations: &empty,
         deprecation_messages: &empty,
     };
+    // What a project's `.forge/settings.json` may set (languages, files, the terminal…).
+    let project_keys: std::collections::HashSet<String> =
+        SettingsStore::project_json_schema(&params).get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
+    let in_project = |keys: &[String]| Some(keys.iter().filter(|k| project_keys.contains(*k)).cloned().collect::<Vec<_>>()).filter(|k| !k.is_empty());
     let mut schema = SettingsStore::json_schema(&params);
     // Themes as choices: `theme` is "a name, or one per appearance"; Forge edits the latter.
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
@@ -141,7 +146,7 @@ fn register_core_pages(cx: &mut App) {
             "theme".into(),
             json!({
                 "type": "object",
-                "description": "The colour theme. Every palette in config/palettes is one.",
+                "description": "The colour theme: every palette in config/palettes, Zed theme in config/themes, and theme an extension brings.",
                 "properties": {
                     "mode": { "enum": ["system", "light", "dark"], "enumDescriptions": ["Follow the system", "Light", "Dark"], "description": "Which of the two themes to use." },
                     "dark": { "enum": theme_names, "title": "Dark theme" },
@@ -149,7 +154,19 @@ fn register_core_pages(cx: &mut App) {
                 }
             }),
         );
-        properties.insert("icon_theme".into(), json!({ "enum": icon_theme_names, "title": "File icons", "description": "The icons for files and folders." }));
+        properties.insert(
+            "icon_theme".into(),
+            json!({
+                "type": "object",
+                "title": "File icons",
+                "description": "The icons for files and folders: every icon theme in config/icon_themes, and those extensions bring.",
+                "properties": {
+                    "mode": { "enum": ["system", "light", "dark"], "enumDescriptions": ["Follow the system", "Light", "Dark"], "description": "Which of the two icon themes to use." },
+                    "dark": { "enum": icon_theme_names, "title": "Dark icons" },
+                    "light": { "enum": icon_theme_names, "title": "Light icons" },
+                }
+            }),
+        );
     }
     let defaults = crate::default_settings_value().unwrap_or_else(|_| json!({}));
     let all_keys: Vec<String> = schema.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
@@ -158,18 +175,33 @@ fn register_core_pages(cx: &mut App) {
     let mut pages: Vec<SettingsPage> = CORE_PAGES
         .iter()
         .enumerate()
-        .map(|(i, (id, title, keys))| SettingsPage {
-            id: id.to_string(),
-            title: title.to_string(),
-            file: SettingsFile::User,
-            schema: schema.clone(),
-            keys: Some(keys.iter().map(|k| k.to_string()).collect()),
-            defaults: defaults.clone(),
-            order: i as i32,
-            actions: vec![],
+        .map(|(i, (id, title, keys))| {
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            SettingsPage {
+                id: id.to_string(),
+                title: title.to_string(),
+                file: SettingsFile::User,
+                schema: schema.clone(),
+                project_keys: in_project(&keys),
+                keys: Some(keys),
+                defaults: defaults.clone(),
+                order: i as i32,
+                actions: vec![],
+            }
         })
         .collect();
-    pages.push(SettingsPage { id: "advanced".into(), title: "Advanced".into(), file: SettingsFile::User, schema, keys: Some(advanced), defaults, order: 90, actions: vec![] });
+    let advanced_in_project = in_project(&advanced);
+    pages.push(SettingsPage {
+        id: "advanced".into(),
+        title: "Advanced".into(),
+        file: SettingsFile::User,
+        schema,
+        keys: Some(advanced),
+        defaults,
+        order: 90,
+        actions: vec![],
+        project_keys: advanced_in_project,
+    });
     registry.update(cx, |registry, cx| {
         for page in pages {
             registry.register(page, cx);
@@ -191,6 +223,12 @@ pub struct SettingsView {
     focus_handle: FocusHandle,
     search: Entity<Editor>,
     page: Option<String>,
+    /// The pages shown: the registry's, or as the project sees them.
+    pages: Vec<SettingsPage>,
+    /// The project's folder (the first one open), whose `.forge/` files hold its settings.
+    project: Option<std::path::PathBuf>,
+    /// Showing and editing the project's settings instead of the user's.
+    in_project: bool,
     rows: HashMap<String, Vec<SettingRow>>,
     values: HashMap<SettingsFile, Value>,
     inputs: HashMap<String, Input>,
@@ -203,7 +241,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(workspace: WeakEntity<Workspace>, project: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let registry = SettingsRegistry::global(cx);
         let search = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
@@ -226,6 +264,9 @@ impl SettingsView {
             focus_handle: cx.focus_handle(),
             search,
             page: None,
+            pages: Vec::new(),
+            project,
+            in_project: false,
             rows: HashMap::new(),
             values: HashMap::new(),
             inputs: HashMap::new(),
@@ -243,14 +284,35 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Shows the project's settings (`true`) or the user's.
+    fn set_in_project(&mut self, in_project: bool, cx: &mut Context<Self>) {
+        self.in_project = in_project;
+        // The same rows edit another file now.
+        self.inputs.clear();
+        self.editing = None;
+        self.error = None;
+        self.reload(cx);
+    }
+
     /// Re-reads the pages and their files; inputs not being edited show the new values.
     fn reload(&mut self, cx: &mut Context<Self>) {
-        let pages = self.registry.read(cx).pages().to_vec();
-        self.rows = pages.iter().map(|p| (p.id.clone(), rows(p))).collect();
+        let all = self.registry.read(cx).pages().to_vec();
         self.values.clear();
+        let pages: Vec<SettingsPage> = match self.project.clone().filter(|_| self.in_project) {
+            Some(root) => all
+                .iter()
+                .filter_map(|page| {
+                    let user = self.values.entry(page.file.clone()).or_insert_with(|| page.file.read()).clone();
+                    page.in_project(&root, &user)
+                })
+                .collect(),
+            None => all,
+        };
+        self.rows = pages.iter().map(|p| (p.id.clone(), rows(p))).collect();
         for page in &pages {
             self.values.entry(page.file.clone()).or_insert_with(|| page.file.read());
         }
+        self.pages = pages;
         self.sync_inputs = true;
         cx.notify();
     }
@@ -265,12 +327,12 @@ impl SettingsView {
     }
 
     fn set(&mut self, file: SettingsFile, path: Vec<String>, value: Option<Value>, cx: &mut Context<Self>) {
-        // `"theme": "Name"` is shorthand for one theme in both appearances: expand it
-        // before setting one of its parts.
-        if file == SettingsFile::User && path.len() > 1 && path[0] == "theme" {
-            if let Some(Value::String(name)) = self.user_value(&file, &path[..1]) {
-                let expanded = json!({ "mode": "system", "light": name, "dark": name });
-                self.registry.update(cx, |r, cx| r.set(&file, &path[..1], Some(expanded), cx)).ok();
+        // `theme` and `icon_theme` are a name or a whole `{ mode, light, dark }`: an object
+        // missing a part is invalid, and Zed ignores it. Write the whole object before one part.
+        if file == SettingsFile::User && path.len() > 1 && (path[0] == "theme" || path[0] == "icon_theme") {
+            let defaults = crate::default_settings_value().unwrap_or_default();
+            if let Some(whole) = complete_selection(self.user_value(&file, &path[..1]), defaults.get(&path[0])) {
+                self.registry.update(cx, |r, cx| r.set(&file, &path[..1], Some(whole), cx)).ok();
             }
         }
         let result = self.registry.update(cx, |r, cx| r.set(&file, &path, value, cx));
@@ -329,6 +391,10 @@ impl SettingsView {
         let Some(workspace) = self.workspace.upgrade() else { return };
         let abs = file.path();
         if !abs.exists() {
+            // A project's `.forge/` may not exist yet.
+            if let Some(dir) = abs.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
             let _ = std::fs::write(&abs, if *file == SettingsFile::User { crate::config_files::USER_SETTINGS } else { "{\n}\n" });
         }
         let open = workspace.update(cx, |ws, cx| ws.open_abs_path(abs, OpenOptions::default(), window, cx));
@@ -425,12 +491,13 @@ impl SettingsView {
             }
         };
 
+        let (reset_tip, modified_tip) = if file.is_project() { ("Remove from this project: use your setting", "Set for this project") } else { ("Reset to the default", "Changed from the default") };
         let reset = user.is_some().then(|| {
             let (file, path) = (file.clone(), path.clone());
             IconButton::new(id("reset"), IconName::RotateCcw)
                 .icon_size(IconSize::XSmall)
                 .icon_color(Color::Muted)
-                .tooltip(Tooltip::text("Reset to the default"))
+                .tooltip(Tooltip::text(reset_tip))
                 .on_click(cx.listener(move |this, _, _, cx| this.set(file.clone(), path.clone(), None, cx)))
         });
 
@@ -450,7 +517,7 @@ impl SettingsView {
                         h_flex()
                             .gap_1p5()
                             .child(Label::new(row.title.clone()))
-                            .when(user.is_some(), |el| el.child(div().id(id("modified")).child(Indicator::dot().color(Color::Accent)).tooltip(Tooltip::text("Changed from the default")))),
+                            .when(user.is_some(), |el| el.child(div().id(id("modified")).child(Indicator::dot().color(Color::Accent)).tooltip(Tooltip::text(modified_tip)))),
                     )
                     .child(Label::new(row.key()).size(LabelSize::XSmall).color(Color::Muted).buffer_font(cx))
                     .when(!row.description.is_empty(), |el| el.child(Label::new(row.description.clone()).size(LabelSize::Small).color(Color::Muted))),
@@ -517,7 +584,7 @@ fn parse_input(text: &str, kind: &SettingKind) -> Result<Value, String> {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
-        let pages = self.registry.read(cx).pages().to_vec();
+        let pages = self.pages.clone();
         if std::mem::take(&mut self.sync_inputs) {
             let inputs: Vec<(String, Entity<Editor>, Vec<String>)> = self.inputs.iter().map(|(k, i)| (k.clone(), i.editor.clone(), i.path.clone())).collect();
             for (key, editor, path) in inputs {
@@ -545,6 +612,40 @@ impl Render for SettingsView {
             .border_color(colors.border)
             .overflow_y_scroll()
             .child(div().mb_2().px_2().py_1().rounded_sm().border_1().border_color(colors.border).bg(colors.editor_background).child(self.search.clone()))
+            .when_some(self.project.as_ref().and_then(|root| root.file_name()).map(|name| name.to_string_lossy().into_owned()), |el, name| {
+                let scope = |id: &'static str, label: String, project: bool, tip: String| {
+                    let selected = self.in_project == project;
+                    Button::new(id, label)
+                        .full_width()
+                        .style(if selected { ButtonStyle::Filled } else { ButtonStyle::Subtle })
+                        .size(ButtonSize::Compact)
+                        .tooltip(Tooltip::text(tip))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_in_project(project, cx)))
+                };
+                el.child(
+                    h_flex()
+                        .mb_2()
+                        .gap_1()
+                        .child(div().flex_1().child(scope("settings-scope-user", "User".into(), false, "Your settings, for every project".into())))
+                        .child(div().flex_1().min_w_0().child(scope(
+                            "settings-scope-project",
+                            name.clone(),
+                            true,
+                            format!("Settings for {name} only, in its {} folder; they win over yours", paths::local_settings_folder_name()),
+                        ))),
+                )
+            })
+            .child(
+                div().mb_2().child(
+                    Button::new("settings-ask-agent", "Ask an Agent…")
+                        .full_width()
+                        .style(ButtonStyle::Outlined)
+                        .size(ButtonSize::Compact)
+                        .start_icon(Some(Icon::new(IconName::ZedAgent).size(IconSize::Small)))
+                        .tooltip(Tooltip::text("Tell an agent what you'd like, and apply the changes it proposes"))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(forge_agents::ConfigureForge), cx)),
+                ),
+            )
             .children(pages.iter().map(|page| {
                 let is_selected = query.is_empty() && selected.as_deref() == Some(page.id.as_str());
                 let id = page.id.clone();
@@ -593,6 +694,15 @@ impl Render for SettingsView {
                         )
                         .into_any_element(),
                 );
+                if page.file.is_project() {
+                    body.push(
+                        div()
+                            .px_6()
+                            .pb_2()
+                            .child(Label::new(format!("Only for this project, saved in {}: what it sets wins over your settings; the rest are yours.", page.file.display_name())).size(LabelSize::Small).color(Color::Muted))
+                            .into_any_element(),
+                    );
+                }
                 let rows = self.rows.get(&page.id).cloned().unwrap_or_default();
                 body.extend(self.render_rows(page, rows, window, cx));
             }
@@ -666,10 +776,37 @@ impl Item for SettingsView {
     }
 }
 
+/// A `theme`/`icon_theme` value with all of `mode`, `light` and `dark`, when `current` lacks
+/// some: a name stands for both appearances, and missing parts come from `default`.
+fn complete_selection(current: Option<Value>, default: Option<&Value>) -> Option<Value> {
+    let default = default.and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut whole = match current {
+        Some(Value::String(name)) => serde_json::Map::from_iter([("light".to_string(), json!(name)), ("dark".to_string(), json!(name))]),
+        Some(Value::Object(parts)) if ["mode", "light", "dark"].iter().all(|k| parts.contains_key(*k)) => return None,
+        Some(Value::Object(parts)) => parts,
+        _ => serde_json::Map::new(),
+    };
+    for key in ["mode", "light", "dark"] {
+        if !whole.contains_key(key) {
+            whole.insert(key.into(), default.get(key).cloned()?);
+        }
+    }
+    Some(Value::Object(whole))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[test]
+    fn completes_theme_selections() {
+        let default = json!({ "mode": "system", "light": "Forge Light", "dark": "Forge Dark" });
+        assert_eq!(complete_selection(None, Some(&default)), Some(default.clone()), "nothing yet: the defaults");
+        assert_eq!(complete_selection(Some(json!({ "mode": "light" })), Some(&default)), Some(json!({ "mode": "light", "light": "Forge Light", "dark": "Forge Dark" })));
+        assert_eq!(complete_selection(Some(json!("Dracula")), Some(&default)), Some(json!({ "light": "Dracula", "dark": "Dracula", "mode": "system" })));
+        assert_eq!(complete_selection(Some(default.clone()), Some(&default)), None, "already whole");
+    }
 
     /// The tab opens once, lists the editor's settings by section with the right controls,
     /// and hides features Forge doesn't have.
@@ -709,5 +846,41 @@ mod tests {
         let advanced = registry.read_with(cx, |r, _| r.page("advanced").cloned().unwrap());
         assert!(!rows(&advanced).iter().any(|r| r.path[0] == "agent" || r.path[0] == "edit_predictions"), "AI settings are hidden");
         assert!(!rows(&advanced).iter().any(|r| r.description.contains("Zed")), "descriptions name Forge");
+    }
+
+    /// The project switch shows only what a project may set, with the user's values
+    /// standing in, and saves to the project's `.forge/settings.json`.
+    #[gpui::test]
+    async fn edits_a_projects_settings(cx: &mut TestAppContext) {
+        let params = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(::theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        params.fs.as_fake().insert_tree(&root, json!({ "main.rs": "fn main() {}" })).await;
+        let project = project::Project::test(params.fs.clone(), [root.as_path()], cx).await;
+        let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        workspace.update_in(cx, |ws, window, cx| open(ws, Some("editor"), window, cx));
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<SettingsView>(cx).next().unwrap());
+
+        view.update(cx, |view, cx| view.set_in_project(true, cx));
+        let editor = view.read_with(cx, |view, _| {
+            assert!(view.pages.iter().all(|p| p.file.is_project()), "every page saves to the project");
+            assert!(!view.rows.values().flatten().any(|r| r.path[0] == "theme"), "the theme is the user's");
+            view.pages.iter().find(|p| p.id == "editor").cloned().unwrap()
+        });
+        assert!(view.read_with(cx, |view, _| view.rows["editor"].iter().any(|r| r.key() == "tab_size")));
+        view.update(cx, |view, cx| view.set(editor.file.clone(), vec!["tab_size".into()], Some(json!(2)), cx));
+        let saved: Value = serde_json_lenient::from_str(&std::fs::read_to_string(root.join(".forge/settings.json")).unwrap()).unwrap();
+        assert_eq!(saved, json!({ "tab_size": 2 }));
+
+        view.update(cx, |view, cx| view.set_in_project(false, cx));
+        assert!(view.read_with(cx, |view, _| view.pages.iter().all(|p| !p.file.is_project())), "back to the user's");
     }
 }

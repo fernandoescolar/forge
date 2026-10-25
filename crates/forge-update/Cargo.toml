@@ -8,6 +8,7 @@ description = "Forge updates itself from its GitHub releases"
 
 [dependencies]
 forge-process = { path = "../forge-process" }
+ide-api = { path = "../ide-api" }
 anyhow.workspace = true
 futures.workspace = true
 gpui = { path = "../../vendor/zed/crates/gpui" }

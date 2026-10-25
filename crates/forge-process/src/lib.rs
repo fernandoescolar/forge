@@ -25,39 +25,80 @@ use anyhow::{Context as _, bail};
 /// How long a process group has to exit after SIGTERM before it gets SIGKILL.
 pub const GRACE: Duration = Duration::from_secs(2);
 
-/// `program` as found on `path` (a `PATH` value): itself when it names a file (it has a
-/// folder in it) or isn't found, so the error comes from starting it.
-pub fn resolve(program: &str, path: Option<&OsStr>) -> PathBuf {
-    let named = Path::new(program);
-    if named.components().count() > 1 || named.is_absolute() {
-        return named.to_path_buf();
+/// Windows' `CREATE_NO_WINDOW`: a console program started by Forge (a GUI program) gets no
+/// console window of its own.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `std::process::Command::new(program)`, without a console window on Windows (`git`,
+/// `npx`… would otherwise open one each time).
+pub fn std_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
-    let Some(path) = path else { return named.to_path_buf() };
-    let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into()).split(';').map(|e| e.to_ascii_lowercase()).collect()
-    } else {
-        Vec::new()
+    command
+}
+
+/// Where `command` is: itself when it is a path (it has a separator), else the first match
+/// on `path` (the `PATH` variable's value; the process's when `None`), as the shell finds
+/// it. On Windows each folder is tried with the command as given and then with `PATHEXT`'s
+/// extensions (Rust's `Command` only adds `.exe`, so `npx.cmd` wouldn't be found).
+pub fn find_program(command: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    find_in(command, path, cfg!(windows).then(pathext).as_deref())
+}
+
+/// `find_program`, or the command as given when it isn't found (starting it says so).
+pub fn program_path(command: &str, path: Option<&OsStr>) -> PathBuf {
+    find_program(command, path).unwrap_or_else(|| PathBuf::from(command))
+}
+
+/// [`program_path`], under the name Forge's crates use.
+pub fn resolve(program: &str, path: Option<&OsStr>) -> PathBuf {
+    program_path(program, path)
+}
+
+fn pathext() -> Vec<String> {
+    let value = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    value.split(';').map(str::trim).filter(|e| e.starts_with('.')).map(str::to_lowercase).collect()
+}
+
+/// `extensions`: what to try appending in each folder (Windows), or `None`.
+fn find_in(command: &str, path: Option<&OsStr>, extensions: Option<&[String]>) -> Option<PathBuf> {
+    if command.is_empty() {
+        return None;
+    }
+    if command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) {
+        return Some(PathBuf::from(command));
+    }
+    let path: std::ffi::OsString = match path {
+        Some(path) => path.to_owned(),
+        None => std::env::var_os("PATH")?,
     };
-    for dir in std::env::split_paths(path) {
-        let candidate = dir.join(program);
-        if candidate.is_file() {
-            return candidate;
+    let has_extension = Path::new(command).extension().is_some();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(command);
+        if candidate.is_file() && (extensions.is_none() || has_extension) {
+            return Some(candidate);
         }
-        for extension in &extensions {
-            let candidate = dir.join(format!("{program}{extension}"));
+        for extension in extensions.unwrap_or_default() {
+            let candidate = dir.join(format!("{command}{extension}"));
             if candidate.is_file() {
-                return candidate;
+                return Some(candidate);
             }
         }
     }
-    named.to_path_buf()
+    None
 }
 
 /// A command for `program` run with `env` (all of it when it has a `PATH`, which finds
 /// the program; else on top of Forge's own environment), in a process group of its own.
 pub fn command(program: &str, env: &[(String, String)]) -> std::process::Command {
     let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| std::ffi::OsString::from(v)).or_else(|| std::env::var_os("PATH"));
-    let mut command = std::process::Command::new(resolve(program, path.as_deref()));
+    let mut command = std_command(resolve(program, path.as_deref()));
     command.envs(env.iter().map(|(k, v)| (k, v)));
     own_group(&mut command);
     command
@@ -195,7 +236,7 @@ pub fn output(mut command: std::process::Command) -> anyhow::Result<Output> {
 /// `git -C dir args…`: its standard output, or what it said went wrong (its standard
 /// error, else its output, without git's `fatal: ` / `error: `).
 pub fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let mut command = std::process::Command::new("git");
+    let mut command = std_command("git");
     command.arg("-C").arg(dir).args(args);
     let output = command.output().context("cannot run git; is it installed?")?;
     if !output.status.success() {
@@ -206,22 +247,40 @@ pub fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn finds_programs_on_the_given_path() {
+    fn finds_programs_like_the_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = dir.path().join("forge-test-tool");
-        std::fs::write(&tool, "").unwrap();
-        assert_eq!(resolve("forge-test-tool", Some(dir.path().as_os_str())), tool);
-        assert_eq!(resolve("forge-missing-tool", Some(dir.path().as_os_str())), PathBuf::from("forge-missing-tool"));
-        assert_eq!(resolve("./bin/x", Some(dir.path().as_os_str())), PathBuf::from("./bin/x"));
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("tool"), "").unwrap();
+        std::fs::write(second.join("npx.cmd"), "").unwrap();
+        std::fs::write(first.join("npx"), "").unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+
+        // Unix: the name as given, in PATH's order.
+        assert_eq!(find_in("tool", Some(&path), None), Some(second.join("tool")));
+        assert_eq!(find_in("npx", Some(&path), None), Some(first.join("npx")));
+        assert_eq!(find_in("missing", Some(&path), None), None);
+
+        // Windows: `npx` is `npx.cmd`; a file with no extension isn't a program there.
+        let windows = [".exe".to_string(), ".cmd".to_string()];
+        assert_eq!(find_in("npx", Some(&path), Some(&windows)), Some(second.join("npx.cmd")));
+        assert_eq!(find_in("npx.cmd", Some(&path), Some(&windows)), Some(second.join("npx.cmd")));
+        assert_eq!(find_in("tool", Some(&path), Some(&windows)), None);
+
+        // Paths are used as they are.
+        assert_eq!(find_in("./bin/agent", Some(&path), None), Some(PathBuf::from("./bin/agent")));
+        assert_eq!(resolve("missing-everywhere", Some(&path)), PathBuf::from("missing-everywhere"));
     }
 
     /// What a process started through `command` starts goes with it.
     #[test]
+    #[cfg(unix)]
     fn terminating_a_group_stops_grandchildren() {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("pid");
@@ -246,6 +305,7 @@ mod tests {
 
     /// A process started from a thread that blocks SIGCHLD starts with nothing blocked.
     #[test]
+    #[cfg(unix)]
     fn children_start_without_blocked_signals() {
         std::thread::spawn(|| {
             unsafe {
@@ -265,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn output_says_what_failed() {
         let mut fails = command("sh", &[]);
         fails.args(["-c", "echo nope >&2; exit 3"]);

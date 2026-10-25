@@ -4,10 +4,14 @@
 //! terminal the user sees, where `sudo` asks for the password; nothing runs unseen. When
 //! it is done, Forge says so (and whether the tool is on the PATH yet).
 //!
+//! For .NET, the SDK must also be one that builds the project (`dotnet_sdk`): when it
+//! isn't, a notification says which to get.
+//!
 //! netcoredbg, the .NET debugger, isn't here to install: Forge downloads it the first
 //! time a .NET program is debugged (`forge_languages::netcoredbg`).
 
 pub mod catalog;
+pub mod dotnet_sdk;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +60,8 @@ pub struct Status {
 pub struct Survey {
     pub statuses: Vec<Status>,
     pub manager: Option<PackageManager>,
+    /// The .NET SDK the project needs when `dotnet` is installed but none of its SDKs will do.
+    pub sdk_gap: Option<dotnet_sdk::SdkGap>,
     path: Option<String>,
     places: Vec<PathBuf>,
 }
@@ -94,11 +100,21 @@ pub fn survey(project: &Entity<Project>, cx: &mut App) -> Task<Survey> {
                     }
                 }
             }
-            let statuses = Tool::ALL
+            let statuses: Vec<Status> = Tool::ALL
                 .iter()
                 .map(|&tool| Status { tool, need: needs.iter().find(|n| n.tool == tool).cloned(), found: catalog::find(tool, path.as_deref().map(std::ffi::OsStr::new), &places) })
                 .collect();
-            Survey { statuses, manager, path, places }
+            let sdk_gap = statuses.iter().find(|s| s.tool == Tool::Dotnet && s.need.is_some()).and_then(|status| {
+                let dotnet = match &status.found {
+                    Found::OnPath => forge_process::find_program("dotnet", path.as_deref().map(std::ffi::OsStr::new))?,
+                    Found::OffPath(at) => at.clone(),
+                    Found::Missing => return None,
+                };
+                let (root, files) = listed.first()?;
+                let sdks = dotnet_sdk::installed_sdks(&dotnet, root, path.as_deref());
+                dotnet_sdk::gap(&dotnet_sdk::needs(root, files), &sdks)
+            });
+            Survey { statuses, manager, sdk_gap, path, places }
         })
         .await
     })
@@ -126,11 +142,14 @@ fn offer_when_missing(workspace: &Workspace, cx: &mut Context<Workspace>) {
     cx.spawn(async move |workspace, cx| {
         let Some(root) = cx.update(|cx| project.read(cx).visible_worktrees(cx).next().map(|wt| wt.read(cx).abs_path())) else { return };
         let survey = cx.update(|cx| survey(&project, cx)).await;
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        if let Some(gap) = survey.sdk_gap.clone() {
+            workspace.update(cx, |workspace, cx| show_sdk_gap(workspace, &root, gap, kvp.clone(), cx)).ok();
+        }
         let missing: Vec<Tool> = survey.missing(true).iter().map(|s| s.tool).collect();
         if missing.is_empty() {
             return;
         }
-        let kvp = cx.update(|cx| KeyValueStore::global(cx));
         let key = dismissed_key(&root, &missing);
         if kvp.read_kvp(&key).ok().flatten().is_some() {
             return;
@@ -161,10 +180,33 @@ fn offer_when_missing(workspace: &Workspace, cx: &mut Context<Workspace>) {
     .detach();
 }
 
+/// Says which .NET SDK the project needs (unless the user said "Not now" to it here).
+fn show_sdk_gap(workspace: &mut Workspace, root: &Path, gap: dotnet_sdk::SdkGap, kvp: KeyValueStore, cx: &mut Context<Workspace>) {
+    let key = format!("forge-toolchain-dismissed:{}:{}", root.display(), gap.title);
+    if kvp.read_kvp(&key).ok().flatten().is_some() {
+        return;
+    }
+    workspace.show_notification(NotificationId::named("forge-toolchain-dotnet-sdk".into()), cx, move |cx| {
+        cx.new(move |cx| {
+            let url = gap.url.clone();
+            MessageNotification::new(gap.message.clone(), cx)
+                .with_title(gap.title.clone())
+                .primary_message("Download")
+                .primary_on_click(move |_, cx| cx.open_url(&url))
+                .secondary_message("Not now")
+                .secondary_on_click(move |_, cx| {
+                    let (kvp, key) = (kvp.clone(), key.clone());
+                    cx.background_spawn(async move { kvp.write_kvp(key, "1".into()).await.log_err() }).detach();
+                    cx.emit(gpui::DismissEvent);
+                })
+        })
+    });
+}
+
 /// What picking a row of Check Tools does.
 enum Row {
     Install { tools: Vec<Tool>, command: String },
-    Open(&'static str),
+    Open(String),
     Nothing,
 }
 
@@ -199,11 +241,15 @@ pub fn check_tools(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
                         let asks = if admin { " (asks for your password)" } else { "" };
                         (format!("Install {}", status.tool.name()), format!("{command}{asks}{how}{why}"), Row::Install { tools: vec![status.tool], command })
                     }
-                    Plan::Manual { url } => (format!("Get {}", status.tool.name()), format!("not installed: download it from {url}{why}"), Row::Open(url)),
+                    Plan::Manual { url } => (format!("Get {}", status.tool.name()), format!("not installed: download it from {url}{why}"), Row::Open(url.to_string())),
                 },
             };
             choices.push(Choice::new(label).detail(detail));
             rows.push(row);
+        }
+        if let Some(gap) = &survey.sdk_gap {
+            choices.push(Choice::new(format!("Get {}", gap.title.trim_end_matches(" isn't installed"))).detail(format!("{} Download it from {}", gap.message, gap.url)));
+            rows.push(Row::Open(gap.url.clone()));
         }
         if survey.statuses.iter().any(|s| s.tool == Tool::Dotnet && s.need.is_some()) {
             choices.push(Choice::new("✓ netcoredbg (the .NET debugger)").detail("Forge downloads it the first time you debug a .NET program"));
@@ -216,7 +262,7 @@ pub fn check_tools(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
                     Some(Row::Install { tools, command }) => {
                         pick::defer_workspace(weak, window, cx, move |workspace, window, cx| install(workspace, tools, command, survey, window, cx));
                     }
-                    Some(Row::Open(url)) => cx.open_url(url),
+                    Some(Row::Open(url)) => cx.open_url(&url),
                     _ => {}
                 });
             });

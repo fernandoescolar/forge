@@ -143,6 +143,8 @@ pub struct Project {
     pub package_versions: Vec<PackageVersion>,
     pub project_references: Vec<PathBuf>,
     pub references: Vec<AssemblyReference>,
+    /// Shared frameworks from `<FrameworkReference Include="Microsoft.AspNetCore.App" />`.
+    pub framework_references: Vec<String>,
     /// Every other file read while evaluating: props, targets, packages.config.
     pub imports: Vec<PathBuf>,
     /// The `Directory.Packages.props` in effect, if any.
@@ -312,6 +314,7 @@ struct Evaluator {
     package_versions: Vec<PackageVersion>,
     project_references: Vec<PathBuf>,
     references: Vec<AssemblyReference>,
+    framework_references: Vec<String>,
     imports: Vec<PathBuf>,
     seen: Vec<PathBuf>,
 }
@@ -470,6 +473,16 @@ impl Evaluator {
                     self.project_references.retain(|p| *p != path);
                 }
             }
+            ("FrameworkReference", Some(name)) => {
+                if !self.framework_references.iter().any(|f| f.eq_ignore_ascii_case(&name)) {
+                    self.framework_references.push(name);
+                }
+            }
+            ("FrameworkReference", None) => {
+                if let Some(name) = self.metadata(item, "Remove") {
+                    self.framework_references.retain(|f| !f.eq_ignore_ascii_case(&name));
+                }
+            }
             ("Reference", Some(include)) => {
                 let mut parts = include.split(',');
                 let name = parts.next().unwrap_or("").trim().to_string();
@@ -533,6 +546,7 @@ pub fn evaluate(path: &Path, options: &EvalOptions) -> Result<Project> {
         package_versions: Vec::new(),
         project_references: Vec::new(),
         references: Vec::new(),
+        framework_references: Vec::new(),
         imports: Vec::new(),
         seen: Vec::new(),
     };
@@ -608,6 +622,7 @@ pub fn evaluate(path: &Path, options: &EvalOptions) -> Result<Project> {
         package_versions: eval.package_versions,
         project_references: eval.project_references,
         references: eval.references,
+        framework_references: eval.framework_references,
         imports: eval.imports,
         central_packages_file: None,
         items_file,

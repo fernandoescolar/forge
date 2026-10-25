@@ -244,6 +244,45 @@ pub fn move_item(project: &Project, file: &Path, position: Position) -> Result<(
     })
 }
 
+/// Sets a property in the project file (`<Nullable>enable</Nullable>`), or with `None`
+/// removes it there, so the value from `Directory.Build.props` or the SDK applies again.
+/// An existing unconditioned definition is changed in place; a new one goes into the first
+/// unconditioned `PropertyGroup`, which is created when there is none.
+pub fn set_property(project_file: &Path, name: &str, value: Option<&str>) -> Result<()> {
+    edit_xml_file(project_file, |xml| {
+        let elements = xml.elements()?;
+        let root = elements.first().context("empty project")?.start();
+        let groups: Vec<&Element> = elements.iter().filter(|e| e.name == "PropertyGroup" && e.parent() == Some(root) && e.attr("Condition").is_none()).collect();
+        let existing = elements.iter().find(|e| e.name == name && e.attr("Condition").is_none() && groups.iter().any(|g| e.parent() == Some(g.start())));
+        match (existing, value) {
+            (Some(element), Some(value)) => xml.set_text(element.start(), value),
+            (Some(element), None) => {
+                let group = element.parent();
+                xml.remove_element(element.start())?;
+                if let Some(group) = group {
+                    xml.remove_if_empty(group)?;
+                }
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            (None, Some(value)) => {
+                let group = match groups.first() {
+                    Some(group) => group.start(),
+                    None => {
+                        let new = NewElement::new("PropertyGroup");
+                        match root_children(xml)?.first() {
+                            Some(first) => xml.insert_before(first.start(), &new)?,
+                            None => xml.append_child(root, &new)?,
+                        }
+                    }
+                };
+                xml.append_child(group, &NewElement::new(name).text(value))?;
+                Ok(())
+            }
+        }
+    })
+}
+
 /// Sets a package's version where it is defined.
 pub fn set_package_version(project: &Project, name: &str, version: &str) -> Result<()> {
     let reference = project.package(name).with_context(|| format!("{name} is not referenced by {}", project.name()))?;
@@ -432,6 +471,26 @@ mod tests {
     }
 
     const SDK: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n\n  <PropertyGroup>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n\n  <ItemGroup>\n    <PackageReference Include=\"A\" Version=\"1.0.0\" />\n    <PackageReference Include=\"C\">\n      <Version>1.0.0</Version>\n    </PackageReference>\n  </ItemGroup>\n\n</Project>\n";
+
+    #[test]
+    fn sets_and_removes_properties() {
+        let (_dir, root) = setup(&[("App/App.csproj", SDK), ("Bare/Bare.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup />\n</Project>\n")]);
+        let path = root.join("App/App.csproj");
+        set_property(&path, "Nullable", Some("enable")).unwrap();
+        set_property(&path, "TargetFramework", Some("net9.0")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("  <PropertyGroup>\n    <TargetFramework>net9.0</TargetFramework>\n    <Nullable>enable</Nullable>\n  </PropertyGroup>\n"), "{text}");
+        assert_eq!(eval(&path).properties.get("Nullable"), Some("enable"));
+
+        set_property(&path, "Nullable", None).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("Nullable"));
+
+        let bare = root.join("Bare/Bare.csproj");
+        set_property(&bare, "LangVersion", Some("latest")).unwrap();
+        let text = std::fs::read_to_string(&bare).unwrap();
+        assert!(text.contains("<PropertyGroup>") && text.contains("<LangVersion>latest</LangVersion>"), "{text}");
+        assert!(text.find("<PropertyGroup>").unwrap() < text.find("<ItemGroup").unwrap(), "properties before items");
+    }
 
     #[test]
     fn packages_without_central_management() {

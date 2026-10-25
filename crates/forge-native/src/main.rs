@@ -5,6 +5,9 @@
 //! `forge_update`). Forge-specific surfaces (ACP agent
 //! panel, React extension host) are added as workspace panels.
 
+// Release builds on Windows are GUI programs: no console window opens with them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod branding;
 mod config_files;
 mod docks;
@@ -12,15 +15,18 @@ mod external_changes;
 mod menus;
 mod search_bars;
 mod settings_view;
-// Used on Linux; built on every Unix so its tests run on macOS too.
-#[cfg(unix)]
+// Used on Linux and Windows; built on macOS too so its tests run there.
+#[cfg(any(unix, windows))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod single_instance;
+mod debug_console;
 mod open_editors;
 mod prompts;
+mod problems;
 mod statusbar;
 mod theme;
 mod titlebar;
+mod user_keymap;
 mod welcome;
 mod windows;
 
@@ -53,6 +59,16 @@ fn main() {
         util::shell_env::print_env();
         return;
     }
+    // Claude Code's hook for the commands its agents run (see `forge_agents::shell_guard`),
+    // and the commands it rewrites them into (see `forge_agents::shell_translate`).
+    if std::env::args().nth(1).as_deref() == Some(forge_agents::shell_guard::HOOK_ARG) {
+        forge_agents::shell_guard::run_hook(std::env::args().nth(2).as_deref());
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some(forge_agents::shell_translate::EXEC_ARG) {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(forge_agents::shell_translate::run_exec(&args));
+    }
 
     // Same filtering and stderr output as before; the Output panel also gets a copy.
     forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn,tracing::span=warn")));
@@ -64,10 +80,10 @@ fn main() {
     let paths = startup_paths(std::env::args().skip(1));
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
 
-    // Linux: a Forge that is already running opens the paths instead (`forge .` from a
-    // terminal); else this one listens for later ones.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    match single_instance::claim(&single_instance::socket_path(&data_dir), &paths) {
+    // Linux and Windows: a Forge that is already running opens the paths instead (`forge .`
+    // from a terminal); else this one listens for later ones.
+    #[cfg(any(target_os = "linux", windows))]
+    match single_instance::claim(&single_instance::endpoint(&data_dir), &paths) {
         Ok(single_instance::Instance::Forwarded) => return,
         Ok(single_instance::Instance::First(listener)) => {
             let open_tx = open_tx.clone();
@@ -162,6 +178,7 @@ fn main() {
         file_finder::init(cx);
         search::init(cx);
         search_bars::init(cx);
+        problems::init(cx);
         project_panel::init(cx);
         terminal_view::init(cx);
         dap_adapters::init(cx);
@@ -184,6 +201,7 @@ fn main() {
         menus::init(cx);
         windows::init(cx);
         open_editors::init(cx);
+        debug_console::init(cx);
         docks::init(cx);
         settings_view::init(cx);
         external_changes::init(cx);
@@ -203,6 +221,7 @@ fn main() {
         }
 
         load_keymap(cx);
+        user_keymap::init(fs.clone(), cx);
         cx.set_quit_mode(QuitMode::LastWindowClosed);
         add_panels_to_new_workspaces(cx);
 
@@ -304,11 +323,16 @@ fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
 }
 
 /// Where Forge keeps its settings, database and caches: `~/Library/Application Support/Forge`
-/// on macOS, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`) elsewhere.
+/// on macOS, `%LOCALAPPDATA%\Forge` on Windows, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`)
+/// on Linux.
 fn forge_data_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::home_dir().unwrap_or_default();
     if cfg!(target_os = "macos") {
         return home.join("Library/Application Support/Forge");
+    }
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local"));
+        return local.join("Forge");
     }
     let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
     data_home.join("forge")
@@ -398,6 +422,8 @@ pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
                 workspace.add_panel(project_panel.clone(), window, cx);
                 workspace.add_panel(terminal_panel.clone(), window, cx);
                 workspace.add_panel(debug_panel.clone(), window, cx);
+                let debug_console = cx.new(|cx| debug_console::DebugConsolePanel::new(workspace, debug_panel.clone(), window, cx));
+                workspace.add_panel(debug_console.clone(), window, cx);
                 let solution_explorer = cx.new(|cx| forge_dotnet::SolutionExplorer::new(workspace, window, cx));
                 workspace.add_panel(solution_explorer.clone(), window, cx);
                 let threads_panel = cx.new(|cx| forge_agents::ThreadsPanel::new(workspace, window, cx));
@@ -417,6 +443,7 @@ pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
                     docks::DockEntry { handle: Arc::new(solution_explorer), title: Rc::new(|_| "Solution".into()) },
                     docks::DockEntry { handle: Arc::new(terminal_panel), title: Rc::new(|_| "Terminal".into()) },
                     docks::DockEntry { handle: Arc::new(debug_panel), title: Rc::new(|_| "Debug".into()) },
+                    docks::DockEntry { handle: Arc::new(debug_console), title: Rc::new(|_| "Debug Console".into()) },
                     docks::DockEntry { handle: Arc::new(threads_panel), title: Rc::new(|_| "Threads".into()) },
                     docks::DockEntry { handle: Arc::new(test_panel), title: Rc::new(|_| "Tests".into()) },
                     docks::DockEntry { handle: Arc::new(output_panel), title: Rc::new(|_| "Output".into()) },

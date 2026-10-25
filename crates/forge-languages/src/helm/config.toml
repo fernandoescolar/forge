@@ -1,0 +1,15 @@
+name = "Helm"
+grammar = "helm"
+# A chart's templates are YAML files under `templates/`: Forge's default `file_types`
+# map them here (see forge-native/assets/forge-defaults.json).
+path_suffixes = ["tpl"]
+block_comment = ["{{/* ", " */}}"]
+line_comments = ["# "]
+brackets = [
+    { start = "{{", end = "}}", close = true, newline = false },
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "[", end = "]", close = true, newline = false },
+    { start = "{", end = "}", close = true, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]
+tab_size = 2

@@ -1,0 +1,12 @@
+{
+  "name": "vscode-great-icons",
+  "displayName": "VSCode Great Icons",
+  "version": "0.2.8",
+  "private": true,
+  "description": "File and folder icons from VSCode Great Icons",
+  "forge": {
+    "iconThemes": [
+      "icon_themes"
+    ]
+  }
+}

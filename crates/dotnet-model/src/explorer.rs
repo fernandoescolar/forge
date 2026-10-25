@@ -205,7 +205,10 @@ fn dependencies_node(project: &Project) -> Node {
     let framework = project.target_frameworks().into_iter().next();
     let mut children = Vec::new();
 
-    let frameworks = project.target_frameworks();
+    // The target frameworks, then the shared frameworks the project references
+    // (`<FrameworkReference Include="Microsoft.AspNetCore.App" />`).
+    let mut frameworks = project.target_frameworks();
+    frameworks.extend(project.framework_references.iter().cloned());
     if !frameworks.is_empty() {
         children.push(group(
             format!("frameworks:{key}"),
@@ -491,7 +494,7 @@ mod tests {
         for file in ["Program.cs", "appsettings.json", "appsettings.Development.json", "Pages/Index.cshtml", "Pages/Index.cshtml.cs", "wwwroot/site.css", "Properties/launchSettings.json", "Models/File10.cs", "Models/File2.cs", "Form.cs", "Form.Designer.cs"] {
             touch(&root, file);
         }
-        std::fs::write(root.join("Web.csproj"), r#"<Project Sdk="Microsoft.NET.Sdk.Web"><ItemGroup><Compile Update="Form.Designer.cs"><DependentUpon>Form.cs</DependentUpon></Compile><PackageReference Include="Serilog" Version="3.1.1" /></ItemGroup></Project>"#).unwrap();
+        std::fs::write(root.join("Web.csproj"), r#"<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup><Compile Update="Form.Designer.cs"><DependentUpon>Form.cs</DependentUpon></Compile><PackageReference Include="Serilog" Version="3.1.1" /><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup></Project>"#).unwrap();
         let project = evaluate(&root.join("Web.csproj"), &EvalOptions::default()).unwrap();
         let nodes = file_nodes(&project, &TreeOptions::default());
         assert_eq!(labels(&nodes), vec!["Properties", "wwwroot", "Models", "Pages", "appsettings.json", "Form.cs", "Program.cs"]);
@@ -509,6 +512,9 @@ mod tests {
         assert_eq!(project_node.children[0].label, "Dependencies");
         let packages = project_node.children[0].children.iter().find(|n| n.label == "Packages").unwrap();
         assert_eq!(packages.children[0].detail.as_deref(), Some("3.1.1"));
+        // A FrameworkReference is a framework, not a file.
+        let frameworks = project_node.children[0].children.iter().find(|n| n.label == "Frameworks").unwrap();
+        assert_eq!(labels(&frameworks.children), vec!["net8.0", "Microsoft.AspNetCore.App"]);
         let path = path_to_file(&tree, &root.join("Pages/Index.cshtml.cs")).unwrap();
         assert_eq!(path.len(), 5);
     }
