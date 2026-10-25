@@ -52,6 +52,16 @@ use workspace::{AppState, OpenOptions, Workspace, WorkspaceStore};
 
 actions!(forge, [Quit]);
 
+/// Adds the usual install folders Forge's `PATH` lacks (and `DOTNET_ROOT`), see
+/// [`forge_toolchain::catalog::startup_env`].
+fn adopt_usual_places() {
+    let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from) else { return };
+    for (name, value) in forge_toolchain::catalog::startup_env(std::env::var_os("PATH").as_deref(), std::env::var_os("DOTNET_ROOT").as_deref(), &home, &forge_toolchain::catalog::usual_places(&home)) {
+        log::info!("{name}={}", value.to_string_lossy());
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
 fn main() {
     // Zed captures the login-shell environment by re-running the current executable with
     // `--printenv` from inside that shell; answer like Zed does instead of opening a window.
@@ -72,6 +82,10 @@ fn main() {
 
     // Same filtering and stderr output as before; the Output panel also gets a copy.
     forge_output::app_log::install(env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn,tracing::span=warn")));
+
+    // Tools where their installers put them (`~/.dotnet`, `~/.cargo/bin`…), for everything
+    // Forge runs, before the user logs in again (see `forge_toolchain::catalog::startup_env`).
+    adopt_usual_places();
 
     // Keep Forge's settings, database and caches apart from an installed Zed.
     let data_dir = forge_data_dir();
@@ -106,6 +120,8 @@ fn main() {
             .spawn(async {
                 #[cfg(unix)]
                 util::load_login_shell_environment().await.log_err();
+                // The login shell may have put its own PATH in place: add them again.
+                adopt_usual_places();
             })
             .detach();
     }

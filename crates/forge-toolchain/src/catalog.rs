@@ -144,6 +144,42 @@ pub fn usual_places(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What Forge adds to its own environment when it starts, so everything it runs (and the
+/// login shell it takes its environment from) finds tools where their installers put them
+/// before the user logs in again: the `places` ([`usual_places`]) that exist and `path`
+/// lacks, at the end. `~/.dotnet` goes first when it holds an SDK: the runtimes a program needs are
+/// looked for beside the `dotnet` that runs, and a user who installed the SDK there means
+/// to use it (`DOTNET_ROOT` goes with it, unless set). A place already on the PATH stays
+/// where the user put it.
+pub fn startup_env(path: Option<&std::ffi::OsStr>, dotnet_root: Option<&std::ffi::OsStr>, home: &Path, places: &[PathBuf]) -> Vec<(&'static str, std::ffi::OsString)> {
+    let current: Vec<PathBuf> = path.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let on_path = |place: &Path| current.iter().any(|entry| entry == place);
+    let dotnet = home.join(".dotnet");
+    let dotnet_sdk = dotnet.join(if cfg!(windows) { "dotnet.exe" } else { "dotnet" }).is_file() && std::fs::read_dir(dotnet.join("sdk")).is_ok_and(|mut entries| entries.next().is_some());
+    let mut first = vec![];
+    let mut last = vec![];
+    for place in places.iter().cloned() {
+        if on_path(&place) || !place.is_dir() {
+            continue;
+        }
+        if place == dotnet && dotnet_sdk {
+            first.push(place);
+        } else {
+            last.push(place);
+        }
+    }
+    let mut env = vec![];
+    if !first.is_empty() || !last.is_empty() {
+        if let Ok(joined) = std::env::join_paths(first.iter().chain(&current).chain(&last)) {
+            env.push(("PATH", joined));
+        }
+    }
+    if dotnet_sdk && dotnet_root.is_none_or(|r| r.is_empty()) && !on_path(&dotnet) {
+        env.push(("DOTNET_ROOT", dotnet.into_os_string()));
+    }
+    env
+}
+
 /// Whether `tool` is installed, looking on `path` (a `PATH` value) and in `places`.
 pub fn find(tool: Tool, path: Option<&std::ffi::OsStr>, places: &[PathBuf]) -> Found {
     let mut off_path = None;
@@ -399,4 +435,33 @@ mod tests {
         assert_eq!(apt, "sudo apt-get install -y golang-go && curl -fsSL https://get.pnpm.io/install.sh | sh -");
         assert_eq!(combined(&[Tool::Go], "linux", None), None, "nothing to run, only a download page");
     }
+    #[test]
+    fn adds_the_usual_places_at_startup() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dotnet = home.join(".dotnet");
+        std::fs::create_dir_all(dotnet.join("sdk/10.0.402")).unwrap();
+        std::fs::write(dotnet.join(if cfg!(windows) { "dotnet.exe" } else { "dotnet" }), "").unwrap();
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        let usr = home.join("usr/bin");
+        std::fs::create_dir_all(&usr).unwrap();
+        let path = std::env::join_paths([&usr]).unwrap();
+        let places = [dotnet.clone(), home.join(".cargo/bin"), home.join("missing")];
+
+        let env = startup_env(Some(&path), None, home, &places);
+        let expected = std::env::join_paths([dotnet.clone(), usr.clone(), home.join(".cargo/bin")]).unwrap();
+        assert_eq!(env, [("PATH", expected), ("DOTNET_ROOT", dotnet.clone().into_os_string())], "the SDK's dotnet first, the rest last");
+
+        let env = startup_env(Some(&path), Some(std::ffi::OsStr::new("/opt/dotnet")), home, &places);
+        assert!(env.iter().all(|(k, _)| *k != "DOTNET_ROOT"), "the user's DOTNET_ROOT stays");
+
+        let users = std::env::join_paths([usr.clone(), dotnet.clone(), home.join(".cargo/bin")]).unwrap();
+        assert!(startup_env(Some(&users), None, home, &places).is_empty(), "already on the PATH, in the user's order");
+
+        std::fs::remove_dir_all(dotnet.join("sdk")).unwrap();
+        let env = startup_env(Some(&path), None, home, &places);
+        let expected = std::env::join_paths([usr.clone(), dotnet.clone(), home.join(".cargo/bin")]).unwrap();
+        assert_eq!(env, [("PATH", expected)], "runtimes only: last, and no DOTNET_ROOT");
+    }
+
 }
