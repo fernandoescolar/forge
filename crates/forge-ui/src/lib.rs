@@ -11,6 +11,7 @@ pub mod dock_position;
 pub mod pick;
 pub mod process;
 pub mod settings_registry;
+pub mod worktree;
 
 use gpui::{
     App, AppContext as _, Entity, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,

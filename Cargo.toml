@@ -9,6 +9,7 @@ members = [
   "crates/forge-agents",
   "crates/forge-ui",
   "crates/forge-process",
+  "crates/forge-toolchain",
   "crates/forge-languages",
   "crates/forge-tests",
   "crates/forge-run",

@@ -363,6 +363,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
         MenuItem::action("Editor Features Reference", OpenBrowser { url: "https://zed.dev/docs".into() }),
         MenuItem::action("Key Bindings Reference", OpenDefaultKeymap),
         MenuItem::separator(),
+        MenuItem::action("Check Tools…", forge_toolchain::CheckTools),
     ];
     if !macos {
         help_menu.push(MenuItem::action("Check for Updates…", forge_update::CheckForUpdates));
@@ -726,6 +727,7 @@ mod tests {
             forge_update::init(cx);
             forge_git::init(cx);
             forge_dotnet::init(cx);
+            forge_toolchain::init(cx);
             init(cx);
             crate::open_editors::init(cx);
             crate::docks::init(cx);

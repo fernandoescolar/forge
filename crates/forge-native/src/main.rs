@@ -174,6 +174,7 @@ fn main() {
         forge_tests::init(cx);
         forge_run::init(cx);
         forge_http::init(cx);
+        forge_toolchain::init(cx);
         forge_github::init(cx);
         forge_update::init(cx);
         forge_output::init(cx);

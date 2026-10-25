@@ -18,6 +18,7 @@ forge-native (binary `forge`): bootstrap, menus, title & status bars, settings t
  ├─ forge-github ────── `gh` CLI → pull request status, picker, review comment blocks
  ├─ forge-http ──────── .http requests through Zed's HTTP client → response editor
  ├─ forge-update ────── GitHub releases → verified app swap
+ ├─ forge-toolchain ─── tools a project needs → install commands run in a terminal
  ├─ forge-output ────── Output panel, language server status
  ├─ forge-agents ────── Thread (model) → ThreadView tab, anchored cards, worktrees (GPUI)
  │     ├─ ProjectFs   : WorkspaceEngine over Zed buffers  ┐  GPUI thread

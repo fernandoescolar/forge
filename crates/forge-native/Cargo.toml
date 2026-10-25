@@ -17,6 +17,7 @@ runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
 forge-ui = { path = "../forge-ui" }
+forge-toolchain = { path = "../forge-toolchain" }
 forge-languages = { path = "../forge-languages" }
 forge-tests = { path = "../forge-tests" }
 forge-run = { path = "../forge-run" }

@@ -100,29 +100,9 @@ fn discover_with(listing: Listing) -> Vec<TestProject> {
 }
 
 /// The files of the project's local worktrees, as Zed indexed them (gitignored ones left
-/// out), by worktree root, once each worktree's first scan is complete.
+/// out), by worktree root (`forge_ui::worktree::files`).
 pub fn worktree_files(project: &gpui::Entity<project::Project>, cx: &gpui::App) -> gpui::Task<Vec<(PathBuf, Vec<PathBuf>)>> {
-    let worktrees: Vec<_> = project.read(cx).visible_worktrees(cx).filter_map(|wt| wt.read(cx).as_local().map(|local| (wt.clone(), local.scan_complete()))).collect();
-    let executor = cx.background_executor().clone();
-    cx.spawn(async move |cx| {
-        let mut snapshots = Vec::new();
-        for (worktree, scanned) in worktrees {
-            scanned.await;
-            snapshots.push(worktree.read_with(cx, |wt, _| wt.snapshot()));
-        }
-        executor
-            .spawn(async move {
-                snapshots
-                    .into_iter()
-                    .map(|snapshot| {
-                        let root = snapshot.abs_path().to_path_buf();
-                        let files = snapshot.files(false, 0).map(|entry| root.join(entry.path.as_std_path())).collect();
-                        (root, files)
-                    })
-                    .collect()
-            })
-            .await
-    })
+    forge_ui::worktree::files(project, cx)
 }
 
 /// What `parse` makes of `file`'s text, remembered while the file stays the same (same

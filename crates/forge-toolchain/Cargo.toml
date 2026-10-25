@@ -1,0 +1,26 @@
+[package]
+name = "forge-toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The tools a project needs: checking them and installing the missing ones"
+
+[dependencies]
+db = { path = "../../vendor/zed/crates/db" }
+forge-process = { path = "../forge-process" }
+forge-ui = { path = "../forge-ui" }
+gpui = { path = "../../vendor/zed/crates/gpui" }
+project = { path = "../../vendor/zed/crates/project" }
+serde_json.workspace = true
+task = { path = "../../vendor/zed/crates/task" }
+util = { path = "../../vendor/zed/crates/util" }
+workspace = { path = "../../vendor/zed/crates/workspace" }
+
+[dev-dependencies]
+tempfile.workspace = true
+fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
+gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
+project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
+settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
+workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

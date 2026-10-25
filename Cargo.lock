@@ -3656,6 +3656,7 @@ dependencies = [
  "forge-output",
  "forge-run",
  "forge-tests",
+ "forge-toolchain",
  "forge-ui",
  "forge-update",
  "fs",
@@ -3792,6 +3793,24 @@ dependencies = [
  "theme",
  "theme_settings",
  "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "forge-toolchain"
+version = "0.0.1-beta"
+dependencies = [
+ "db",
+ "forge-process",
+ "forge-ui",
+ "fs",
+ "gpui",
+ "project",
+ "serde_json",
+ "settings",
+ "task",
+ "tempfile",
  "util",
  "workspace",
 ]

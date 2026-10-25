@@ -623,12 +623,20 @@ mod tests {
         assert!(alive(&grandchild));
         acp.stop("a").await.unwrap();
         next_agent_event(&mut rx, |e| matches!(e, AgentEvent::Exited { .. })).await;
-        assert!(!alive(&grandchild), "the grandchild went with the agent");
+        // It got the signal with the agent; it may take a moment to be gone (and reaped).
+        let deadline = std::time::Instant::now() + forge_process::GRACE + Duration::from_secs(2);
+        while alive(&grandchild) {
+            assert!(std::time::Instant::now() < deadline, "the grandchild went with the agent");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         let grandchild = start(&acp, dir.path(), "b").await;
         drop(acp);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(!alive(&grandchild), "dropping the runtime stops its agents");
+        let deadline = std::time::Instant::now() + forge_process::GRACE + Duration::from_secs(2);
+        while alive(&grandchild) {
+            assert!(std::time::Instant::now() < deadline, "dropping the runtime stops its agents");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
