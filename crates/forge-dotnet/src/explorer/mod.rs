@@ -3,6 +3,7 @@
 //! for everything vscode-solution-explorer offers, inline naming, keyboard navigation and
 //! drag & drop.
 
+mod file_ops;
 mod git_status;
 mod menus;
 mod ops;

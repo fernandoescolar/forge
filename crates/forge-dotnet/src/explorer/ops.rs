@@ -14,63 +14,14 @@ use gpui::{ClipboardItem, PathPromptOptions, PromptLevel};
 use task::TaskTemplate;
 
 use super::*;
+use super::file_ops;
 use forge_ui::pick::{self, Choice};
 
 /// A piece of background work in a job.
 type Step = futures::future::BoxFuture<'static, Result<()>>;
 
-/// Copies a file or a folder tree.
-fn copy_recursively(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
-        std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
-            let entry = entry?;
-            copy_recursively(&entry.path(), &to.join(entry.file_name()))?;
-        }
-    } else {
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(from, to).with_context(|| format!("copying {}", from.display()))?;
-    }
-    Ok(())
-}
-
 fn evaluate(project: &Path, cx_config: &crate::config::DotnetConfig) -> Result<dotnet_model::Project> {
     dotnet_model::evaluate(project, &cx_config.eval_options())
-}
-
-/// Adds items for files that were put into a project (all of them, for a folder).
-fn add_items(project: &Path, path: &Path, config: &crate::config::DotnetConfig) -> Result<()> {
-    let item_types = config.item_types();
-    if path.is_dir() {
-        let files: Vec<PathBuf> = walkdir_files(path);
-        if files.is_empty() {
-            edit::add_folder(&evaluate(project, config)?, path)?;
-        }
-        for file in files {
-            edit::add_file(&evaluate(project, config)?, &file, &edit::item_type_for(&file, &item_types), None)?;
-        }
-        Ok(())
-    } else {
-        edit::add_file(&evaluate(project, config)?, path, &edit::item_type_for(path, &item_types), None)
-    }
-}
-
-fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(walkdir_files(&path));
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
 }
 
 impl SolutionExplorer {
@@ -244,25 +195,15 @@ impl SolutionExplorer {
                     _ => String::new(),
                 };
                 self.run_job("Creating file…", vec![project.clone()], window, cx, async move {
-                    if path.exists() {
-                        bail!("{} already exists", paths::file_name(&path));
-                    }
-                    std::fs::create_dir_all(path.parent().unwrap())?;
-                    std::fs::write(&path, content)?;
-                    let project = evaluate(&project, &config)?;
                     let anchor = anchor.as_ref().map(|(p, pos)| (p.as_path(), *pos));
-                    edit::add_file(&project, &path, &edit::item_type_for(&path, &config.item_types()), anchor)?;
+                    file_ops::create_file(&project, &path, &content, anchor, &config)?;
                     Ok(Some(path))
                 });
             }
             EditKind::NewFolder { dir, project } => {
                 let path = dir.join(&name);
                 self.run_job("Creating folder…", vec![project.clone()], window, cx, async move {
-                    if path.exists() {
-                        bail!("{} already exists", paths::file_name(&path));
-                    }
-                    std::fs::create_dir_all(&path)?;
-                    edit::add_folder(&evaluate(&project, &config)?, &path)?;
+                    file_ops::create_folder(&project, &path, &config)?;
                     Ok(None)
                 });
             }
@@ -281,18 +222,8 @@ impl SolutionExplorer {
                 let solution_item = project.is_none().then(|| solution.clone()).flatten();
                 let folder = self.selected_kind().and_then(|k| if let NodeKind::SolutionItem { folder, .. } = k { Some(folder) } else { None });
                 self.run_job("Renaming…", project.iter().cloned().chain(solution_item.as_ref().map(|(s, _)| s.clone())).collect(), window, cx, async move {
-                    let only_case = to.to_string_lossy().to_lowercase() == path.to_string_lossy().to_lowercase();
-                    if to.exists() && !only_case {
-                        bail!("{} already exists", name);
-                    }
-                    std::fs::rename(&path, &to)?;
-                    if let Some(project) = project {
-                        edit::rename_path(&evaluate(&project, &config)?, &path, &to)?;
-                    }
-                    if let (Some((solution, _)), Some(folder)) = (solution_item, folder) {
-                        solution::edit_file(&solution, &SolutionEdit::RemoveFile { folder: folder.clone(), path: path.clone() })?;
-                        solution::edit_file(&solution, &SolutionEdit::AddFile { folder, path: to.clone() })?;
-                    }
+                    let solution_item = solution_item.as_ref().zip(folder.as_deref()).map(|((solution, _), folder)| (solution.as_path(), folder));
+                    file_ops::rename(&path, &to, project.as_deref(), solution_item, &config)?;
                     Ok(None)
                 });
             }
@@ -306,16 +237,11 @@ impl SolutionExplorer {
                 let id = model.solution.as_ref().and_then(|s| s.project_by_path(&path)).map(|p| p.id.clone());
                 let referencing: Vec<PathBuf> = model.loaded_projects().into_iter().filter(|p| p.project_references.contains(&path)).map(|p| p.path).collect();
                 self.run_job("Renaming project…", Vec::new(), window, cx, async move {
-                    if to.exists() {
-                        bail!("{name} already exists");
-                    }
-                    std::fs::rename(&path, &to)?;
-                    if let (Some((solution, SolutionFormat::Sln | SolutionFormat::Slnx)), Some(id)) = (solution, id) {
-                        solution::edit_file(&solution, &SolutionEdit::RenameProject { id, path: to.clone() })?;
-                    }
-                    for project in referencing {
-                        edit::rename_path(&evaluate(&project, &config)?, &path, &to)?;
-                    }
+                    let solution = match (&solution, &id) {
+                        (Some((solution, SolutionFormat::Sln | SolutionFormat::Slnx)), Some(id)) => Some((solution.as_path(), id.as_str())),
+                        _ => None,
+                    };
+                    file_ops::rename_project(&path, &to, solution, &referencing, &config)?;
                     Ok(None)
                 });
             }
@@ -357,10 +283,9 @@ impl SolutionExplorer {
                 Some((
                     vec![project.clone()],
                     Box::pin(async move {
-                        if !is_link {
-                            fs.trash(&path, RemoveOptions { recursive: true, ignore_if_not_exists: true }).await?;
-                        }
-                        edit::remove_path(&evaluate(&project, &config)?, &path)
+                        // Out of the project first: if the Trash refuses it, it goes back in.
+                        let trash = async { fs.trash(&path, RemoveOptions { recursive: true, ignore_if_not_exists: true }).await.map(drop) };
+                        file_ops::remove(&path, &project, is_link, &config, trash).await
                     }),
                 ))
             }
@@ -461,23 +386,26 @@ impl SolutionExplorer {
             let Ok(Ok(Some(files))) = paths.await else { return };
             this.update_in(cx, |this, window, cx| {
                 this.run_job("Adding files…", vec![solution.clone()], window, cx, async move {
-                    let folder = match folder {
-                        Some(folder) => folder,
-                        None => {
-                            // Files go in a "Solution Items" folder, as Visual Studio does.
-                            let existing = solution::Solution::load(&solution)?.folders.iter().find(|f| f.name.eq_ignore_ascii_case("Solution Items")).map(|f| f.id.clone());
-                            match existing {
-                                Some(id) => id,
-                                None => {
-                                    solution::edit_file(&solution, &SolutionEdit::CreateFolder { parent: None, name: "Solution Items".into() })?;
-                                    solution::Solution::load(&solution)?.folders.iter().find(|f| f.name == "Solution Items").map(|f| f.id.clone()).context("folder not created")?
+                    file_ops::edit_solution(&solution.clone(), move |solution| {
+                        let folder = match folder {
+                            Some(folder) => folder,
+                            None => {
+                                // Files go in a "Solution Items" folder, as Visual Studio does.
+                                let existing = solution::Solution::load(&solution)?.folders.iter().find(|f| f.name.eq_ignore_ascii_case("Solution Items")).map(|f| f.id.clone());
+                                match existing {
+                                    Some(id) => id,
+                                    None => {
+                                        solution::edit_file(&solution, &SolutionEdit::CreateFolder { parent: None, name: "Solution Items".into() })?;
+                                        solution::Solution::load(&solution)?.folders.iter().find(|f| f.name == "Solution Items").map(|f| f.id.clone()).context("folder not created")?
+                                    }
                                 }
                             }
+                        };
+                        for file in files {
+                            solution::edit_file(&solution, &SolutionEdit::AddFile { folder: folder.clone(), path: file })?;
                         }
-                    };
-                    for file in files {
-                        solution::edit_file(&solution, &SolutionEdit::AddFile { folder: folder.clone(), path: file })?;
-                    }
+                        Ok(())
+                    })?;
                     Ok(None)
                 });
             })
@@ -523,33 +451,7 @@ impl SolutionExplorer {
             self.clipboard = None;
         }
         self.run_job(if clipboard.cut { "Moving…" } else { "Copying…" }, sources.iter().filter_map(|(_, p)| p.clone()).chain([project.clone()]).collect(), window, cx, async move {
-            for (source, source_project) in sources {
-                if dir.starts_with(&source) {
-                    bail!("cannot paste a folder into itself");
-                }
-                let mut target = dir.join(source.file_name().context("no file name")?);
-                if target.exists() {
-                    if clipboard.cut && target == source {
-                        continue;
-                    }
-                    target = paths::copy_name(&target);
-                }
-                if clipboard.cut {
-                    std::fs::rename(&source, &target)?;
-                    match source_project {
-                        Some(sp) if sp == project => edit::rename_path(&evaluate(&project, &config)?, &source, &target)?,
-                        other => {
-                            if let Some(sp) = other {
-                                edit::remove_path(&evaluate(&sp, &config)?, &source)?;
-                            }
-                            add_items(&project, &target, &config)?;
-                        }
-                    }
-                } else {
-                    copy_recursively(&source, &target)?;
-                    add_items(&project, &target, &config)?;
-                }
-            }
+            file_ops::paste(&sources, &dir, &project, clipboard.cut, &config)?;
             Ok(None)
         });
     }
@@ -558,9 +460,7 @@ impl SolutionExplorer {
         let Some(NodeKind::File { path, project, is_link: false, .. } | NodeKind::Folder { path, project, is_link: false }) = self.selected_kind() else { return };
         let config = self.config(cx);
         self.run_job("Duplicating…", vec![project.clone()], window, cx, async move {
-            let target = paths::copy_name(&path);
-            copy_recursively(&path, &target)?;
-            add_items(&project, &target, &config)?;
+            let target = file_ops::duplicate(&path, &project, &config)?;
             Ok(target.is_file().then_some(target))
         });
     }
@@ -884,11 +784,15 @@ impl SolutionExplorer {
                                 if job_path.exists() {
                                     bail!("{} already exists", paths::file_name(&job_path));
                                 }
-                                let text = if extension == "slnx" { dotnet_model::slnx::empty_solution() } else { dotnet_model::sln::empty_solution() };
-                                std::fs::write(&job_path, text)?;
-                                for project in loose {
-                                    solution::edit_file(&job_path, &SolutionEdit::AddProject { path: project, parent: None })?;
-                                }
+                                // A solution that can't take its projects isn't left behind.
+                                file_ops::edit_solution(&job_path, |solution| {
+                                    let text = if extension == "slnx" { dotnet_model::slnx::empty_solution() } else { dotnet_model::sln::empty_solution() };
+                                    std::fs::write(solution, text)?;
+                                    for project in loose {
+                                        solution::edit_file(solution, &SolutionEdit::AddProject { path: project, parent: None })?;
+                                    }
+                                    Ok(())
+                                })?;
                                 Ok(None)
                             });
                             model.update(cx, |model, cx| model.select_solution(path, cx));
@@ -1000,22 +904,32 @@ impl SolutionExplorer {
             }
             this.update_in(cx, |this, window, cx| {
                 this.run_job("Centralizing package versions…", Vec::new(), window, cx, async move {
-                    let file = dotnet_model::nuget::solution_packages::centralize(solution.dir(), &projects)?;
-                    if solution.format != SolutionFormat::Folder {
-                        let current = solution::Solution::load(&solution.path)?;
-                        let listed = current.all_folders().iter().any(|(f, _)| f.files.contains(&file));
-                        if !listed {
-                            let folder = match current.folders.iter().find(|f| f.name.eq_ignore_ascii_case("Solution Items")) {
-                                Some(f) => f.id.clone(),
-                                None => {
-                                    solution::edit_file(&solution.path, &SolutionEdit::CreateFolder { parent: None, name: "Solution Items".into() })?;
-                                    solution::Solution::load(&solution.path)?.folders.iter().find(|f| f.name == "Solution Items").map(|f| f.id.clone()).context("folder not created")?
-                                }
-                            };
-                            solution::edit_file(&solution.path, &SolutionEdit::AddFile { folder, path: file.clone() })?;
+                    file_ops::transaction(|undo| {
+                        // Every project, the props file and the solution change: all or none.
+                        for project in &projects {
+                            undo.keep_project(project)?;
                         }
-                    }
-                    Ok(Some(file))
+                        undo.keep(&solution.dir().join("Directory.Packages.props"))?;
+                        if solution.format != SolutionFormat::Folder {
+                            undo.keep(&solution.path)?;
+                        }
+                        let file = dotnet_model::nuget::solution_packages::centralize(solution.dir(), &projects)?;
+                        if solution.format != SolutionFormat::Folder {
+                            let current = solution::Solution::load(&solution.path)?;
+                            let listed = current.all_folders().iter().any(|(f, _)| f.files.contains(&file));
+                            if !listed {
+                                let folder = match current.folders.iter().find(|f| f.name.eq_ignore_ascii_case("Solution Items")) {
+                                    Some(f) => f.id.clone(),
+                                    None => {
+                                        solution::edit_file(&solution.path, &SolutionEdit::CreateFolder { parent: None, name: "Solution Items".into() })?;
+                                        solution::Solution::load(&solution.path)?.folders.iter().find(|f| f.name == "Solution Items").map(|f| f.id.clone()).context("folder not created")?
+                                    }
+                                };
+                                solution::edit_file(&solution.path, &SolutionEdit::AddFile { folder, path: file.clone() })?;
+                            }
+                        }
+                        Ok(Some(file))
+                    })
                 });
             })
             .ok();
@@ -1076,26 +990,9 @@ impl SolutionExplorer {
                 if dir.starts_with(&source) || source.parent() == Some(dir.as_path()) {
                     return None;
                 }
-                let same_project = source_project == target_project;
                 Some((
                     vec![source_project.clone(), target_project.clone()],
-                    Box::pin(async move {
-                        let mut destination = dir.join(source.file_name().context("no file name")?);
-                        if same_project {
-                            if destination.exists() {
-                                bail!("{} already exists there", paths::file_name(&destination));
-                            }
-                            std::fs::rename(&source, &destination)?;
-                            edit::rename_path(&evaluate(&source_project, &config)?, &source, &destination)
-                        } else {
-                            // Between projects, files are copied, as in Visual Studio.
-                            if destination.exists() {
-                                destination = paths::copy_name(&destination);
-                            }
-                            copy_recursively(&source, &destination)?;
-                            add_items(&target_project, &destination, &config)
-                        }
-                    }),
+                    Box::pin(async move { file_ops::drop_into(&source, &source_project, &dir, &target_project, &config) }),
                 ))
             }
             _ => None,
