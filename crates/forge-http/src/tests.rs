@@ -35,7 +35,7 @@ fn resolves_variables_from_everywhere() {
 #[test]
 fn renders_json_responses_with_headers_as_comments() {
     let request = Resolved { name: None, method: "GET".into(), url: "http://x/y".into(), headers: vec![], body: None };
-    let exchange = Exchange { status: 200, reason: "OK".into(), elapsed: Duration::from_millis(12), headers: vec![("content-type".into(), "application/json".into())], body: br#"{"a":1}"#.to_vec() };
+    let exchange = Exchange { status: 200, reason: "OK".into(), elapsed: Duration::from_millis(12), headers: vec![("content-type".into(), "application/json".into())], body: br#"{"a":1}"#.to_vec(), received: 7, spilled: None };
     let (text, json) = render(&request, Some("dev"), &exchange, None);
     assert!(json);
     assert_eq!(text, "// 200 OK · 12 ms · 7 B\n// GET http://x/y  (environment: dev)\n// \n// content-type: application/json\n\n{\n  \"a\": 1\n}\n");
@@ -82,6 +82,9 @@ async fn sends_the_request_at_the_cursor(cx: &mut TestAppContext) {
         });
         workspace.update_in(cx, |ws, window, cx| send_at_cursor(ws, None, window, cx));
         cx.run_until_parked();
+        // The tab shows what arrives every 100 ms.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
     };
     let response = |cx: &mut VisualTestContext| {
         let view = cx.update(|_, cx| cx.global::<HttpState>().views.get(Path::new("/root/api.http")).and_then(|v| v.upgrade())).expect("a response tab");
@@ -97,6 +100,8 @@ async fn sends_the_request_at_the_cursor(cx: &mut TestAppContext) {
     assert!(cx.update(|window, cx| click(Path::new("/root/api.http"), 1, window, cx)), "handled");
     assert!(!cx.update(|window, cx| click(Path::new("/root/main.rs"), 1, window, cx)), "other files' buttons are left alone");
     cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
     assert!(response(cx).ends_with("{\n  \"token\": \"abc\"\n}\n"), "{}", response(cx));
     let tabs = workspace.read_with(cx, |ws, cx| ws.panes().iter().map(|p| p.read(cx).items_len()).sum::<usize>());
     assert_eq!(tabs, 2, "one response tab per .http file, reused");
@@ -108,6 +113,8 @@ async fn sends_the_request_at_the_cursor(cx: &mut TestAppContext) {
     assert_eq!(sent, [("http://api.test/login".to_string(), Some(200)), ("http://api.test/me".to_string(), Some(200)), ("http://api.test/login".to_string(), Some(200))]);
     let again = cx.update(|_, cx| history::entries(cx)[1].clone());
     workspace.update_in(cx, |ws, window, cx| dispatch(ws, again.file, again.request, again.environment, window, cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
     assert!(response(cx).ends_with("{\n  \"auth\": \"Bearer abc\"\n}\n"), "{}", response(cx));
     assert_eq!(cx.update(|_, cx| history::entries(cx).len()), 4);
@@ -146,14 +153,63 @@ fn streams_the_body_as_it_arrives() {
     let exchange = futures::executor::block_on(send_streaming(client, &request, |partial| seen.push(partial.body.len()))).unwrap();
     assert_eq!(seen, [0, 4, 8, 12, 16], "the status and headers first, then each chunk");
     assert_eq!(exchange.body, b"data: 1\ndata: 2\n");
-    let partial = Exchange { body: b"data: 1\n".to_vec(), ..exchange };
-    let text = render_partial(&request, &partial);
-    assert!(text.starts_with("200 OK · ") && text.contains("receiving 8 B…") && text.ends_with("\n\ndata: 1\n"), "{text}");
+    assert_eq!(exchange.received, 16);
+    let partial = Exchange { body: b"data: 1\n".to_vec(), received: 8, ..exchange };
+    let head = render_head(&request, &partial);
+    assert!(head.starts_with("200 OK · ") && head.contains("receiving 8 B…") && head.ends_with("content-type: text/event-stream\n\n"), "{head}");
+}
+
+/// Past the limit, the body goes to a file as it arrives; the tab shows its beginning and
+/// where the rest is.
+#[test]
+fn keeps_large_bodies_on_disk() {
+    let client = http_client::FakeHttpClient::create(|_| async move {
+        let body = http_client::AsyncBody::from_reader(Trickle(br#"{"items": [1, 2, 3, 4, 5, 6]}"#.to_vec(), 0));
+        Ok(http_client::Response::builder().status(200).header("content-type", "application/json").body(body).unwrap())
+    });
+    let request = Resolved { name: Some("list".into()), method: "GET".into(), url: "http://x/items".into(), headers: vec![], body: None };
+    let exchange = futures::executor::block_on(send_limited(client, &request, 10, |_| {})).unwrap();
+    assert_eq!((exchange.body.len(), exchange.received), (10, 29));
+    let path = exchange.spilled.clone().expect("the body went to a file");
+    assert_eq!(std::fs::read(&path).unwrap(), br#"{"items": [1, 2, 3, 4, 5, 6]}"#, "all of it");
+    assert!(path.file_name().unwrap().to_string_lossy().starts_with("list-"));
+    let (text, json) = render(&request, None, &exchange, None);
+    assert!(!json, "the part shown isn't the whole JSON");
+    assert!(text.contains(r#"{"items": "#) && text.contains("19 B more: the response is 29 B, all of it in"), "{text}");
+    assert_eq!(save_body(Path::new("/p/api.http"), &exchange).unwrap(), path, "already saved");
+    std::fs::remove_file(path).ok();
+}
+
+/// The tab gets only what is new each time, and characters split between two pieces
+/// show once whole.
+#[test]
+fn sends_the_tab_only_what_is_new() {
+    let exchange = |body: &[u8], received: usize| Exchange {
+        status: 200,
+        reason: "OK".into(),
+        elapsed: Duration::from_millis(1),
+        headers: vec![("content-type".into(), "text/plain".into())],
+        body: body.to_vec(),
+        received,
+        spilled: None,
+    };
+    let first = Arrived::since(&exchange(b"", 0), 0);
+    assert!(first.head.is_some() && first.bytes.is_empty());
+    let more = Arrived::since(&exchange("añ".as_bytes(), 3), 0);
+    assert!(more.head.is_none() && more.bytes == "añ".as_bytes());
+    let later = Arrived::since(&exchange("añb".as_bytes(), 4), 3);
+    assert_eq!(later.bytes, b"b");
+
+    let mut shown = Shown::default();
+    shown.pending.extend(&"añ".as_bytes()[..2]);
+    assert_eq!(shown.take_text(), "a", "half an ñ waits");
+    shown.pending.extend(&"añ".as_bytes()[2..]);
+    assert_eq!(shown.take_text(), "ñ");
 }
 
 #[test]
 fn saves_binary_bodies() {
-    let png = Exchange { status: 200, reason: "OK".into(), elapsed: Duration::from_millis(5), headers: vec![("Content-Type".into(), "image/png".into())], body: vec![0x89, b'P', b'N', b'G', 0] };
+    let png = Exchange { status: 200, reason: "OK".into(), elapsed: Duration::from_millis(5), headers: vec![("Content-Type".into(), "image/png".into())], body: vec![0x89, b'P', b'N', b'G', 0], received: 5, spilled: None };
     assert!(png.is_binary());
     let json = Exchange { headers: vec![("content-type".into(), "application/json; charset=utf-8".into())], body: b"{}".to_vec(), ..png };
     assert!(!json.is_binary());

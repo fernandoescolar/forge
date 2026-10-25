@@ -261,8 +261,17 @@ pub struct Exchange {
     pub reason: String,
     pub elapsed: Duration,
     pub headers: Vec<(String, String)>,
+    /// The body, or its first [`MAX_BODY`] bytes when it is longer (see `spilled`).
     pub body: Vec<u8>,
+    /// How many bytes of body arrived.
+    pub received: usize,
+    /// Where the whole body went once it outgrew [`MAX_BODY`].
+    pub spilled: Option<PathBuf>,
 }
+
+/// Body bytes kept in memory and shown, at most: a longer response (a big download, a
+/// stream left open) goes to a file as it arrives instead of growing without end.
+pub const MAX_BODY: usize = 8 * 1024 * 1024;
 
 pub async fn send(client: Arc<dyn HttpClient>, request: &Resolved) -> Result<Exchange> {
     send_streaming(client, request, |_| {}).await
@@ -270,7 +279,14 @@ pub async fn send(client: Arc<dyn HttpClient>, request: &Resolved) -> Result<Exc
 
 /// Sends `request`, calling `progress` with the response so far (status, headers and the
 /// body received) as it arrives, then returns all of it.
-pub async fn send_streaming(client: Arc<dyn HttpClient>, request: &Resolved, mut progress: impl FnMut(&Exchange)) -> Result<Exchange> {
+pub async fn send_streaming(client: Arc<dyn HttpClient>, request: &Resolved, progress: impl FnMut(&Exchange)) -> Result<Exchange> {
+    send_limited(client, request, MAX_BODY, progress).await
+}
+
+/// [`send_streaming`], keeping `max_body` bytes of body in memory: past that, the whole
+/// body is written to a file in Forge's temporary folder as it arrives.
+pub async fn send_limited(client: Arc<dyn HttpClient>, request: &Resolved, max_body: usize, mut progress: impl FnMut(&Exchange)) -> Result<Exchange> {
+    use std::io::Write as _;
     let mut builder = http_client::Request::builder().method(request.method.as_str()).uri(request.url.as_str()).follow_redirects(RedirectPolicy::FollowLimit(10)).timeout(TIMEOUT);
     for (key, value) in &request.headers {
         builder = builder.header(key.as_str(), value.as_str());
@@ -284,20 +300,52 @@ pub async fn send_streaming(client: Arc<dyn HttpClient>, request: &Resolved, mut
         elapsed: started.elapsed(),
         headers: response.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string())).collect(),
         body: Vec::new(),
+        received: 0,
+        spilled: None,
     };
     progress(&exchange);
     let mut chunk = vec![0u8; 16 * 1024];
+    let mut spill: Option<std::fs::File> = None;
     loop {
         let read = response.body_mut().read(&mut chunk).await?;
         if read == 0 {
             break;
         }
-        exchange.body.extend_from_slice(&chunk[..read]);
+        let data = &chunk[..read];
+        exchange.received += read;
+        if spill.is_none() && exchange.body.len() + read > max_body {
+            let path = body_path(&request_stem(request), &exchange)?;
+            let mut file = std::fs::File::create(&path).with_context(|| format!("cannot write {}", path.display()))?;
+            file.write_all(&exchange.body)?;
+            exchange.spilled = Some(path);
+            spill = Some(file);
+        }
+        let room = max_body.saturating_sub(exchange.body.len());
+        exchange.body.extend_from_slice(&data[..read.min(room)]);
+        if let Some(file) = &mut spill {
+            file.write_all(data).context("cannot write the response to disk")?;
+        }
         exchange.elapsed = started.elapsed();
         progress(&exchange);
     }
     exchange.elapsed = started.elapsed();
     Ok(exchange)
+}
+
+/// A name for files of `request`'s response: the request's name, or the last part of its
+/// URL's path.
+fn request_stem(request: &Resolved) -> String {
+    let from_url = request.url.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
+    let stem = request.name.clone().unwrap_or(from_url);
+    let clean: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '-' }).take(40).collect();
+    if clean.is_empty() { "response".into() } else { clean }
+}
+
+/// A new file in Forge's temporary folder for a body: `<stem>-<time>.<extension>`.
+fn body_path(stem: &str, exchange: &Exchange) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("forge-http");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{stem}-{}.{}", chrono::Local::now().format("%Y%m%d-%H%M%S%3f"), exchange.extension())))
 }
 
 impl Exchange {
@@ -335,42 +383,52 @@ impl Exchange {
     }
 }
 
-/// Saves a binary body to Forge's temporary folder; returns where.
+/// Saves a binary body to Forge's temporary folder (named after `file`); returns where.
+/// A body that outgrew memory is already in a file: that one.
 pub fn save_body(file: &Path, exchange: &Exchange) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("forge-http");
-    std::fs::create_dir_all(&dir)?;
+    if let Some(path) = &exchange.spilled {
+        return Ok(path.clone());
+    }
     let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "response".into());
-    let path = dir.join(format!("{stem}-{}.{}", chrono::Local::now().format("%Y%m%d-%H%M%S%3f"), exchange.extension()));
+    let path = body_path(&stem, exchange)?;
     std::fs::write(&path, &exchange.body)?;
     Ok(path)
 }
 
-/// The response tab while the body is still arriving: status and headers, then the body so
-/// far (or how much of a binary one).
-pub fn render_partial(request: &Resolved, exchange: &Exchange) -> String {
-    let mut out = format!("{} {} · {} ms · receiving {}…\n{} {}\n\n", exchange.status, exchange.reason, exchange.elapsed.as_millis(), size(exchange.body.len()), request.method, request.url);
+/// The response tab's first line while the body is still arriving.
+pub fn status_line(exchange: &Exchange) -> String {
+    format!("{} {} · {} ms · receiving {}…", exchange.status, exchange.reason, exchange.elapsed.as_millis(), size(exchange.received))
+}
+
+/// The response tab when its status and headers arrived: the status line, the request,
+/// the headers and a blank line, which the body then follows as it arrives.
+pub fn render_head(request: &Resolved, exchange: &Exchange) -> String {
+    let mut out = format!("{}\n{} {}\n\n", status_line(exchange), request.method, request.url);
     for (key, value) in &exchange.headers {
         out.push_str(&format!("{key}: {value}\n"));
     }
     out.push('\n');
-    if exchange.is_binary() {
-        out.push_str(&format!("({} of {} so far)\n", size(exchange.body.len()), exchange.content_type().unwrap_or("binary data")));
-    } else {
-        out.push_str(&String::from_utf8_lossy(&exchange.body));
-    }
     out
 }
 
 /// The response tab's text, and whether its body is JSON (shown as JSONC, headers as
-/// comments).
+/// comments). A body that outgrew memory shows its beginning and where the rest is.
 pub fn render(request: &Resolved, environment: Option<&str>, exchange: &Exchange, saved: Option<&Path>) -> (String, bool) {
-    let text = match saved {
-        Some(path) => format!("({} of {}, saved to {})", size(exchange.body.len()), exchange.content_type().unwrap_or("binary data"), path.display()),
-        None => String::from_utf8_lossy(&exchange.body).into_owned(),
+    let text = match (saved, &exchange.spilled) {
+        (Some(path), _) => format!("({} of {}, saved to {})", size(exchange.received), exchange.content_type().unwrap_or("binary data"), path.display()),
+        (None, Some(path)) => format!(
+            "{}\n… ({} more: the response is {}, all of it in {})",
+            String::from_utf8_lossy(&exchange.body),
+            size(exchange.received - exchange.body.len()),
+            size(exchange.received),
+            path.display()
+        ),
+        (None, None) => String::from_utf8_lossy(&exchange.body).into_owned(),
     };
-    let json = saved.is_none().then(|| serde_json::from_str::<Value>(&text).ok()).flatten().filter(|v| v.is_object() || v.is_array());
+    let complete = saved.is_none() && exchange.spilled.is_none();
+    let json = complete.then(|| serde_json::from_str::<Value>(&text).ok()).flatten().filter(|v| v.is_object() || v.is_array());
     let prefix = if json.is_some() { "// " } else { "" };
-    let mut out = format!("{prefix}{} {} · {} ms · {}\n", exchange.status, exchange.reason, exchange.elapsed.as_millis(), size(exchange.body.len()));
+    let mut out = format!("{prefix}{} {} · {} ms · {}\n", exchange.status, exchange.reason, exchange.elapsed.as_millis(), size(exchange.received));
     out.push_str(&format!("{prefix}{} {}{}\n", request.method, request.url, environment.map(|e| format!("  (environment: {e})")).unwrap_or_default()));
     out.push_str(&format!("{prefix}\n"));
     for (key, value) in &exchange.headers {
@@ -475,26 +533,51 @@ fn dispatch_reporting(workspace: &mut Workspace, file: PathBuf, resolved: Resolv
     let task_file = file.clone();
     let workspace_handle = cx.entity().downgrade();
     let task = cx.spawn_in(window, async move |_, cx| {
-        let mut last_shown: Option<Instant> = None;
-        let result = send_streaming(client, &resolved, |partial| {
-            // The status and headers right away, then the body at most every 100 ms.
-            if last_shown.is_some_and(|at| at.elapsed() < Duration::from_millis(100)) {
-                return;
+        // The request runs off the UI thread and sends what is new (the status and headers
+        // first, then each piece of body); the tab adds it at its end, at most every 100 ms,
+        // instead of setting its whole text again.
+        let (updates_tx, mut updates) = futures::channel::mpsc::unbounded::<Arrived>();
+        let sending = cx.background_spawn({
+            let resolved = resolved.clone();
+            async move {
+                let mut sent = 0;
+                send_streaming(client, &resolved, |partial| {
+                    let arrived = Arrived::since(partial, sent);
+                    sent = partial.body.len();
+                    updates_tx.unbounded_send(arrived).ok();
+                })
+                .await
             }
-            last_shown = Some(Instant::now());
-            let text = render_partial(&resolved, partial);
-            cx.update(|_, cx| set_text(&view, text, false, cx)).ok();
-        })
-        .await;
+        });
+        let mut shown = Shown::default();
+        while let Some(first) = futures::StreamExt::next(&mut updates).await {
+            let mut batch = vec![first];
+            while let Ok(more) = updates.try_recv() {
+                batch.push(more);
+            }
+            cx.update(|_, cx| shown.show(&view, &resolved, batch, cx)).ok();
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+        }
+        let result = sending.await;
+        // Saving a binary body and laying out (and pretty-printing) a large one, off the UI
+        // thread too.
+        let (result, saved, text, json) = cx
+            .background_spawn({
+                let (file, resolved, environment) = (file.clone(), resolved.clone(), environment.clone());
+                async move {
+                    let saved = match &result {
+                        Ok(exchange) if exchange.is_binary() => save_body(&file, exchange).map_err(|e| log::error!("cannot save the response: {e:#}")).ok(),
+                        _ => None,
+                    };
+                    let (text, json) = match &result {
+                        Ok(exchange) => render(&resolved, environment.as_deref(), exchange, saved.as_deref()),
+                        Err(e) => (format!("// {} {}\n// Request failed: {e:#}\n", resolved.method, resolved.url), true),
+                    };
+                    (result, saved, text, json)
+                }
+            })
+            .await;
         cx.update(|_, cx| {
-            let saved = match &result {
-                Ok(exchange) if exchange.is_binary() => save_body(&file, exchange).map_err(|e| log::error!("cannot save the response: {e:#}")).ok(),
-                _ => None,
-            };
-            let (text, json) = match &result {
-                Ok(exchange) => render(&resolved, environment.as_deref(), exchange, saved.as_deref()),
-                Err(e) => (format!("// {} {}\n// Request failed: {e:#}\n", resolved.method, resolved.url), true),
-            };
             if let (Ok(exchange), Some(name)) = (&result, &resolved.name) {
                 let stored = Stored { headers: exchange.headers.clone(), body: String::from_utf8_lossy(&exchange.body).into_owned() };
                 cx.global_mut::<HttpState>().responses.insert((file.clone(), name.clone()), stored);
@@ -514,6 +597,89 @@ fn dispatch_reporting(workspace: &mut Workspace, file: PathBuf, resolved: Resolv
         }
     });
     cx.global_mut::<HttpState>().requests.insert(task_file, task);
+}
+
+/// What arrived since the last update of a response being received.
+pub struct Arrived {
+    status: String,
+    /// The tab's head (status, request, headers), the first time.
+    head: Option<Exchange>,
+    /// Body bytes new since the last update (none once the shown part is full).
+    bytes: Vec<u8>,
+    binary: bool,
+}
+
+impl Arrived {
+    /// What `partial` has beyond the first `sent` bytes of body.
+    fn since(partial: &Exchange, sent: usize) -> Self {
+        let head = (sent == 0 && partial.received == 0).then(|| Exchange {
+            status: partial.status,
+            reason: partial.reason.clone(),
+            elapsed: partial.elapsed,
+            headers: partial.headers.clone(),
+            body: Vec::new(),
+            received: 0,
+            spilled: None,
+        });
+        Self { status: status_line(partial), head, bytes: partial.body[sent.min(partial.body.len())..].to_vec(), binary: partial.is_binary() }
+    }
+}
+
+/// What a response tab shows of a response being received.
+#[derive(Default)]
+struct Shown {
+    started: bool,
+    /// Bytes of a character split between two pieces, waiting for the rest of it.
+    pending: Vec<u8>,
+}
+
+impl Shown {
+    /// Adds what arrived: the head the first time, then the new text at the end, and the
+    /// status line (how much arrived) on the first line.
+    fn show(&mut self, view: &Entity<Editor>, request: &Resolved, batch: Vec<Arrived>, cx: &mut App) {
+        let Some(last) = batch.last() else { return };
+        let (status, binary) = (last.status.clone(), last.binary);
+        let mut head = None;
+        for arrived in batch {
+            head = head.or(arrived.head);
+            if !arrived.binary {
+                self.pending.extend(arrived.bytes);
+            }
+        }
+        let text = if binary { String::new() } else { self.take_text() };
+        let Some(buffer) = view.read(cx).buffer().read(cx).as_singleton() else { return };
+        if !self.started {
+            let Some(head) = head else { return };
+            self.started = true;
+            set_text(view, render_head(request, &head) + &text, false, cx);
+            buffer.update(cx, |buffer, cx| replace_first_line(buffer, &status, cx));
+            return;
+        }
+        buffer.update(cx, |buffer, cx| {
+            if !text.is_empty() {
+                let end = buffer.len();
+                buffer.edit([(end..end, text)], None, cx);
+            }
+            replace_first_line(buffer, &status, cx);
+        });
+    }
+
+    /// The text of the bytes waiting, keeping a character cut in half for later.
+    fn take_text(&mut self) -> String {
+        let valid = match std::str::from_utf8(&self.pending) {
+            Ok(_) => self.pending.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => self.pending.len(),
+        };
+        let text = String::from_utf8_lossy(&self.pending[..valid]).into_owned();
+        self.pending.drain(..valid);
+        text
+    }
+}
+
+fn replace_first_line(buffer: &mut language::Buffer, line: &str, cx: &mut Context<language::Buffer>) {
+    let end = buffer.text().find('\n').unwrap_or(buffer.len());
+    buffer.edit([(0..end, line)], None, cx);
 }
 
 /// The `.http` file the active item is about: the file itself, or its response tab.
