@@ -563,7 +563,10 @@ mod tests {
             return;
         }
         std::fs::write(dir.path().join("asset"), b"the zip").unwrap();
-        assert!(openssl(&["pkeyutl", "-sign", "-inkey", "key.pem", "-rawin", "-in", "asset", "-out", "asset.sig"]).unwrap().status.success());
+        // macOS's LibreSSL has no `-rawin` (the release signs on Linux, with OpenSSL 3).
+        if !openssl(&["pkeyutl", "-sign", "-inkey", "key.pem", "-rawin", "-in", "asset", "-out", "asset.sig"]).unwrap().status.success() {
+            return;
+        }
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/create-update-key.sh");
         let public = std::process::Command::new("bash").arg(&script).arg("--public-of").arg(&key).output().unwrap();
         assert!(public.status.success(), "{}", String::from_utf8_lossy(&public.stderr));
