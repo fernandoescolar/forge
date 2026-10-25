@@ -804,6 +804,7 @@ impl Thread {
         let mut mcp = self.mcp_servers.clone();
         let tool_timeout = self.tool_timeout_seconds;
         let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
+        let forge_url = self.forge_mcp.as_ref().map(|r| r.url().to_string());
         let spec_for_auth = spec.clone();
         // The user's own hooks for Claude's shell tool may change the commands Forge's hook does.
         let other_shell_hooks = match crate::agent_setup::kind(&spec) {
@@ -824,7 +825,7 @@ impl Thread {
             spec.env = env;
             // What Forge adds for the agents it knows (see `agent_setup`).
             if let Ok(exe) = std::env::current_exe() {
-                crate::agent_setup::prepare(&mut spec, &exe, &paths::data_dir().join("agents"));
+                crate::agent_setup::prepare(&mut spec, &exe, &paths::data_dir().join("agents"), forge_url.as_deref());
             }
             crate::agent_setup::set_tool_timeout(&mut spec, tool_timeout);
             let task = cx.update(|_, cx| {

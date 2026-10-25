@@ -7,9 +7,10 @@
 //! writes a file and isn't that simple is refused with the tool to use instead, which Claude
 //! reads and follows; so are `git commit` and `git push`, which the user makes from Forge.
 //! Test runs and commands piped into `grep`, `head` or `tail` go to `run_tests` and
-//! `run_command`. Everything else runs as usual. Copilot and agy run the same hook, but
-//! can't have a command changed, so they are refused; Codex and Gemini get rules generated
-//! from the same table, [`RULES`] (see [`crate::agent_setup`]).
+//! `run_command`. Everything else runs as usual. OpenCode runs the same hook from a plugin
+//! of Forge's and takes the changed command too; Copilot and agy run it but can't have a
+//! command changed, so they are refused; Codex and Gemini get rules generated from the
+//! same table, [`RULES`] (see [`crate::agent_setup`]).
 //!
 //! Claude's hook also sees other MCP servers' tools: those that name a file kept from
 //! agents are refused, and those that change files ask the user first, since their changes

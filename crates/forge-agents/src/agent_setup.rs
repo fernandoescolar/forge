@@ -17,6 +17,12 @@
 //! - Gemini CLI: a policy denying those commands (`--admin-policy`); in ACP mode it
 //!   doesn't pass the reason on, so the instructions Forge sends with the first message
 //!   say why.
+//! - OpenCode: a plugin of Forge's (`plugin` in an `OPENCODE_CONFIG_CONTENT` the user's
+//!   config stays under) whose `tool.execute.before` hook runs Forge's shell hook and
+//!   takes its answer like Claude Code does: a refusal fails the call with the tool to use,
+//!   a test run is rewritten into `run_tests`. The plugin also takes the `forge` MCP
+//!   server out of OpenCode's Code Mode, so Forge's tools are function tools the model
+//!   sees directly, and the config names Forge's instructions as an instructions file.
 //!
 //! The files they read are written to Forge's data folder, every time an agent starts.
 
@@ -34,6 +40,7 @@ pub enum AgentKind {
     Copilot,
     Gemini,
     Antigravity,
+    OpenCode,
     Other,
 }
 
@@ -51,14 +58,17 @@ pub fn kind(spec: &AgentSpec) -> AgentKind {
         AgentKind::Gemini
     } else if has("agy-acp") {
         AgentKind::Antigravity
+    } else if has("opencode-ai") || program == "opencode" {
+        AgentKind::OpenCode
     } else {
         AgentKind::Other
     }
 }
 
 /// Adds what the agent `spec` starts needs to work through Forge. `exe` is this Forge
-/// (the hook runs it), `dir` where the agents' files go.
-pub fn prepare(spec: &mut AgentSpec, exe: &Path, dir: &Path) {
+/// (the hook runs it), `dir` where the agents' files go, `url` the thread's Forge MCP
+/// server, which the hook runs simple commands through (see [`crate::shell_translate`]).
+pub fn prepare(spec: &mut AgentSpec, exe: &Path, dir: &Path, url: Option<&str>) {
     let hook = shell_guard::hook_command(exe);
     match kind(spec) {
         AgentKind::Copilot => {
@@ -86,8 +96,145 @@ pub fn prepare(spec: &mut AgentSpec, exe: &Path, dir: &Path) {
                 add_arg(spec, "--admin-policy", Some(&policy.to_string_lossy()));
             }
         }
+        AgentKind::OpenCode => {
+            let root = dir.join("opencode");
+            if let Err(e) = write_opencode_files(&root, exe) {
+                log::warn!("couldn't set up OpenCode's files for Forge: {e}");
+                return;
+            }
+            let config = json!({ "plugin": [file_url(&root.join("plugins").join("forge-guard"))], "instructions": [root.join("forge.md").to_string_lossy()] });
+            add_to_json_env(spec, "OPENCODE_CONFIG_CONTENT", &config);
+            // One plugin file serves every thread: each OpenCode gets its thread's URL here.
+            if let Some(url) = url {
+                spec.env.retain(|(k, _)| k != OPENCODE_URL_VAR);
+                spec.env.push((OPENCODE_URL_VAR.into(), url.into()));
+            }
+        }
         AgentKind::Claude | AgentKind::Antigravity | AgentKind::Other => {}
     }
+}
+
+/// Where Forge's OpenCode plugin reads the thread's Forge MCP server URL.
+const OPENCODE_URL_VAR: &str = "FORGE_MCP_URL";
+
+/// `<root>/plugins/forge-guard/index.js` (OpenCode loads a plugin from a folder) and
+/// `<root>/forge.md` (Forge's instructions).
+fn write_opencode_files(root: &Path, exe: &Path) -> std::io::Result<()> {
+    write(&root.join("plugins").join("forge-guard").join("index.js"), &opencode_plugin(exe))?;
+    write(&root.join("forge.md"), &format!("{}\n", instructions()))
+}
+
+/// Forge's OpenCode plugin: its `tool.execute.before` hook runs Forge's shell hook
+/// (`exe`, with [`shell_guard::HOOK_ARG`] and the URL in [`OPENCODE_URL_VAR`]) on the
+/// shell tool's command, in Claude Code's formats, and takes its answer: a refusal
+/// fails the call with the reason, a changed command replaces the agent's. It also takes
+/// the `forge` MCP server out of Code Mode, so its tools are function tools.
+fn opencode_plugin(exe: &Path) -> String {
+    format!(
+        r#"// Written by Forge each time it starts OpenCode: its guard for shell commands.
+import {{ spawn }} from "node:child_process"
+
+const FORGE = {exe}
+const HOOK_ARG = {hook_arg}
+const SERVER = {server}
+const URL_VAR = {url_var}
+
+// Forge's answer to a shell command ("" lets it run): a JSON with a decision and reason,
+// and the command to run instead, when there is one.
+function hook(command) {{
+  return new Promise((resolve) => {{
+    const url = process.env[URL_VAR]
+    const args = url ? [HOOK_ARG, url] : [HOOK_ARG]
+    let child
+    try {{
+      child = spawn(FORGE, args, {{ stdio: ["pipe", "pipe", "ignore"] }})
+    }} catch {{
+      return resolve("")
+    }}
+    let out = ""
+    const timer = setTimeout(() => {{
+      child.kill()
+      resolve("")
+    }}, 10000)
+    child.stdout.on("data", (data) => (out += data))
+    child.on("close", () => {{
+      clearTimeout(timer)
+      resolve(out)
+    }})
+    child.on("error", () => {{
+      clearTimeout(timer)
+      resolve("")
+    }})
+    child.stdin.on("error", () => {{}})
+    child.stdin.end(JSON.stringify({{ tool_input: {{ command }} }}))
+  }})
+}}
+
+export default {{
+  id: "forge-guard",
+  async setup(ctx) {{
+    // Forge's tools as function tools, not behind Code Mode's `execute`.
+    await ctx.mcp.transform((editor) => {{
+      editor.update(SERVER, (server) => {{
+        server.codemode = false
+      }})
+    }})
+    ctx.tool.hook("execute.before", async (event) => {{
+      if (event.tool !== "shell" && event.tool !== "bash") return
+      const input = event.input
+      if (!input || typeof input.command !== "string") return
+      const out = await hook(input.command)
+      if (!out.trim()) return
+      let answer
+      try {{
+        answer = JSON.parse(out).hookSpecificOutput
+      }} catch {{
+        return
+      }}
+      if (!answer) return
+      if (answer.permissionDecision === "deny") throw new Error(answer.permissionDecisionReason)
+      if (answer.updatedInput) Object.assign(input, answer.updatedInput)
+    }})
+  }},
+}}
+"#,
+        exe = json!(exe.to_string_lossy()),
+        hook_arg = json!(shell_guard::HOOK_ARG),
+        server = json!(crate::forge_mcp::SERVER_NAME),
+        url_var = json!(OPENCODE_URL_VAR),
+    )
+}
+
+/// `path` as a `file://` URL.
+fn file_url(path: &Path) -> String {
+    url::Url::from_file_path(path).map(|u| u.to_string()).unwrap_or_else(|_| format!("file://{}", path.to_string_lossy().replace('\\', "/")))
+}
+
+/// Adds `additions` to a JSON object in an environment variable: the user's entries stay,
+/// and lists get the new values (once).
+fn add_to_json_env(spec: &mut AgentSpec, name: &str, additions: &serde_json::Value) {
+    let current = spec.env.iter().rev().find(|(k, _)| k == name).and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok());
+    let mut merged = match current {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    for (key, value) in additions.as_object().into_iter().flatten() {
+        match (merged.get_mut(key), value) {
+            (Some(serde_json::Value::Array(items)), serde_json::Value::Array(new)) => {
+                for value in new {
+                    if !items.contains(value) {
+                        items.push(value.clone());
+                    }
+                }
+            }
+            (Some(_), _) => {}
+            (None, value) => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    spec.env.retain(|(k, _)| k != name);
+    spec.env.push((name.into(), serde_json::Value::Object(merged).to_string()));
 }
 
 /// The longest a Node timer waits (2³¹ − 1 ms, about 24 days); a longer one fires at once.
@@ -255,6 +402,9 @@ mod tests {
         assert_eq!(kind(&spec("npx", &["-y", "@github/copilot", "--acp", "--stdio"])), AgentKind::Copilot);
         assert_eq!(kind(&spec("/opt/homebrew/bin/gemini", &["--experimental-acp"])), AgentKind::Gemini);
         assert_eq!(kind(&spec("npx", &["-y", "@forge-ide/agy-acp"])), AgentKind::Antigravity);
+        assert_eq!(kind(&spec("opencode", &["acp"])), AgentKind::OpenCode);
+        assert_eq!(kind(&spec("/home/me/.opencode/bin/opencode", &["acp"])), AgentKind::OpenCode);
+        assert_eq!(kind(&spec("npx", &["-y", "opencode-ai", "acp"])), AgentKind::OpenCode);
         assert_eq!(kind(&spec("python3", &["mock-acp-agent.py"])), AgentKind::Other);
     }
 
@@ -265,8 +415,8 @@ mod tests {
 
         let mut copilot = spec("npx", &["-y", "@github/copilot", "--acp", "--stdio"]);
         copilot.env.push(("COPILOT_CUSTOM_INSTRUCTIONS_DIRS".into(), "/mine".into()));
-        prepare(&mut copilot, exe, dir.path());
-        prepare(&mut copilot, exe, dir.path());
+        prepare(&mut copilot, exe, dir.path(), None);
+        prepare(&mut copilot, exe, dir.path(), None);
         let plugin = dir.path().join("copilot/forge-guard");
         assert_eq!(copilot.args[4..], ["--allow-all-mcp-server-instructions".to_string(), "--plugin-dir".into(), plugin.to_string_lossy().into_owned()], "once");
         let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(plugin.join("hooks.json")).unwrap()).unwrap();
@@ -281,8 +431,8 @@ mod tests {
         std::fs::write(users.join("rules/mine.rules"), "").unwrap();
         let mut codex = spec("npx", &["-y", "@agentclientprotocol/codex-acp"]);
         codex.env.push(("CODEX_HOME".into(), users.to_string_lossy().into_owned()));
-        prepare(&mut codex, exe, dir.path());
-        prepare(&mut codex, exe, dir.path());
+        prepare(&mut codex, exe, dir.path(), None);
+        prepare(&mut codex, exe, dir.path(), None);
         let home = dir.path().join("codex/home");
         assert_eq!(codex.env, [("CODEX_HOME".to_string(), home.to_string_lossy().into_owned())]);
         assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), "model = \"x\"", "the user's config");
@@ -292,15 +442,46 @@ mod tests {
         assert!(rules.contains(r#"prefix_rule(pattern=[["grep","/bin/grep","#) && rules.contains(r#"decision="forbidden", justification="Forge has a tool for this. Search with the `search` tool"#), "{rules}");
 
         let mut gemini = spec("gemini", &["--acp"]);
-        prepare(&mut gemini, exe, dir.path());
+        prepare(&mut gemini, exe, dir.path(), None);
         let policy = dir.path().join("gemini/forge-policy.toml");
         assert_eq!(gemini.args[1..], ["--admin-policy".to_string(), policy.to_string_lossy().into_owned()]);
         let policy = std::fs::read_to_string(&policy).unwrap();
         assert!(policy.contains("toolName = \"run_shell_command\"") && !policy.contains("commandRegex = \"^"), "{policy}");
 
         let mut other = spec("python3", &["agent.py"]);
-        prepare(&mut other, exe, dir.path());
+        prepare(&mut other, exe, dir.path(), None);
         assert_eq!(other.args, ["agent.py"]);
+    }
+
+    #[test]
+    fn sets_up_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = Path::new("/Apps/Forge/forge");
+        let url = "http://127.0.0.1:5/mcp/t";
+        let mut opencode = spec("opencode", &["acp"]);
+        opencode.env.push(("OPENCODE_CONFIG_CONTENT".into(), r#"{"model":"x","plugin":["mine"]}"#.into()));
+        prepare(&mut opencode, exe, dir.path(), Some(url));
+        prepare(&mut opencode, exe, dir.path(), Some(url));
+        assert_eq!(opencode.args, ["acp"]);
+        let root = dir.path().join("opencode");
+        let plugin = root.join("plugins/forge-guard");
+        let env = |name: &str| opencode.env.iter().filter(|(k, _)| k == name).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+        assert_eq!(env("FORGE_MCP_URL"), [url], "once");
+        let [content] = env("OPENCODE_CONFIG_CONTENT").try_into().unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(config["model"], "x", "the user's own config stays");
+        assert_eq!(config["plugin"], json!(["mine", format!("file://{}", plugin.display())]));
+        assert_eq!(config["instructions"], json!([root.join("forge.md").to_string_lossy()]));
+        let code = std::fs::read_to_string(plugin.join("index.js")).unwrap();
+        assert!(code.contains(r#"const FORGE = "/Apps/Forge/forge""#) && code.contains(r#"const HOOK_ARG = "--agent-shell-hook""#) && code.contains("server.codemode = false"), "{code}");
+        assert!(code.contains(r#"tool_input: { command }"#) && code.contains("answer.updatedInput"), "{code}");
+        assert!(std::fs::read_to_string(root.join("forge.md")).unwrap().starts_with("You are working inside Forge"));
+
+        let mut bare = spec("npx", &["-y", "opencode-ai", "acp"]);
+        prepare(&mut bare, exe, dir.path(), None);
+        assert!(bare.env.iter().all(|(k, _)| k != "FORGE_MCP_URL"), "no thread server, no URL");
+        let config: serde_json::Value = serde_json::from_str(&bare.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap();
+        assert_eq!(config["plugin"].as_array().unwrap().len(), 1);
     }
 
     #[test]

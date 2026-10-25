@@ -264,8 +264,9 @@ These calls appear in the thread with their names ("Run tests", "Find references
 | Codex | developer instructions | rules in a Codex folder of Forge's (`CODEX_HOME`), with the tool to use |
 | Antigravity | the first message | a hook (a plugin the adapter installs while a session runs), with the tool to use |
 | Gemini CLI | the first message | a policy (it doesn't pass the reason on) |
+| OpenCode | an instructions file (through its config), and the first message | a hook (a plugin of Forge's), with the tool to use; test runs go to *Run tests* |
 
-Codex runs with a folder of Forge's (in Forge's data folder) linked to yours (`~/.codex`, or `CODEX_HOME`): the same sign-in, config, `AGENTS.md` and rules, plus Forge's. Codex outside Forge is unchanged; its session history inside Forge is kept apart. Claude Code's thinking is asked for as summaries, so threads show what it thinks rather than only "Working".
+OpenCode gets Forge's plugin and instructions through `OPENCODE_CONFIG_CONTENT`, on top of your own config (`~/.config/opencode`), and the `forge` server's tools as plain tools rather than behind its Code Mode `execute`. Codex runs with a folder of Forge's (in Forge's data folder) linked to yours (`~/.codex`, or `CODEX_HOME`): the same sign-in, config, `AGENTS.md` and rules, plus Forge's. Codex outside Forge is unchanged; its session history inside Forge is kept apart. Claude Code's thinking is asked for as summaries, so threads show what it thinks rather than only "Working".
 
 **Extensions' tools.** Extensions can offer agents tools of their own, through the same `forge` server. The Database Explorer does: agents can list your connections, read their schema, and run SQL on them, without credentials of their own. So does Containers: agents see your containers and read their logs, and start, stop or restart them, or bring a Compose project up. A tool that only reads runs when an agent calls it. Any other, such as running a query, shows in the thread with its arguments, and runs only if you *Allow* it (with *Super user*, it runs without asking). Agents see an extension's tools in threads started after it loads.
 
