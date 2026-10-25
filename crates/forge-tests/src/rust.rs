@@ -43,8 +43,8 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
     let dir = manifest.parent()?;
     let mut classes: BTreeMap<String, TestClass> = BTreeMap::new();
     let mut add = |target: &str, file: &PathBuf, modules: Vec<String>| {
-        let Ok(source) = std::fs::read_to_string(file) else { return };
-        for test in file_tests(&source) {
+        let Some(tests) = crate::discovery::parsed(file, "rust-tests", file_tests) else { return };
+        for test in tests {
             let module: Vec<String> = modules.iter().cloned().chain(test.modules).collect();
             let module = module.join("::");
             let path = if module.is_empty() { test.name.clone() } else { format!("{module}::{}", test.name) };
@@ -102,7 +102,7 @@ fn module_of(rel: &Path) -> Vec<String> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct FoundTest {
     /// Inline modules around it (`tests`).
     modules: Vec<String>,

@@ -53,9 +53,9 @@ fn load_project(manifest: &Path) -> Option<TestProject> {
     let mut files = find_where(dir, is_test_file, None);
     files.retain(|f| f.ancestors().skip(1).take_while(|a| *a != dir).all(|a| manifest_in(a).is_none()));
     for file in files {
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let Some(found) = crate::discovery::parsed(&file, "python-tests", file_tests) else { continue };
         let id_path = canonical(&file);
-        let tests: Vec<TestMethod> = file_tests(&source)
+        let tests: Vec<TestMethod> = found
             .into_iter()
             .map(|(names, row)| TestMethod { fqn: format!("{id_path}::{}", names.join("::")), name: names.join(" › "), file: file.clone(), row })
             .collect();

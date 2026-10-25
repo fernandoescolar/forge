@@ -189,14 +189,18 @@ impl TestPanel {
     }
 
     /// Rescans the project for test projects and tests, debounced.
+    /// Finds the tests again, from the worktrees' files as Zed indexed them (what
+    /// `.gitignore` ignores left out); test files that didn't change aren't parsed again.
     pub fn discover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let roots = self.roots(cx);
+        let project = self.project.clone();
         self.discovering = true;
         cx.notify();
         self.discovery_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
+            let Ok(listed) = cx.update(|_, cx| discovery::worktree_files(&project, cx)) else { return };
+            let listed = listed.await;
             let projects = cx
-                .background_spawn(async move { roots.iter().flat_map(|root| discovery::discover(root)).collect::<Vec<_>>() })
+                .background_spawn(async move { listed.into_iter().flat_map(|(root, files)| discovery::discover_in(&root, files)).collect::<Vec<_>>() })
                 .await;
             this.update(cx, |this, cx| {
                 // Freshly found classes start collapsed when there are many of them.
@@ -1121,8 +1125,18 @@ mod tests {
     /// A workspace whose only worktree is `root`, a real folder: discovery reads the disk.
     async fn panel_for(root: &std::path::Path, cx: &mut TestAppContext) -> (Entity<TestPanel>, VisualTestContext) {
         cx.executor().allow_parking();
+        // The worktree lists the files discovery reads from disk: the same tree.
+        fn mirror(dir: &std::path::Path) -> serde_json::Value {
+            let mut tree = serde_json::Map::new();
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let value = if entry.path().is_dir() { mirror(&entry.path()) } else { serde_json::Value::String(std::fs::read_to_string(entry.path()).unwrap_or_default()) };
+                tree.insert(name, value);
+            }
+            serde_json::Value::Object(tree)
+        }
         let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree(root, serde_json::json!({})).await;
+        fs.insert_tree(root, mirror(root)).await;
         cx.update(workspace::AppState::test);
         cx.update(|cx| {
             theme_settings::init(theme::LoadThemes::JustBase, cx);

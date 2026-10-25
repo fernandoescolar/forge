@@ -82,10 +82,79 @@ pub(crate) const SKIPPED_DIRS: &[&str] = &["bin", "obj", ".git", ".vs", ".idea",
 /// left out.
 pub fn discover(root: &Path) -> Vec<TestProject> {
     // Every kind of project looks for its files: list the folders once for all of them.
-    LISTING.with(|l| *l.borrow_mut() = Some(std::rc::Rc::new(Listing::new(root))));
-    let projects = discover_listed(root);
+    discover_with(Listing::new(root))
+}
+
+/// `discover`, from `files` (every file under `root` worth looking at: in the app, the
+/// worktree's, which leaves out what `.gitignore` ignores) instead of the disk's folders.
+pub fn discover_in(root: &Path, files: Vec<PathBuf>) -> Vec<TestProject> {
+    discover_with(Listing::from_files(root, files))
+}
+
+fn discover_with(listing: Listing) -> Vec<TestProject> {
+    let root = listing.root.clone();
+    LISTING.with(|l| *l.borrow_mut() = Some(std::rc::Rc::new(listing)));
+    let projects = discover_listed(&root);
     LISTING.with(|l| l.borrow_mut().take());
     projects
+}
+
+/// The files of the project's local worktrees, as Zed indexed them (gitignored ones left
+/// out), by worktree root, once each worktree's first scan is complete.
+pub fn worktree_files(project: &gpui::Entity<project::Project>, cx: &gpui::App) -> gpui::Task<Vec<(PathBuf, Vec<PathBuf>)>> {
+    let worktrees: Vec<_> = project.read(cx).visible_worktrees(cx).filter_map(|wt| wt.read(cx).as_local().map(|local| (wt.clone(), local.scan_complete()))).collect();
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        let mut snapshots = Vec::new();
+        for (worktree, scanned) in worktrees {
+            scanned.await;
+            snapshots.push(worktree.read_with(cx, |wt, _| wt.snapshot()));
+        }
+        executor
+            .spawn(async move {
+                snapshots
+                    .into_iter()
+                    .map(|snapshot| {
+                        let root = snapshot.abs_path().to_path_buf();
+                        let files = snapshot.files(false, 0).map(|entry| root.join(entry.path.as_std_path())).collect();
+                        (root, files)
+                    })
+                    .collect()
+            })
+            .await
+    })
+}
+
+/// What `parse` makes of `file`'s text, remembered while the file stays the same (same
+/// modification time and size): discovery runs after every save, and reading and parsing
+/// every test file again was most of its work. `kind` keeps apart what different parsers
+/// make of one file.
+pub fn parsed<T: Clone + Send + Sync + 'static>(file: &Path, kind: &'static str, parse: impl FnOnce(&str) -> T) -> Option<T> {
+    use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = HashMap<(&'static str, PathBuf), (std::time::SystemTime, u64, Arc<dyn Any + Send + Sync>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    // Files come and go; past this many, start afresh rather than keep the departed.
+    const MAX_FILES: usize = 50_000;
+    let cache = CACHE.get_or_init(Default::default);
+    let metadata = std::fs::metadata(file).ok()?;
+    let stamp = (metadata.modified().ok()?, metadata.len());
+    let key = (kind, file.to_path_buf());
+    if let Some((modified, len, value)) = cache.lock().ok()?.get(&key) {
+        if (*modified, *len) == stamp {
+            if let Some(value) = value.downcast_ref::<T>() {
+                return Some(value.clone());
+            }
+        }
+    }
+    let value = parse(&std::fs::read_to_string(file).ok()?);
+    let mut cache = cache.lock().ok()?;
+    if cache.len() >= MAX_FILES {
+        cache.clear();
+    }
+    cache.insert(key, (stamp.0, stamp.1, Arc::new(value.clone())));
+    Some(value)
 }
 
 /// The files under a root, listed once by `discover` (skipping `SKIPPED_DIRS` and hidden
@@ -103,6 +172,27 @@ thread_local! {
 }
 
 impl Listing {
+    /// From files already listed, keeping out the folders the walk below skips (for
+    /// projects without a `.gitignore` that would).
+    fn from_files(root: &Path, mut files: Vec<PathBuf>) -> Self {
+        files.retain(|file| {
+            file.strip_prefix(root).is_ok_and(|relative| {
+                relative.parent().into_iter().flat_map(Path::components).all(|c| {
+                    let name = c.as_os_str().to_string_lossy();
+                    !SKIPPED_DIRS.contains(&name.as_ref()) && !name.starts_with('.')
+                })
+            })
+        });
+        files.sort();
+        Self::indexed(root, files)
+    }
+
+    fn indexed(root: &Path, files: Vec<PathBuf>) -> Self {
+        let projects = files.iter().filter(|f| f.extension().is_some_and(|e| e == "csproj")).filter_map(|f| f.parent().map(Path::to_path_buf)).collect();
+        let all = files.iter().cloned().collect();
+        Self { root: root.to_path_buf(), files, all, projects }
+    }
+
     fn new(root: &Path) -> Self {
         let mut files = Vec::new();
         let mut pending = vec![root.to_path_buf()];
@@ -121,9 +211,7 @@ impl Listing {
             }
         }
         files.sort();
-        let projects = files.iter().filter(|f| f.extension().is_some_and(|e| e == "csproj")).filter_map(|f| f.parent().map(Path::to_path_buf)).collect();
-        let all = files.iter().cloned().collect();
-        Self { root: root.to_path_buf(), files, all, projects }
+        Self::indexed(root, files)
     }
 
     /// `find_where` over the listing: files under `dir` for which `wanted` holds, leaving
@@ -201,10 +289,10 @@ fn load_project(project: &Path) -> TestProject {
     // Partial classes can be spread over several files; key by name to merge them.
     let mut classes: BTreeMap<String, TestClass> = BTreeMap::new();
     for file in find_files(dir, "cs", true) {
-        let Ok(source) = std::fs::read_to_string(&file) else {
+        let Some(tests) = parsed(&file, "csharp-tests", csharp_tests) else {
             continue;
         };
-        for test in csharp_tests(&source) {
+        for test in tests {
             let class = classes.entry(test.class_fqn()).or_insert_with(|| TestClass {
                 fqn: test.class_fqn(),
                 name: test.class.clone(),
@@ -294,6 +382,56 @@ mod tests {
         let walked = discover_listed(root.path());
         assert_eq!(listed, walked);
         assert!(listed.len() >= 5, "{listed:#?}");
+
+        // From a list of the files (as the worktree gives them), the same.
+        let mut files = Vec::new();
+        let mut pending = vec![root.path().to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                if entry.path().is_dir() { pending.push(entry.path()) } else { files.push(entry.path()) }
+            }
+        }
+        assert_eq!(discover_in(root.path(), files), listed);
+    }
+
+    /// A test file is parsed again only once it changed.
+    #[test]
+    fn parses_files_again_only_when_they_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a_test.go");
+        std::fs::write(&file, "func TestA(t *testing.T) {}").unwrap();
+        let parses = std::cell::Cell::new(0);
+        let count = |text: &str| {
+            parses.set(parses.get() + 1);
+            text.len()
+        };
+        assert_eq!(parsed(&file, "test-count", count), Some(27));
+        assert_eq!(parsed(&file, "test-count", count), Some(27));
+        assert_eq!(parses.get(), 1, "the second time comes from the cache");
+        std::fs::write(&file, "func TestA(t *testing.T) {}\nfunc TestB(t *testing.T) {}").unwrap();
+        assert_eq!(parsed(&file, "test-count", count), Some(55));
+        assert_eq!(parses.get(), 2, "a changed file is parsed again");
+        assert_eq!(parsed(&dir.path().join("gone.go"), "test-count", count), None);
+    }
+
+    /// The worktree's files leave out what `.gitignore` ignores.
+    #[gpui::test]
+    async fn worktree_files_leave_out_ignored_ones(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/repo",
+            serde_json::json!({ ".git": {}, ".gitignore": "generated/\n", "src": { "a_test.go": "" }, "generated": { "b_test.go": "" } }),
+        )
+        .await;
+        let project = project::Project::test(fs, ["/repo".as_ref()], cx).await;
+        let listed = cx.update(|cx| worktree_files(&project, cx)).await;
+        let files: Vec<PathBuf> = listed.into_iter().flat_map(|(_, files)| files).collect();
+        assert!(files.contains(&PathBuf::from("/repo/src/a_test.go")), "{files:?}");
+        assert!(!files.iter().any(|f| f.starts_with("/repo/generated")), "{files:?}");
     }
 
     #[test]

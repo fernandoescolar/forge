@@ -30,11 +30,13 @@ fn load_module(go_mod: &Path) -> Option<TestProject> {
     let dir = go_mod.parent()?;
     let mut packages: BTreeMap<String, TestClass> = BTreeMap::new();
     for file in find_where(dir, |p| p.to_string_lossy().ends_with("_test.go"), Some("go.mod")) {
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let found = crate::discovery::parsed(&file, "go-tests", |source| {
+            source.lines().enumerate().filter_map(|(row, line)| TEST_FN.captures(line).map(|c| (row, c[1].to_string()))).collect::<Vec<_>>()
+        });
+        let Some(found) = found else { continue };
         let rel = file.parent().and_then(|d| d.strip_prefix(dir).ok()).map(|d| d.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         let import = if rel.is_empty() { module.clone() } else { format!("{module}/{rel}") };
-        for (row, line) in source.lines().enumerate() {
-            let Some(name) = TEST_FN.captures(line).map(|c| c[1].to_string()) else { continue };
+        for (row, name) in found {
             let class = packages.entry(import.clone()).or_insert_with(|| TestClass {
                 fqn: import.clone(),
                 // The module's own package is named like the module.

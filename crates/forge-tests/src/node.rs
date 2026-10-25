@@ -45,9 +45,9 @@ fn load_package(manifest: &Path) -> Option<TestProject> {
     let dir = manifest.parent()?;
     let mut classes = Vec::new();
     for file in find_where(dir, |p| TEST_FILE.is_match(&p.to_string_lossy()), Some("package.json")) {
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let Some(found) = crate::discovery::parsed(&file, "node-tests", file_tests) else { continue };
         let id_path = canonical(&file);
-        let tests: Vec<TestMethod> = file_tests(&source)
+        let tests: Vec<TestMethod> = found
             .into_iter()
             .map(|(titles, row)| TestMethod { fqn: format!("{id_path} > {}", titles.join(" > ")), name: titles.join(" › "), file: file.clone(), row })
             .collect();

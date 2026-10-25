@@ -132,10 +132,52 @@ const SKIPPED_DIRS: &[&str] = &["bin", "obj", "target", "node_modules", "vendor"
 
 /// Run targets under `root`, grouped by kind (test projects last) and sorted by name.
 pub fn discover(root: &Path) -> Vec<RunTarget> {
+    let mut folders = Vec::new();
+    walk(root, 0, &mut |dir, files| folders.push((dir.to_path_buf(), files.to_vec())));
+    discover_folders(root, folders)
+}
+
+/// `discover`, from `files` (in the app, the worktree's, which leaves out what
+/// `.gitignore` ignores) instead of the disk's folders.
+pub fn discover_in(root: &Path, files: Vec<PathBuf>) -> Vec<RunTarget> {
+    discover_folders(root, folders_of(root, files))
+}
+
+/// `files` by folder, as `walk` visits them: each folder (and every folder above one with
+/// files, up to `root`) before the ones inside it, siblings by name, with the walk's
+/// limits (depth, hidden and skipped folders).
+fn folders_of(root: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut folders: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = std::collections::BTreeMap::from([(root.to_path_buf(), Vec::new())]);
+    for file in files {
+        let Some(dir) = file.parent().map(Path::to_path_buf) else { continue };
+        let Ok(relative) = dir.strip_prefix(root) else { continue };
+        let walked = relative.components().count() <= 6
+            && relative.components().all(|c| {
+                let name = c.as_os_str().to_string_lossy();
+                (!name.starts_with('.') || name == ".aspire") && !SKIPPED_DIRS.contains(&name.as_ref())
+            });
+        if !walked {
+            continue;
+        }
+        for ancestor in dir.ancestors().take_while(|a| a.starts_with(root)) {
+            folders.entry(ancestor.to_path_buf()).or_default();
+        }
+        folders.entry(dir).or_default().push(file);
+    }
+    folders
+        .into_iter()
+        .map(|(dir, mut files)| {
+            files.sort();
+            (dir, files)
+        })
+        .collect()
+}
+
+fn discover_folders(root: &Path, folders: Vec<(PathBuf, Vec<PathBuf>)>) -> Vec<RunTarget> {
     let mut targets = Vec::new();
     // The sources of a project are not file-based apps: don't read them.
     let mut project_dirs: Vec<PathBuf> = Vec::new();
-    walk(root, 0, &mut |dir, files| {
+    let mut visit = |dir: &Path, files: &[PathBuf]| {
         if files.iter().any(|f| f.extension().is_some_and(|e| e == "csproj")) {
             project_dirs.push(dir.to_path_buf());
         }
@@ -171,7 +213,10 @@ pub fn discover(root: &Path) -> Vec<RunTarget> {
         if dir == root || forge_tests::python::manifest_in(dir).is_some() {
             targets.extend(python_targets(root, dir, files));
         }
-    });
+    };
+    for (dir, files) in &folders {
+        visit(dir, files);
+    }
     // An app host found both by walking and through the Aspire CLI's settings.
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(t.id()));
@@ -384,7 +429,7 @@ fn python_targets(root: &Path, dir: &Path, files: &[PathBuf]) -> Vec<RunTarget> 
     for file in files {
         let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else { continue };
         let is_module = file.extension().is_some_and(|e| e == "py") && !forge_tests::python::is_test_file(file) && !stem.contains(['.', '-']);
-        if !is_module || !std::fs::read_to_string(file).is_ok_and(|text| has_main_block(&text)) {
+        if !is_module || !forge_tests::discovery::parsed(file, "python-main", has_main_block).unwrap_or(false) {
             continue;
         }
         let (name, entry) = if stem == "manage" { ("manage.py runserver".to_string(), "manage runserver".to_string()) } else { (format!("{stem}.py"), stem.to_string()) };
@@ -411,13 +456,47 @@ fn has_main_block(source: &str) -> bool {
 
 fn is_go_main(files: &[PathBuf]) -> bool {
     files.iter().filter(|f| f.extension().is_some_and(|e| e == "go") && !f.to_string_lossy().ends_with("_test.go")).any(|f| {
-        std::fs::read_to_string(f).is_ok_and(|text| text.lines().any(|l| l.trim() == "package main") && text.contains("func main("))
+        forge_tests::discovery::parsed(f, "go-main", |text| text.lines().any(|l| l.trim() == "package main") && text.contains("func main(")).unwrap_or(false)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From a list of the files (as the worktree gives them), the targets the walk finds,
+    /// in the same order: the folders come in the walk's order.
+    #[test]
+    fn finds_the_same_from_a_list_of_files() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("src/Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>");
+        write("src/Api/Program.cs", "#:not a directive\n");
+        write("tool/Cargo.toml", "[package]\nname = \"tool\"\n");
+        write("tool/src/main.rs", "fn main() {}");
+        write("cmd/server/main.go", "package main\n\nfunc main() {}\n");
+        write("svc/pyproject.toml", "[project]\nname = \"svc\"\n");
+        write("svc/main.py", "if __name__ == '__main__':\n    pass\n");
+        write("scripts/hello.cs", "#!/usr/bin/env dotnet\nConsole.WriteLine(\"hi\");\n");
+        write("node_modules/x/package.json", r#"{"scripts": {"start": "x"}}"#);
+        write(".hidden/Cargo.toml", "[package]\nname = \"hidden\"\n");
+        write("a/b/c/d/e/f/g/deep/Cargo.toml", "[package]\nname = \"deep\"\n");
+        let mut files = Vec::new();
+        let mut pending = vec![root.path().to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                if entry.path().is_dir() { pending.push(entry.path()) } else { files.push(entry.path()) }
+            }
+        }
+        let walked = discover(root.path());
+        let names = |targets: &[RunTarget]| targets.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&walked), ["Api", "tool", "server", "main.py"], "nothing from node_modules, hidden or too deep folders");
+        assert_eq!(discover_in(root.path(), files), walked);
+    }
 
     #[test]
     fn finds_apps_tests_crates_and_go_mains() {

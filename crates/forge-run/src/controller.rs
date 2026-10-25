@@ -212,15 +212,18 @@ impl RunController {
         Some(format!("forge-run-target:{}", self.roots(cx).first()?.display()))
     }
 
+    /// Finds the run targets again, from the worktrees' files as Zed indexed them (what
+    /// `.gitignore` ignores left out).
     fn discover(&mut self, cx: &mut Context<Self>) {
-        let roots = self.roots(cx);
+        let project = self.project.clone();
         let key = self.selection_key(cx);
         let kvp = KeyValueStore::global(cx);
         self.discovery = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
+            let listed = cx.update(|cx| forge_tests::discovery::worktree_files(&project, cx)).await;
             let (targets, saved) = cx
                 .background_spawn(async move {
-                    let targets: Vec<_> = roots.iter().flat_map(|root| targets::discover(root)).collect();
+                    let targets: Vec<_> = listed.into_iter().flat_map(|(root, files)| targets::discover_in(&root, files)).collect();
                     let saved = key.and_then(|key| kvp.read_kvp(&key).ok().flatten());
                     (targets, saved)
                 })
