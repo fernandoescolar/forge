@@ -49,6 +49,9 @@ mod worktree_ops;
 use tool_display::{tool_detail, tool_location, tool_terminal, tool_title};
 pub(crate) use tool_dispatch::forge_tool_title;
 
+/// The longest the first prompt waits for the agent to list Forge's tools.
+const TOOLS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     Disconnected,
@@ -405,6 +408,9 @@ pub struct Thread {
     pub(crate) retry_prompt: Option<String>,
     /// A prompt sent while connecting (`ask`), sent once the agent is ready.
     pub(crate) queued_prompt: Option<String>,
+    /// The next prompt is the agent's first since it connected: it waits for the agent to
+    /// have listed Forge's tools (see [`crate::forge_mcp::Registration::listed`]).
+    first_prompt: bool,
     /// The session already has the user's standing instructions (`rules`).
     rules_sent: bool,
     /// What the agent that had the thread before did, for the next message to the one that
@@ -592,6 +598,7 @@ impl Thread {
             auth_methods: vec![],
             retry_prompt: None,
             queued_prompt: None,
+            first_prompt: false,
             rules_sent: false,
             handoff_context: None,
             queue: Vec::new(),
@@ -778,7 +785,14 @@ impl Thread {
             self.system("This thread's worktree was removed; start a new thread.", Color::Warning);
             return self.changed(cx);
         }
+        // Already on its way (a thread connects when it opens; asking meanwhile queues the prompt).
+        if self.status == Status::Connecting {
+            return;
+        }
         let Some(mut spec) = self.agents.get(self.selected).cloned() else { return };
+        if let Some(registration) = &self.forge_mcp {
+            registration.expect_listing();
+        }
         self.persist(cx);
         self.warned_auth = false;
         self.auth_pending = None;
@@ -881,6 +895,7 @@ impl Thread {
                         this.accepts_images = init.pointer("/agentCapabilities/promptCapabilities/image").and_then(Value::as_bool).unwrap_or(false);
                         this.forge_tools = this.forge_mcp.is_some() && init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool).unwrap_or(false);
                         this.connected = Some((id.clone(), sid));
+                        this.first_prompt = true;
                         // Needs the connection: it changes the session's mode.
                         this.apply_policy_mode(cx);
                         // A resumed session got them with its first message.
@@ -1030,6 +1045,10 @@ impl Thread {
             labels.push("what the previous agent did".into());
         }
         self.rules_sent = true;
+        // Agents connect to MCP servers in the background and may answer `session/new`
+        // first: a prompt sent before the agent has listed Forge's tools runs without them.
+        let await_tools = std::mem::take(&mut self.first_prompt) && self.forge_tools;
+        let listed = self.forge_mcp.as_ref().map(|r| r.listed());
         let retry_text = text.clone();
         self.entries.push(Entry::User(text, labels));
         self.begin_checkpoint();
@@ -1050,6 +1069,15 @@ impl Thread {
                     this.changed(cx);
                 })
                 .ok();
+            }
+            if let (true, Some(listed)) = (await_tools, listed) {
+                let started = std::time::Instant::now();
+                while !listed.load(std::sync::atomic::Ordering::SeqCst) && started.elapsed() < TOOLS_WAIT {
+                    cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                }
+                if !listed.load(std::sync::atomic::Ordering::SeqCst) {
+                    log::warn!("the agent hasn't listed Forge's tools after {TOOLS_WAIT:?}; sending the first prompt anyway");
+                }
             }
             let result = Tokio::spawn_result(cx, async move { Ok(rt.prompt_content(&agent, &session, blocks).await?) }).await;
             this.update(cx, |this, cx| {

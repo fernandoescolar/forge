@@ -164,6 +164,9 @@ pub(crate) fn store_for(workspace: EntityId, cx: &App) -> Option<Entity<ThreadSt
 pub fn new_thread(workspace: &mut Workspace, agent: Option<usize>, window: &mut Window, cx: &mut Context<Workspace>) -> Entity<Thread> {
     let thread = cx.new(|cx| Thread::new(workspace, agent, window, cx));
     add_thread(workspace, thread.clone(), window, cx);
+    // The agent starts now rather than with the first message, so it is ready (its MCP
+    // servers connected) when that message comes.
+    thread.update(cx, |t, cx| t.connect(window, cx));
     thread
 }
 

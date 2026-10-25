@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::channel::{mpsc, oneshot};
@@ -37,6 +38,8 @@ pub(crate) type ToolReply = Result<String, String>;
 struct Session {
     tx: mpsc::UnboundedSender<ToolRequest>,
     root: PathBuf,
+    /// Set once the agent has listed the tools: it can call them from then on.
+    listed: Arc<AtomicBool>,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -53,12 +56,25 @@ pub(crate) struct Registration {
     token: String,
     url: String,
     sessions: Sessions,
+    listed: Arc<AtomicBool>,
 }
 
 impl Registration {
     /// The thread's URL on the server.
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Whether the agent has listed the tools since [`Registration::expect_listing`]: agents
+    /// connect to MCP servers in the background, and a prompt sent before this runs without
+    /// Forge's tools. Shared so a thread can wait for it off the UI thread.
+    pub fn listed(&self) -> Arc<AtomicBool> {
+        self.listed.clone()
+    }
+
+    /// An agent is starting: it has to list the tools again.
+    pub fn expect_listing(&self) {
+        self.listed.store(false, Ordering::SeqCst);
     }
 
     /// The ACP `McpServer` object to pass in `session/new`.
@@ -86,9 +102,10 @@ pub(crate) fn register(_runtime: &tokio::runtime::Handle, root: PathBuf) -> Opti
     let server = server.as_ref()?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let (tx, rx) = mpsc::unbounded();
-    server.sessions.lock().unwrap().insert(token.clone(), Session { tx, root });
+    let listed = Arc::new(AtomicBool::new(false));
+    server.sessions.lock().unwrap().insert(token.clone(), Session { tx, root, listed: listed.clone() });
     let url = format!("http://127.0.0.1:{}/mcp/{token}", server.port);
-    Some((Registration { token, url, sessions: server.sessions.clone() }, rx))
+    Some((Registration { token, url, sessions: server.sessions.clone(), listed }, rx))
 }
 
 /// Serves on a thread and runtime of its own: the server outlives whichever runtime
@@ -262,7 +279,10 @@ async fn handle(message: Value, session: &Session) -> Option<Value> {
             "instructions": server_instructions(&session.root),
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": all_tools(&session.root) }),
+        "tools/list" => {
+            session.listed.store(true, Ordering::SeqCst);
+            json!({ "tools": all_tools(&session.root) })
+        }
         "tools/call" => call(&params, session).await,
         _ => return Some(error(id, -32601, &format!("method not found: {method}"))),
     };
@@ -1040,8 +1060,12 @@ mod tests {
 
         let (status, _) = post(&url, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
         assert_eq!(status, "HTTP/1.1 202 Accepted");
+        assert!(!registration.listed().load(Ordering::SeqCst), "not until the tools are listed");
 
         let (_, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
+        assert!(registration.listed().load(Ordering::SeqCst), "the agent can call the tools now");
+        registration.expect_listing();
+        assert!(!registration.listed().load(Ordering::SeqCst), "a restarted agent lists them again");
         let tools = &serde_json::from_str::<Value>(&body).unwrap()["result"]["tools"];
         // Forge's own (tests elsewhere may register extensions' tools, named `<extension>__<tool>`).
         // This crate's own (tests elsewhere may register extensions' tools, named
