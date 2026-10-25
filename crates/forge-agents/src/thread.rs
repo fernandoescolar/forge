@@ -1420,6 +1420,10 @@ impl Thread {
             },
             kind @ ("agent_message_chunk" | "agent_thought_chunk") => {
                 let thought = kind == "agent_thought_chunk";
+                let text = if thought { text } else { without_think_tags(&text) };
+                if text.is_empty() {
+                    return;
+                }
                 match self.entries.last() {
                     Some(Entry::Agent(md)) if !thought => md.update(cx, |m, cx| m.append(&text, cx)),
                     Some(Entry::Thought(md)) if thought => md.update(cx, |m, cx| m.append(&text, cx)),
@@ -1579,9 +1583,20 @@ fn set_plan(entries: &mut Vec<Entry>, items: Vec<(String, String)>) {
     }
 }
 
+/// `text` without stray `<think>` and `</think>` tags: a local model run with its thinking
+/// off (Nemotron, Qwen) still emits the closing tag now and then, and neither the server
+/// nor the agent takes it out. Thinking that does come between the tags is kept (the
+/// tags are single tokens, so a chunk has them whole).
+fn without_think_tags(text: &str) -> String {
+    if !text.contains("think>") {
+        return text.to_string();
+    }
+    text.replace("<think>", "").replace("</think>", "")
+}
+
 #[cfg(test)]
 mod plan_tests {
-    use super::{Entry, set_plan};
+    use super::{Entry, set_plan, without_think_tags};
 
     fn plan(step: &str) -> Vec<(String, String)> {
         vec![(step.into(), "pending".into())]
@@ -1603,6 +1618,13 @@ mod plan_tests {
         assert!(matches!(&entries[2], Entry::Plan(items) if items == &plan("second")));
         assert!(matches!(entries.last(), Some(Entry::Plan(items)) if items == &plan("third")));
     }
+    #[test]
+    fn drops_stray_think_tags() {
+        assert_eq!(without_think_tags("</think>\n\nThe tests fail in Cart."), "\n\nThe tests fail in Cart.");
+        assert_eq!(without_think_tags("<think>a plan</think>done"), "a plandone", "what was thought stays");
+        assert_eq!(without_think_tags("I think so."), "I think so.");
+    }
+
 }
 
 #[cfg(test)]
