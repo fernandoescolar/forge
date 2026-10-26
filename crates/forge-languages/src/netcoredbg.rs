@@ -23,7 +23,7 @@ use http_client::github::latest_github_release;
 use language::LanguageName;
 use serde_json::{Value, json};
 use task::{AttachRequest, BuildTaskDefinition, DebugScenario, SpawnInTerminal, TaskTemplate, ZedDebugConfig};
-use util::command::new_command;
+use util::command::{Stdio, new_command};
 
 use crate::active_build::ActiveBuild;
 
@@ -258,7 +258,7 @@ impl DapLocator for DotnetTestLocator {
         // (waiting for a debugger that never comes) is stopped with `dotnet test`.
         let env: Vec<(String, String)> = build_config.env.iter().filter(|(key, _)| *key != FILTER_ENV).map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut command = smol::process::Command::from(forge_process::command("dotnet", &env));
-        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(cwd) = &build_config.cwd {
             command.current_dir(cwd);
         }
@@ -397,7 +397,7 @@ impl DapLocator for DotnetRunLocator {
         }
         // Spawned by hand (not `output()`), so the pipes have to be asked for: inherited,
         // the path would go to Forge's own stdout and `output()` would read nothing.
-        command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let tool = if file_based { "dotnet build" } else { "dotnet msbuild" };
         let output = forge_ui::process::spawn_unblocked(command).with_context(|| format!("failed to run `{tool}`"))?.output().await.with_context(|| format!("`{tool}` failed"))?;
         anyhow::ensure!(output.status.success(), "`{tool} -getProperty:TargetPath` failed: {}", String::from_utf8_lossy(&output.stdout));
