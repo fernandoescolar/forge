@@ -226,6 +226,7 @@ pub fn show_changes_since(editor: &Entity<Editor>, base: String, languages: Arc<
     let editor = editor.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let base_text: Arc<str> = base.into();
+        let version = cx.update(|cx| buffer.read(cx).version());
         let diff = build_buffer_diff(base_text.clone(), &buffer, languages, cx).await;
         let shown = editor.update(cx, |editor, cx| {
             editor.buffer().update(cx, |multibuffer, cx| multibuffer.add_diff(diff.clone(), cx));
@@ -235,11 +236,21 @@ pub fn show_changes_since(editor: &Entity<Editor>, base: String, languages: Arc<
             return;
         }
         let _edits = cx.update(|cx| {
-            cx.subscribe(&buffer, move |buffer, event: &BufferEvent, cx| {
-                if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
-                    refresh_diff(diff.clone(), buffer, base_text.clone(), cx);
+            let subscription = cx.subscribe(&buffer, {
+                let diff = diff.clone();
+                let base_text = base_text.clone();
+                move |buffer, event: &BufferEvent, cx| {
+                    if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
+                        refresh_diff(diff.clone(), buffer, base_text.clone(), cx);
+                    }
                 }
-            })
+            });
+            // Edited (or reloaded from disk) while the diff was being computed: that edit
+            // came before the subscription, so the diff doesn't have it yet.
+            if buffer.read(cx).version() != version {
+                refresh_diff(diff, buffer.clone(), base_text, cx);
+            }
+            subscription
         });
         futures::future::pending::<()>().await;
     })

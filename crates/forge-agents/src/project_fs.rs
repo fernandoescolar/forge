@@ -251,6 +251,7 @@ async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, p
                 ReviewDecision::Accept => {}
                 ReviewDecision::Reject => return Err(IdeError::InvalidInput(format!("the user rejected the edit to {}", path.display()))),
                 ReviewDecision::Partial(merged) => {
+                    let target = open_buffer(project, path, cx).or(target);
                     apply(project, fs, path, target, merged.clone(), cx).await?;
                     record(&merged);
                     // The agent must not assume its version is on disk.
@@ -263,22 +264,31 @@ async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, p
         }
     }
 
+    // The review may have opened the file meanwhile (the follow pane shows it): written
+    // through its buffer, editors showing it have the new text at once, instead of after
+    // a reload from disk.
+    let target = open_buffer(project, path, cx).or(target);
     apply(project, fs, path, target, text.clone(), cx).await?;
     record(&text);
     Ok(())
+}
+
+/// `path`'s buffer, when open in the project right now.
+fn open_buffer(project: &WeakEntity<Project>, path: &Path, cx: &mut AsyncApp) -> Option<Entity<language::Buffer>> {
+    project
+        .update(cx, |project, cx| {
+            let project_path = project.find_project_path(path, cx)?;
+            project.get_open_buffer(&project_path, cx)
+        })
+        .ok()
+        .flatten()
 }
 
 /// Puts `path` back as it was before the agent touched it: `original` written through its
 /// buffer when open (and saved), or the file removed when the agent created it.
 pub async fn restore(project: &WeakEntity<Project>, path: &Path, original: Option<String>, cx: &mut AsyncApp) -> anyhow::Result<()> {
     let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
-    let target = project
-        .update(cx, |project, cx| {
-            let project_path = project.find_project_path(path, cx)?;
-            project.get_open_buffer(&project_path, cx)
-        })
-        .ok()
-        .flatten();
+    let target = open_buffer(project, path, cx);
     match original {
         Some(text) => apply(project, &fs, path, target, text, cx).await.map_err(|e| anyhow::anyhow!("{e:?}")),
         None => {
