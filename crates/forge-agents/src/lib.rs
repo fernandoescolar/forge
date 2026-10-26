@@ -71,4 +71,5 @@ pub fn init(cx: &mut gpui::App) {
     fix_with_agent::init(cx);
     configure::init(cx);
     conflicts::init(cx);
+    forge_debug::init();
 }

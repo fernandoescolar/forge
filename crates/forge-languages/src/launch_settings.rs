@@ -77,7 +77,9 @@ pub fn profile(app: &Path, name: Option<&str>) -> Option<LaunchProfile> {
 }
 
 pub fn parse(text: &str) -> Vec<LaunchProfile> {
-    // The templates write plain JSON, but people add comments and trailing commas.
+    // The templates write plain JSON, but people add comments and trailing commas, and
+    // `dotnet new` starts the file with a byte order mark, which JSON parsers refuse.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok(json) = serde_json_lenient::from_str::<Value>(text) else { return vec![] };
     let Some(profiles) = json.get("profiles").and_then(Value::as_object) else { return vec![] };
     profiles
@@ -123,5 +125,14 @@ mod tests {
         assert_eq!(profiles[0].env, [("ASPNETCORE_ENVIRONMENT".into(), "Development".into()), ("ASPNETCORE_URLS".into(), "http://localhost:5000".into())]);
         assert_eq!(profiles[1].args, ["--seed", "two words"]);
         assert!(parse("not json").is_empty());
+    }
+
+    #[test]
+    fn reads_profiles_after_a_byte_order_mark() {
+        // What `dotnet new webapi` writes.
+        let text = "\u{feff}{ \"profiles\": { \"http\": { \"commandName\": \"Project\", \"applicationUrl\": \"http://localhost:5233\" } } }";
+        let profiles = parse(text);
+        assert_eq!(profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["http"]);
+        assert_eq!(profiles[0].env, [("ASPNETCORE_URLS".into(), "http://localhost:5233".into())]);
     }
 }

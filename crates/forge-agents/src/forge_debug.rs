@@ -19,6 +19,11 @@ use forge_ui::ide_tools::DebugWhat;
 /// How long a session may take to start (it builds first), and to reach a breakpoint.
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 const PAUSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `start_debugging` waits for an app to stop: a server only stops once something
+/// calls it, so the agent gets it back soon, to make that call.
+const APP_PAUSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a tool waiting on the debugged program (an HTTP request) watches for it to stop.
+const STOP_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
 const FRAMES: i64 = 8;
 const VARIABLES: usize = 40;
 const VALUE_CHARS: usize = 200;
@@ -206,10 +211,38 @@ async fn report(ide: &Ide, session: &Entity<Session>, pause: Pause, waited: Dura
         Pause::Stopped(thread) => describe_stop(ide, session, thread, cx).await,
         Pause::Ended => Ok("The program ran to the end without stopping (no breakpoint was hit).".into()),
         Pause::StillRunning => Ok(format!(
-            "Still running after {}s without stopping. Set a breakpoint where it should stop, use `debug_step` with `pause`, or `stop_debugging`.",
+            "Running, and it hasn't stopped in {}s. If it waits for something (a server for a request), trigger the code now, \
+for example with `http_request`: when the program stops at a breakpoint, that tool returns where, with the local variables. \
+Otherwise set a breakpoint where it should stop, use `debug_step` with `pause`, or `stop_debugging`.",
             waited.as_secs()
         )),
     }
+}
+
+/// Registers the watch other tools use to learn that the program being debugged stopped.
+pub(crate) fn init() {
+    forge_ui::ide_tools::ide_tools().set_debug_stop_watch(std::sync::Arc::new(|ide, cx| watch_for_stop(ide, cx)));
+}
+
+/// A receiver that gets where the active session stops next (within [`STOP_WATCH_TIMEOUT`]);
+/// `None` with no session, or with one already stopped.
+fn watch_for_stop(ide: &Ide, cx: &mut AsyncWindowContext) -> Option<futures::channel::oneshot::Receiver<String>> {
+    let session = active_session(ide, cx).ok()?;
+    if session.read_with(cx, |s, _| s.any_stopped_thread()) {
+        return None;
+    }
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let ide = ide.clone();
+    cx.spawn(async move |cx| {
+        if let Ok(Pause::Stopped(thread)) = wait_for_pause(&session, STOP_WATCH_TIMEOUT, false, |_| {}, cx).await {
+            if !tx.is_canceled() {
+                let stop = describe_stop(&ide, &session, thread, cx).await.unwrap_or_else(|e| e);
+                let _ = tx.send(stop);
+            }
+        }
+    })
+    .detach();
+    Some(rx)
 }
 
 /// Starts a debug session of a run target or of tests, and waits for it to stop.
@@ -221,6 +254,11 @@ pub(crate) async fn start_debugging(ide: Ide, args: Value, cx: &mut AsyncWindowC
     let test_path = str_arg(&args, "test_path").map(|p| ide.resolve(&p)).transpose()?;
     let test_name = str_arg(&args, "test_name");
     let what = if test_path.is_some() || test_name.is_some() { DebugWhat::Tests { path: test_path, name: test_name } } else { DebugWhat::Target(str_arg(&args, "target")) };
+    let wait = args
+        .get("wait_seconds")
+        .and_then(Value::as_u64)
+        .map(|s| Duration::from_secs(s.min(600)))
+        .unwrap_or(if matches!(what, DebugWhat::Tests { .. }) { PAUSE_TIMEOUT } else { APP_PAUSE_TIMEOUT });
     // Run registers how to start sessions (of run targets, and of tests through the Tests panel).
     let launch = forge_ui::ide_tools::ide_tools().debug_launcher().ok_or("Run isn't set up in this Forge.")?;
     launch(&ide, what, cx)?;
@@ -235,8 +273,8 @@ pub(crate) async fn start_debugging(ide: Ide, args: Value, cx: &mut AsyncWindowC
         }
         cx.background_executor().timer(Duration::from_millis(250)).await;
     };
-    let pause = wait_for_pause(&session, PAUSE_TIMEOUT, true, |_| {}, cx).await?;
-    report(&ide, &session, pause, PAUSE_TIMEOUT, cx).await
+    let pause = wait_for_pause(&session, wait, true, |_| {}, cx).await?;
+    report(&ide, &session, pause, wait, cx).await
 }
 
 /// Continues, steps or pauses the session, and reports where it stops next.

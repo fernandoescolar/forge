@@ -14,7 +14,7 @@ pub(crate) fn init(_: &mut App) {
         "Send an HTTP request",
         "Send an HTTP request through Forge's .http support, instead of curl: the user sees it and its response in Forge. \
 Either the request at `line` of a `.http` file, or an ad-hoc one (`method`, `url`, `headers`, `body`). `{{variables}}` resolve with the project's \
-http-client.env.json environment the user selected. Returns status, headers, timing and body.",
+http-client.env.json environment the user selected. Returns status, headers, timing and body; when the program is being debugged and stops at a breakpoint while handling it, returns where it stopped and the local variables instead.",
         json!({
             "type": "object",
             "properties": {
@@ -50,7 +50,22 @@ async fn http_request(ide: ToolContext, args: Value, cx: &mut AsyncWindowContext
         }
     }
     .map_err(|e| format!("Can't send it: {e:#}"))?;
-    let outcome = receiver.await.map_err(|_| "The request was cancelled.".to_string())?;
+    // A program being debugged may stop at a breakpoint before it answers: then say where,
+    // rather than wait for an answer that comes only once it goes on.
+    let outcome = match ide_tools().watch_debug_stop(&ide, cx) {
+        Some(stop) => match futures::future::select(receiver, stop).await {
+            futures::future::Either::Left((outcome, _)) => outcome,
+            futures::future::Either::Right((Ok(stop), _)) => {
+                return Ok(format!(
+                    "The program being debugged stopped at a breakpoint while handling this request, so it hasn't answered yet \
+(the response tab shows it once it does: `debug_step` with `continue`).\n\n{stop}"
+                ));
+            }
+            futures::future::Either::Right((Err(_), receiver)) => receiver.await,
+        },
+        None => receiver.await,
+    }
+    .map_err(|_| "The request was cancelled.".to_string())?;
     let request = &outcome.request;
     let environment = outcome.environment.as_deref().map(|e| format!(" (environment {e})")).unwrap_or_default();
     let exchange = outcome.response.map_err(|e| format!("{} {}{environment} failed: {e}", request.method, request.url))?;

@@ -544,13 +544,19 @@
   {
     "name": "start_debugging",
     "title": "Start debugging",
-    "description": "Debug a run target (like the title bar's Debug) or tests (like a test's Debug button), with the breakpoints set. Builds, starts, and waits until it stops at a breakpoint (up to a minute): returns where (stack) and the local variables, or that it ended without stopping. Give `test_path` or `test_name` for tests, else `target` (or nothing, for the selected target).",
+    "description": "Debug a run target (like the title bar's Debug) or tests (like a test's Debug button), with the breakpoints set. Builds, starts, and waits until it stops at a breakpoint: returns where (stack) and the local variables, or that it ended without stopping. Tests are waited for up to a minute; an app for 15 seconds, since a server stops only once something calls it: then trigger that code (`http_request` returns where the program stops). Give `test_path` or `test_name` for tests, else `target` (or nothing, for the selected target).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
           "description": "The run target's name."
+        },
+        "wait_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600,
+          "description": "How long to wait for it to stop (default: 60 for tests, 15 for an app)."
         },
         "test_path": {
           "type": "string",

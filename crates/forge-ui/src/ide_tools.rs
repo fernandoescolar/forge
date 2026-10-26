@@ -164,11 +164,18 @@ pub enum DebugWhat {
 /// Starts a debug session (Run registers it); the caller waits for it.
 pub type DebugLauncher = Arc<dyn Fn(&ToolContext, DebugWhat, &mut AsyncWindowContext) -> Result<(), String> + Send + Sync>;
 
+/// While a debug session runs: a receiver that gets where the program stopped (stack and
+/// local variables), should it stop at a breakpoint; `None` when nothing is being debugged.
+/// The agents' debugging tools register it, so a tool that waits on the program (an HTTP
+/// request to it) can say it stopped instead of waiting for an answer that won't come.
+pub type DebugStopWatch = Arc<dyn Fn(&ToolContext, &mut AsyncWindowContext) -> Option<futures::channel::oneshot::Receiver<String>> + Send + Sync>;
+
 #[derive(Default)]
 pub struct IdeTools {
     tools: RwLock<Vec<IdeTool>>,
     context: RwLock<Vec<ContextSection>>,
     debug: RwLock<Option<DebugLauncher>>,
+    debug_stops: RwLock<Option<DebugStopWatch>>,
 }
 
 /// The tools and hooks Forge's crates registered.
@@ -215,6 +222,16 @@ impl IdeTools {
 
     pub fn debug_launcher(&self) -> Option<DebugLauncher> {
         self.debug.read().unwrap().clone()
+    }
+
+    pub fn set_debug_stop_watch(&self, watch: DebugStopWatch) {
+        *self.debug_stops.write().unwrap() = Some(watch);
+    }
+
+    /// Where the program being debugged stops next, if something is being debugged.
+    pub fn watch_debug_stop(&self, context: &ToolContext, cx: &mut AsyncWindowContext) -> Option<futures::channel::oneshot::Receiver<String>> {
+        let watch = self.debug_stops.read().unwrap().clone()?;
+        watch(context, cx)
     }
 }
 
