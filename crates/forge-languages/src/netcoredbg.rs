@@ -258,7 +258,7 @@ impl DapLocator for DotnetTestLocator {
         // (waiting for a debugger that never comes) is stopped with `dotnet test`.
         let env: Vec<(String, String)> = build_config.env.iter().filter(|(key, _)| *key != FILTER_ENV).map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut command = smol::process::Command::from(forge_process::command("dotnet", &env));
-        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         if let Some(cwd) = &build_config.cwd {
             command.current_dir(cwd);
         }
