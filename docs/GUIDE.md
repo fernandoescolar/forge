@@ -114,7 +114,7 @@ Forge applies a file as soon as you save it. Settings for a single project go in
 
 ## Colours and fonts
 
-Every file in `config/palettes/` becomes a theme. Forge ships **Forge Dark** and **Forge Light** (the defaults, which follow the system appearance) and **Dracula**. A palette names about 30 colours:
+Every file in `config/palettes/` becomes a theme. Forge ships **Forge Dark** and **Forge Light** (the defaults, which follow the system appearance), **Dark Modern** (VS Code's default dark theme) and **Dracula**. A palette names about 30 colours:
 
 ```jsonc
 {
@@ -212,7 +212,7 @@ The **Tests** panel (View › Panels › Tests, or Run › *Run All Tests*) find
 
 Agents work in **threads**. A thread is one conversation with an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com), such as Claude Code, Codex, Gemini, GitHub Copilot, Google Antigravity or OpenCode. You list agents in `agents.json`; Settings › Agents › *Manage Agents* adds any of those with one click. Agents that run with `npx` (Claude Code, Codex, Copilot, Antigravity) are installed on first use, with their install scripts allowed, which npm 12 would otherwise skip. Their versions are pinned to the ones each Forge release was tested with; remove the `@<version>` in `agents.json` to follow the latest. OpenCode runs the `opencode` command from [its installer](https://opencode.ai): the `opencode-ai` npm package lags behind it. A new thread starts its agent as soon as it opens, so the agent is connected to Forge's tools by the time you send the first message (a message sent before that waits). There are three ways to start one:
 
-- **The thread tab** (⌘⇧A, or the spark in the title bar; ⌘⌥N starts a new one). The conversation fills the editor area. You see your messages, the agent's answers, its tool calls with their terminals, plans and permission requests. Under the input are the session's settings (mode, model and others the agent offers) and its usage. **Changes** lists every file the agent modified, with lines added and removed. Click a file, or *Review*, to see the changes as a diff in a tab, then keep or undo each file or all of them.
+- **The thread tab** (⌘⇧A, or the spark in the title bar; ⌘⌥N starts a new one). The conversation fills the editor area. You see your messages, the agent's answers, its tool calls with their terminals, plans and permission requests. Under the input are the session's settings (mode, model and others the agent offers) and its usage. **Changes** lists every file the agent modified, with lines added and removed. Click a file, or *Review*, to see the changes as a diff in a tab, then keep or undo each file or all of them. Select text in messages, answers and thoughts with the mouse and copy it with ⌘C or the right-click menu (which also copies it as Markdown, or the whole message); each code block has a copy button. ⌘F finds in the conversation: messages, answers and thoughts (not tool calls), opening a folded thought to show a match.
 - **In the code** (⌃↩ in any file). A question card opens right below the selection. It keeps the latest answer, the changes to review and a reply box.
 - **Fix with agent**, from an error's popover, Agents › Fix the Problem at the Cursor, or a failed test. Agents › *Fix the Problems in This File* and *… in the Project* (also *Fix with Agent* on the Problems tab) send every error and warning there, errors first. Merge conflicts and pull request reviews go to agents too (see [Git and GitHub](#git-and-github)).
 

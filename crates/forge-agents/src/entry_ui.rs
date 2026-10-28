@@ -22,6 +22,37 @@ fn on_thread(thread: &WeakEntity<Thread>, f: impl Fn(&mut Thread, &mut Window, &
     }
 }
 
+/// A message, answer or thought: its text selects with the mouse and copies with ⌘C or
+/// the right-click menu, and each code block has a copy button.
+pub(crate) fn chat_markdown(md: &gpui::Entity<markdown::Markdown>, ix: usize, window: &Window, cx: &App) -> AnyElement {
+    let element = MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx)).code_block_renderer(markdown::CodeBlockRenderer::Default {
+        copy_button_visibility: markdown::CopyButtonVisibility::AlwaysVisible,
+        wrap_button_visibility: markdown::WrapButtonVisibility::Hidden,
+        border: false,
+    });
+    let md = md.clone();
+    ui::right_click_menu(("chat-markdown-menu", ix))
+        .trigger(move |_, _, _| div().min_w_0().debug_selector(move || format!("chat-markdown-{ix}")).child(element))
+        .menu(move |window, cx| {
+            let focus = window.focused(cx);
+            let md = md.clone();
+            ui::ContextMenu::build(window, cx, move |menu, _, cx| {
+                let markdown = md.read(cx);
+                let link = markdown.context_menu_link().cloned();
+                let selected_text = markdown.context_menu_selected_text().cloned();
+                let selected_markdown = markdown.context_menu_selected_markdown().cloned();
+                let whole = markdown.source().clone();
+                let copy = |text: SharedString| move |_: &mut Window, cx: &mut App| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
+                menu.when_some(focus, |menu, focus| menu.context(focus))
+                    .when_some(link, |menu, url| menu.entry("Copy Link", None, copy(url)).separator())
+                    .when_some(selected_text, |menu, text| menu.entry("Copy", Some(Box::new(markdown::Copy)), copy(text)))
+                    .when_some(selected_markdown, |menu, text| menu.entry("Copy as Markdown", Some(Box::new(markdown::CopyAsMarkdown)), copy(text)))
+                    .entry("Copy Message", None, copy(whole))
+            })
+        })
+        .into_any_element()
+}
+
 /// One entry of a thread, laid out as part of a full-width document.
 /// Text that takes the rest of a row and wraps there instead of pushing the row wider.
 fn wrapping(text: impl IntoElement) -> gpui::Div {
@@ -83,7 +114,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
             )
             // Written in Markdown, as messages to agents often are, and shown so.
             .child(match user_markdown {
-                Some(md) => div().min_w_0().child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))).into_any_element(),
+                Some(md) => chat_markdown(md, ix, window, cx),
                 None => wrapping(Label::new(text.clone())).into_any_element(),
             })
             .when(!context.is_empty(), |el| {
@@ -93,14 +124,14 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
             })
             .into_any_element(),
         // The turn's header names the agent; its answer reads as plain text.
-        Entry::Agent(md) => div().child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))).into_any_element(),
+        Entry::Agent(md) => chat_markdown(md, ix, window, cx),
         Entry::Thought(md) => v_flex()
             .px_2()
             .py_1()
             .border_l_2()
             .border_color(colors.border)
             .child(h_flex().gap_1().child(Icon::new(IconName::ToolThink).size(IconSize::Small).color(Color::Muted)).child(Label::new("Thinking").size(LabelSize::Small).color(Color::Muted)))
-            .child(div().opacity(0.7).child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))))
+            .child(div().opacity(0.7).child(chat_markdown(md, ix, window, cx)))
             .into_any_element(),
         Entry::Tool { id, title, kind, status, detail, terminal, diffs, command } => {
             let terminal_view = terminal.as_ref().and_then(|t| thread.terminal_view(t));

@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod search;
 mod turns;
 
 
@@ -1652,6 +1653,11 @@ impl Item for ThreadView {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
         f(*event)
+    }
+
+    /// ⌘F finds in the conversation (see `search`).
+    fn as_searchable(&self, handle: &Entity<Self>, _: &App) -> Option<Box<dyn workspace::searchable::SearchableItemHandle>> {
+        Some(Box::new(handle.clone()))
     }
 }
 
@@ -3536,5 +3542,83 @@ mod tests {
         assert!(workspace.read_with(cx, |ws, cx| ws.active_modal::<crate::thread_picker::ThreadPicker>(cx)).is_none(), "picker closed");
         let active = workspace.read_with(cx, |ws, cx| ws.active_item(cx).and_then(|i| i.downcast::<ThreadView>()).map(|v| v.read(cx).thread.clone())).unwrap();
         assert_eq!(active, first);
+    }
+
+    /// A conversation with a message, an answer with a code block and a thought, on screen.
+    async fn chat_on_screen(cx: &mut TestAppContext) -> (Entity<ThreadView>, VisualTestContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], tool_timeout_seconds: None, default_agent: None, permissions: Default::default() };
+        let (thread, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        cx.update(|_, cx| cx.bind_keys([gpui::KeyBinding::new("ctrl-c", markdown::Copy, Some("Markdown"))]));
+        thread.update_in(&mut cx, |t, _, cx| {
+            let languages = t.languages().clone();
+            let md = |text: &str, cx: &mut gpui::Context<Thread>| cx.new(|cx| markdown::Markdown::new(text.to_string().into(), Some(languages.clone()), None, cx));
+            t.entries.push(Entry::User("where is the needle?".into(), vec![]));
+            let answer = md("the agent found a needle here\n\n```rust\nlet needle = 1;\n```\n", cx);
+            t.entries.push(Entry::Agent(answer));
+            let thought = md("no needle in the haystack", cx);
+            t.entries.push(Entry::Thought(thought));
+            t.entries.push(Entry::Agent(md("done", cx)));
+            t.changed(cx);
+        });
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    /// ⌘F finds in your messages, the answers and the thoughts, in order, and highlights
+    /// the matches in each.
+    #[gpui::test]
+    async fn finds_text_in_the_conversation(cx: &mut TestAppContext) {
+        use workspace::searchable::SearchableItem as _;
+        let (view, mut cx) = chat_on_screen(cx).await;
+        let cx = &mut cx;
+        let query = std::sync::Arc::new(project::search::SearchQuery::text("needle", false, false, false, Default::default(), Default::default(), false, None).unwrap());
+        let matches = view.update_in(cx, |v, window, cx| v.find_matches(query, window, cx)).await;
+        let entries: Vec<usize> = matches.iter().map(|m| m.entry).collect();
+        assert_eq!(entries, [0, 1, 1, 2], "the message, the answer and its code, the thought");
+
+        view.update_in(cx, |v, window, cx| {
+            v.update_matches(&matches, Some(1), Default::default(), window, cx);
+            v.activate_match(3, &matches, Default::default(), window, cx);
+        });
+        let answer = view.read_with(cx, |v, cx| match &v.thread.read(cx).entries[1] {
+            Entry::Agent(md) => md.clone(),
+            _ => unreachable!(),
+        });
+        assert_eq!(answer.read_with(cx, |md, _| md.search_highlights().len()), 2);
+        let thought = view.read_with(cx, |v, cx| match &v.thread.read(cx).entries[2] {
+            Entry::Thought(md) => md.clone(),
+            _ => unreachable!(),
+        });
+        assert_eq!(thought.read_with(cx, |md, _| md.active_search_highlight()), Some(0), "the active match is the thought's");
+        assert_eq!(answer.read_with(cx, |md, _| md.active_search_highlight()), None);
+        let next = view.update_in(cx, |v, window, cx| v.active_match_index(workspace::searchable::Direction::Next, &matches, Default::default(), window, cx));
+        assert_eq!(next, Some(3));
+
+        view.update_in(cx, |v, window, cx| v.clear_matches(window, cx));
+        assert!(answer.read_with(cx, |md, _| md.search_highlights().is_empty()));
+    }
+
+    /// Text in an answer selects with the mouse and copies with ctrl-c; a code block's
+    /// button copies the code.
+    #[gpui::test]
+    async fn copies_selected_text_and_code_blocks(cx: &mut TestAppContext) {
+        let (_view, mut cx) = chat_on_screen(cx).await;
+        let cx = &mut cx;
+        let bounds = cx.debug_bounds("chat-markdown-1").expect("the answer on screen");
+        let y = bounds.top() + px(8.);
+        cx.simulate_mouse_down(point(bounds.left() + px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_keystrokes("ctrl-c");
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(copied.as_deref(), Some("the agent found a needle here"));
+
+        let source = "the agent found a needle here\n\n```rust\nlet needle = 1;\n```\n";
+        let buttons = (0..=source.len()).find_map(|end| cx.debug_bounds(Box::leak(format!("markdown_code_block_buttons_{end}").into_boxed_str()))).expect("the code block's copy button, without hovering");
+        cx.simulate_click(buttons.center(), gpui::Modifiers::none());
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(copied.as_deref().map(str::trim_end), Some("let needle = 1;"));
     }
 }

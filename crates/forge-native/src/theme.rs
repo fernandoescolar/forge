@@ -17,6 +17,7 @@ use util::ResultExt as _;
 
 /// Palettes shipped with Forge, written to the palettes dir on first run.
 pub const BUILTIN_PALETTES: &[(&str, &str)] = &[
+    ("dark-modern.json", include_str!("../assets/palettes/dark-modern.json")),
     ("dracula.json", include_str!("../assets/palettes/dracula.json")),
     ("forge-dark.json", include_str!("../assets/palettes/forge-dark.json")),
     ("forge-light.json", include_str!("../assets/palettes/forge-light.json")),

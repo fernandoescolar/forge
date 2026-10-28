@@ -11,13 +11,12 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px};
-use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
 use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize, Label, LabelCommon as _, LabelSize, h_flex, v_flex};
 
 use super::ThreadView;
 use crate::diff::DiffView;
-use crate::entry_ui::{render_diff, render_entry, render_permission_answer};
+use crate::entry_ui::{chat_markdown, render_diff, render_entry, render_permission_answer};
 use crate::thread::{Entry, Status};
 
 /// What a tool call card shows folded and unfolded.
@@ -203,7 +202,7 @@ impl ThreadView {
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
             )
             .when(open, |el| {
-                el.child(div().ml_4().mt_1().pl_2().border_l_2().border_color(colors.border_variant).opacity(0.8).child(MarkdownElement::new(md.clone(), MarkdownStyle::themed(MarkdownFont::Agent, window, cx))))
+                el.child(div().ml_4().mt_1().pl_2().border_l_2().border_color(colors.border_variant).opacity(0.8).child(chat_markdown(&md, ix, window, cx)))
             })
             .into_any_element()
     }
