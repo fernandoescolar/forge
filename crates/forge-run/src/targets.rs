@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use forge_languages::active_build::ActiveBuild;
 use task::TaskTemplate;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// An Aspire app host (a project, or a file-based `apphost.cs`): runs the app's
     /// resources and their dashboard.
@@ -48,7 +48,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunTarget {
     pub kind: Kind,
     pub name: String,

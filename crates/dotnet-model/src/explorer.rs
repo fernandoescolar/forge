@@ -11,7 +11,7 @@ use crate::msbuild::items::{self, ItemOptions, ProjectEntry};
 use crate::paths;
 use crate::solution::{Solution, SolutionFolder, SolutionProject};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NodeKind {
     Solution,
     SolutionFolder { id: String },
@@ -69,7 +69,7 @@ impl NodeKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     /// Stable across rebuilds, for selection and expansion state.
     pub id: String,
@@ -81,7 +81,7 @@ pub struct Node {
     pub expanded_by_default: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TreeOptions {
     pub items: ItemOptions,
     /// Nest `appsettings.Development.json` under `appsettings.json`, `Index.cshtml.cs`

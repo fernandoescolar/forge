@@ -399,7 +399,7 @@ impl DapLocator for DotnetRunLocator {
         // the path would go to Forge's own stdout and `output()` would read nothing.
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let tool = if file_based { "dotnet build" } else { "dotnet msbuild" };
-        let output = forge_ui::process::spawn_unblocked(command).with_context(|| format!("failed to run `{tool}`"))?.output().await.with_context(|| format!("`{tool}` failed"))?;
+        let output = forge_process::spawn_unblocked(move || command.spawn()).with_context(|| format!("failed to run `{tool}`"))?.output().await.with_context(|| format!("`{tool}` failed"))?;
         anyhow::ensure!(output.status.success(), "`{tool} -getProperty:TargetPath` failed: {}", String::from_utf8_lossy(&output.stdout));
         let program = target_path(&String::from_utf8_lossy(&output.stdout)).context("MSBuild reported no TargetPath")?;
         let cwd = project.as_deref().and_then(Path::parent).map(Path::to_path_buf).or(build_config.cwd.clone());

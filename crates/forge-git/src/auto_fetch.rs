@@ -15,6 +15,10 @@ const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, cx| {
+        // It runs this machine's `git fetch`, and a remote project's repositories are on its host.
+        if forge_ui::is_remote(workspace.project().read(cx)) {
+            return;
+        }
         let project = workspace.project().downgrade();
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(FIRST).await;

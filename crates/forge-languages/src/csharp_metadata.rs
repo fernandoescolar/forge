@@ -20,19 +20,12 @@ use lsp::LanguageServer;
 use project::Project;
 use serde::{Deserialize, Serialize};
 
+use crate::is_roslyn_metadata_path;
+
 const METADATA_ROOT: &str = "/$metadata$/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-pub fn is_metadata_path(path: &str) -> bool {
-    path.contains("$metadata$/") || path.contains("%24metadata%24/")
-}
-
-/// A source Roslyn decompiled (or took from a symbol server) for an assembly.
-pub fn is_roslyn_metadata_path(path: &str) -> bool {
-    path.contains("/MetadataAsSource/") || path.contains("\\MetadataAsSource\\")
-}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|editor: &mut Editor, _, cx| {
@@ -163,6 +156,7 @@ pub(crate) fn omnisharp_servers(project: &Entity<Project>, cx: &App) -> Vec<Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::is_metadata_path;
 
     #[test]
     fn parses_omnisharp_metadata_paths() {

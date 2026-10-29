@@ -752,7 +752,8 @@ fn set_text(view: &Entity<Editor>, text: String, json: bool, cx: &mut App) {
 fn select_environment(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let dir = active_http_file(workspace, cx)
         .and_then(|(file, _, _)| file.parent().map(Path::to_path_buf))
-        .or_else(|| workspace.visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf()));
+        // Environments files are read from this machine's disk: a remote project's root is on its host.
+        .or_else(|| (!forge_ui::is_remote(workspace.project().read(cx))).then(|| workspace.visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf())).flatten());
     let envs = dir.map(|d| Environments::find(&d)).unwrap_or_default();
     if envs.names.is_empty() {
         return toast(workspace, format!("No {ENV_FILE} with environments next to this file or above it."), cx);

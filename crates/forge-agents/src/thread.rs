@@ -781,6 +781,12 @@ impl Thread {
     }
 
     pub fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Agents run here, on this machine's files and with its tools: in a remote project
+        // they would read and write the wrong disk.
+        if self.project.upgrade().is_some_and(|project| forge_ui::is_remote(project.read(cx))) {
+            self.system(forge_ui::not_on_remote("Agents"), Color::Warning);
+            return self.changed(cx);
+        }
         if self.ended {
             self.system("This thread's worktree was removed; start a new thread.", Color::Warning);
             return self.changed(cx);

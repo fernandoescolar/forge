@@ -129,6 +129,10 @@ pub fn init(cx: &mut App) {
                 open_config_file(ws, &paths::config_dir().join("agents.json"), "{ \"agents\": [] }\n", window, cx)
             })
             .register_action(|ws, _: &OpenProjectInstructions, window, cx| {
+                // The file would be created on this machine's disk, under the host's path.
+                if forge_ui::is_remote(ws.project().read(cx)) {
+                    return forge_ui::show_not_on_remote(ws, "Project instructions", cx);
+                }
                 let Some(root) = ws.visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf()) else { return };
                 let file = forge_agents::rules::project_file(&root, &forge_agents::rules::configured_files(cx));
                 open_config_file(ws, &file, INSTRUCTIONS_TEMPLATE, window, cx)
@@ -333,6 +337,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Open…", workspace::Open::default()),
             MenuItem::action("Open Recent…", zed_actions::OpenRecent::default()),
+            MenuItem::action("Open Remote…", zed_actions::OpenRemote::default()),
             MenuItem::action("Add Folder to Project…", workspace::AddFolderToProject),
             MenuItem::separator(),
             MenuItem::action("Save", workspace::Save { save_intent: None }),
@@ -749,6 +754,7 @@ mod tests {
             debugger_ui::init(cx);
             crate::titlebar::init(cx);
             crate::windows::init(cx);
+            crate::remote::init(cx);
         });
         let project = project::Project::test(params.fs.clone(), [], cx).await;
         let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));

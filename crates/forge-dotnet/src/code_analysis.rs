@@ -41,6 +41,10 @@ pub fn init(cx: &mut App) {
 
 /// Opens the view, or shows the one already open.
 pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut gpui::Context<Workspace>) {
+    // It reads and writes `.editorconfig` on this machine's disk.
+    if forge_ui::is_remote(workspace.project().read(cx)) {
+        return forge_ui::show_not_on_remote(workspace, "Code analysis", cx);
+    }
     let existing = workspace.items_of_type::<CodeAnalysis>(cx).next();
     if let Some(existing) = existing {
         workspace.activate_item(&existing, true, true, window, cx);

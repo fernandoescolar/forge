@@ -27,6 +27,9 @@ forge-update = { path = "../forge-update" }
 forge-output = { path = "../forge-output" }
 forge-git = { path = "../forge-git" }
 forge-dotnet = { path = "../forge-dotnet" }
+forge-remote-server = { path = "../forge-remote-server", default-features = false }
+recent_projects = { path = "../../vendor/zed/crates/recent_projects", default-features = false }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection" }
 git = { path = "../../vendor/zed/crates/git" }
 git_ui = { path = "../../vendor/zed/crates/git_ui" }
 platform_title_bar = { path = "../../vendor/zed/crates/platform_title_bar" }
@@ -43,6 +46,8 @@ forge-extension-host = { path = "../forge-extension-host" }
 anyhow.workspace = true
 uuid.workspace = true
 url.workspace = true
+percent-encoding = "2"
+remote = { path = "../../vendor/zed/crates/remote" }
 assets = { path = "../../vendor/zed/crates/assets" }
 client = { path = "../../vendor/zed/crates/client" }
 command_palette = { path = "../../vendor/zed/crates/command_palette" }
@@ -108,5 +113,7 @@ gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
 language = { path = "../../vendor/zed/crates/language", features = ["test-support"] }
 project = { path = "../../vendor/zed/crates/project", features = ["test-support"] }
 remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
+# Like remote_connection: the test features turn on `remote`'s mock connections, which it matches on.
+recent_projects = { path = "../../vendor/zed/crates/recent_projects", default-features = false, features = ["test-support"] }
 settings = { path = "../../vendor/zed/crates/settings", features = ["test-support"] }
 workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }

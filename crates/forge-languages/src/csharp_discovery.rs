@@ -22,7 +22,7 @@ pub struct DiscoveredTest {
 }
 
 /// One data row of a data-driven test.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DataCase {
     /// Zero-based row of the attribute.
     pub row: u32,

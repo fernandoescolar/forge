@@ -1,0 +1,331 @@
+diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
+--- a/crates/paths/src/paths.rs
++++ b/crates/paths/src/paths.rs
+@@ -65,10 +65,45 @@
+ /// On Windows, this is `%APPDATA%\Zed`.
+ static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+ 
++/// How the remote server is named on remote hosts and in a development checkout.
++/// An application other than Zed that ships its own server sets these with
++/// [`set_remote_server_names`], so that its binaries and Zed's never replace, or clean up,
++/// each other on a shared host.
++#[derive(Clone, Copy, Debug)]
++pub struct RemoteServerNames {
++    /// The directory, relative to the remote home, that holds the server binaries.
++    pub dir: &'static str,
++    /// The start of each binary's name, followed by `-<channel>-<version>`.
++    pub binary_prefix: &'static str,
++    /// The cargo package and binary that development builds compile from source.
++    pub cargo_package: &'static str,
++    pub cargo_binary: &'static str,
++}
++
++static REMOTE_SERVER_NAMES: OnceLock<RemoteServerNames> = OnceLock::new();
++
++/// Sets the names returned by [`remote_server_names`]. Call it before connecting to, or
++/// running as, a remote server. Fails, returning `names`, when they were already set.
++pub fn set_remote_server_names(names: RemoteServerNames) -> Result<(), RemoteServerNames> {
++    REMOTE_SERVER_NAMES.set(names)
++}
++
++pub fn remote_server_names() -> RemoteServerNames {
++    REMOTE_SERVER_NAMES
++        .get()
++        .copied()
++        .unwrap_or(RemoteServerNames {
++            dir: ".zed_server",
++            binary_prefix: "zed-remote-server",
++            cargo_package: "remote_server",
++            cargo_binary: "remote_server",
++        })
++}
++
+ /// Returns the relative path to the zed_server directory on the ssh host.
+ pub fn remote_server_dir_relative() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+-        LazyLock::new(|| RelPath::from_unix_str(".zed_server").unwrap());
++        LazyLock::new(|| RelPath::from_unix_str(remote_server_names().dir).unwrap());
+     *CACHED
+ }
+ 
+diff --git a/crates/remote/src/transport.rs b/crates/remote/src/transport.rs
+--- a/crates/remote/src/transport.rs
++++ b/crates/remote/src/transport.rs
+@@ -466,7 +466,7 @@
+             .args(remote_build_mode.build_command())
+             .args([
+                 "--package",
+-                "remote_server",
++                paths::remote_server_names().cargo_package,
+                 "--features",
+                 "debug-embed",
+                 "--target-dir",
+@@ -484,7 +484,7 @@
+         .join("remote_server")
+         .join(&triple)
+         .join("debug")
+-        .join("remote_server")
++        .join(paths::remote_server_names().cargo_binary)
+         .with_extension(if platform.os.is_windows() { "exe" } else { "" });
+ 
+     let path = if !build_remote_server.contains("nocompress") {
+diff --git a/crates/remote/src/transport/docker.rs b/crates/remote/src/transport/docker.rs
+--- a/crates/remote/src/transport/docker.rs
++++ b/crates/remote/src/transport/docker.rs
+@@ -225,7 +225,8 @@
+             _ => version.to_string(),
+         };
+         let binary_name = format!(
+-            "zed-remote-server-{}-{}",
++            "{}-{}-{}",
++            paths::remote_server_names().binary_prefix,
+             release_channel.dev_name(),
+             version_str
+         );
+diff --git a/crates/remote/src/transport/ssh.rs b/crates/remote/src/transport/ssh.rs
+--- a/crates/remote/src/transport/ssh.rs
++++ b/crates/remote/src/transport/ssh.rs
+@@ -1023,7 +1023,8 @@
+             _ => version.to_string(),
+         };
+         let binary_name = format!(
+-            "zed-remote-server-{}-{}{}",
++            "{}-{}-{}{}",
++            paths::remote_server_names().binary_prefix,
+             release_channel.dev_name(),
+             version_str,
+             if self.ssh_platform.os.is_windows() {
+diff --git a/crates/remote/src/transport/wsl.rs b/crates/remote/src/transport/wsl.rs
+--- a/crates/remote/src/transport/wsl.rs
++++ b/crates/remote/src/transport/wsl.rs
+@@ -225,7 +225,8 @@
+         };
+ 
+         let binary_name = format!(
+-            "zed-remote-server-{}-{}",
++            "{}-{}-{}",
++            paths::remote_server_names().binary_prefix,
+             release_channel.dev_name(),
+             version_str
+         );
+diff --git a/crates/remote_connection/src/remote_connection.rs b/crates/remote_connection/src/remote_connection.rs
+--- a/crates/remote_connection/src/remote_connection.rs
++++ b/crates/remote_connection/src/remote_connection.rs
+@@ -21,6 +21,46 @@
+ use ui_input::{ERASED_EDITOR_FACTORY, ErasedEditor};
+ use workspace::{DismissDecision, ModalView, Workspace};
+ 
++/// Where the remote server's releases come from, for an application that ships its own
++/// server instead of Zed's: see [`set_remote_server_releases`]. Without one, they come from
++/// Zed's [`AutoUpdater`].
++pub trait RemoteServerReleases: Send + Sync {
++    /// A URL the remote host can download the compressed server from, or `None` to have the
++    /// client download it and upload it.
++    fn download_url(
++        &self,
++        platform: RemotePlatform,
++        release_channel: ReleaseChannel,
++        version: Option<Version>,
++        cx: &mut AsyncApp,
++    ) -> Task<Result<Option<String>>>;
++
++    /// Downloads the compressed server to this machine and returns its path.
++    fn download_locally(
++        &self,
++        platform: RemotePlatform,
++        release_channel: ReleaseChannel,
++        version: Option<Version>,
++        set_status: Box<dyn Fn(&str, &mut AsyncApp) + Send>,
++        cx: &mut AsyncApp,
++    ) -> Task<Result<PathBuf>>;
++}
++
++struct GlobalRemoteServerReleases(Arc<dyn RemoteServerReleases>);
++
++impl gpui::Global for GlobalRemoteServerReleases {}
++
++pub fn set_remote_server_releases(releases: Arc<dyn RemoteServerReleases>, cx: &mut App) {
++    cx.set_global(GlobalRemoteServerReleases(releases));
++}
++
++fn remote_server_releases(cx: &mut AsyncApp) -> Option<Arc<dyn RemoteServerReleases>> {
++    cx.update(|cx| {
++        cx.try_global::<GlobalRemoteServerReleases>()
++            .map(|releases| releases.0.clone())
++    })
++}
++
+ pub struct RemoteConnectionPrompt {
+     connection_string: SharedString,
+     nickname: Option<SharedString>,
+@@ -494,6 +534,18 @@
+     ) -> Task<anyhow::Result<PathBuf>> {
+         let this = self.clone();
+         cx.spawn(async move |cx| {
++            if let Some(releases) = remote_server_releases(cx) {
++                let status_delegate = this.clone();
++                return releases
++                    .download_locally(
++                        platform,
++                        release_channel,
++                        version,
++                        Box::new(move |status, cx| status_delegate.set_status(Some(status), cx)),
++                        cx,
++                    )
++                    .await;
++            }
+             AutoUpdater::download_remote_server_release(
+                 release_channel,
+                 version.clone(),
+@@ -525,6 +577,11 @@
+         cx: &mut AsyncApp,
+     ) -> Task<Result<Option<String>>> {
+         cx.spawn(async move |cx| {
++            if let Some(releases) = remote_server_releases(cx) {
++                return releases
++                    .download_url(platform, release_channel, version, cx)
++                    .await;
++            }
+             AutoUpdater::get_remote_server_release_url(
+                 release_channel,
+                 version,
+@@ -660,6 +717,17 @@
+         cx: &mut AsyncApp,
+     ) -> Task<anyhow::Result<PathBuf>> {
+         cx.spawn(async move |cx| {
++            if let Some(releases) = remote_server_releases(cx) {
++                return releases
++                    .download_locally(
++                        platform,
++                        release_channel,
++                        version,
++                        Box::new(|_status, _cx| {}),
++                        cx,
++                    )
++                    .await;
++            }
+             AutoUpdater::download_remote_server_release(
+                 release_channel,
+                 version.clone(),
+@@ -691,6 +759,11 @@
+         cx: &mut AsyncApp,
+     ) -> Task<Result<Option<String>>> {
+         cx.spawn(async move |cx| {
++            if let Some(releases) = remote_server_releases(cx) {
++                return releases
++                    .download_url(platform, release_channel, version, cx)
++                    .await;
++            }
+             AutoUpdater::get_remote_server_release_url(
+                 release_channel,
+                 version,
+diff --git a/crates/remote_server/src/headless_project.rs b/crates/remote_server/src/headless_project.rs
+--- a/crates/remote_server/src/headless_project.rs
++++ b/crates/remote_server/src/headless_project.rs
+@@ -101,6 +101,18 @@
+     completion: oneshot::Sender<Result<()>>,
+ }
+ 
++/// Registers more languages on the server, after Zed's own: see [`set_languages_init`].
++pub type LanguagesInit = fn(Arc<LanguageRegistry>, &mut App);
++
++static LANGUAGES_INIT: std::sync::OnceLock<LanguagesInit> = std::sync::OnceLock::new();
++
++/// Sets a function that registers an application's own languages, language servers and
++/// debug adapters on the server, after Zed's. Call it before [`crate::run`]. Fails, returning
++/// `init`, when one was already set.
++pub fn set_languages_init(init: LanguagesInit) -> Result<(), LanguagesInit> {
++    LANGUAGES_INIT.set(init)
++}
++
+ impl HeadlessProject {
+     pub fn init(cx: &mut App) {
+         settings::init(cx);
+@@ -122,6 +134,9 @@
+     ) -> Self {
+         debug_adapter_extension::init(proxy.clone(), cx);
+         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
++        if let Some(init) = LANGUAGES_INIT.get() {
++            init(languages.clone(), cx);
++        }
+ 
+         let worktree_store = cx.new(|cx| {
+             let mut store = WorktreeStore::local(true, fs.clone(), WorktreeIdCounter::get(cx));
+diff --git a/crates/remote_server/src/server.rs b/crates/remote_server/src/server.rs
+--- a/crates/remote_server/src/server.rs
++++ b/crates/remote_server/src/server.rs
+@@ -3,7 +3,7 @@
+ #[cfg(test)]
+ mod remote_editing_tests;
+ 
+-pub use headless_project::{HeadlessAppState, HeadlessProject};
++pub use headless_project::{HeadlessAppState, HeadlessProject, LanguagesInit, set_languages_init};
+ 
+ use anyhow::{Context as _, Result, anyhow};
+ use clap::Subcommand;
+@@ -119,7 +119,7 @@
+             let release_channel = *RELEASE_CHANNEL;
+             match release_channel {
+                 ReleaseChannel::Stable | ReleaseChannel::Preview => {
+-                    println!("{}", env!("ZED_PKG_VERSION"))
++                    println!("{}", package_version())
+                 }
+                 ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+                     let commit_sha =
+@@ -137,8 +137,24 @@
+     }
+ }
+ 
++static PACKAGE_VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
++
++/// Sets the version the server reports and names its binaries with, in place of Zed's, for
++/// an application that builds its own server around this crate. Call it before [`run`].
++/// Fails, returning `version`, when it was already set.
++pub fn set_package_version(version: &'static str) -> Result<(), &'static str> {
++    PACKAGE_VERSION.set(version)
++}
++
++fn package_version() -> &'static str {
++    PACKAGE_VERSION
++        .get()
++        .copied()
++        .unwrap_or(env!("ZED_PKG_VERSION"))
++}
++
+ pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
+-    ReleaseChannel::Stable | ReleaseChannel::Preview => env!("ZED_PKG_VERSION").to_owned(),
++    ReleaseChannel::Stable | ReleaseChannel::Preview => package_version().to_owned(),
+     ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+         let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-zed-commit-sha");
+         let build_identifier = option_env!("ZED_BUILD_ID");
+@@ -752,7 +768,7 @@
+         settings::init(cx);
+         let app_commit_sha = option_env!("ZED_COMMIT_SHA").map(|s| AppCommitSha::new(s.to_owned()));
+         let app_version = AppVersion::load(
+-            env!("ZED_PKG_VERSION"),
++            package_version(),
+             option_env!("ZED_BUILD_ID"),
+             app_commit_sha,
+         );
+@@ -1429,7 +1445,11 @@
+ fn cleanup_old_binaries() -> Result<()> {
+     let server_dir = paths::remote_server_dir_relative();
+     let release_channel = release_channel::RELEASE_CHANNEL.dev_name();
+-    let prefix = format!("zed-remote-server-{}-", release_channel);
++    let prefix = format!(
++        "{}-{}-",
++        paths::remote_server_names().binary_prefix,
++        release_channel
++    );
+ 
+     for entry in std::fs::read_dir(server_dir.as_std_path())? {
+         let path = entry?.path();
+@@ -1459,7 +1479,7 @@
+ fn is_new_version(version: &str) -> bool {
+     semver::Version::from_str(version)
+         .ok()
+-        .zip(semver::Version::from_str(env!("ZED_PKG_VERSION")).ok())
++        .zip(semver::Version::from_str(package_version()).ok())
+         .is_some_and(|(version, current_version)| version >= current_version)
+ }
+ 

@@ -94,6 +94,9 @@ impl SolutionExplorer {
 
     /// Opens the project's `secrets.json`, setting up user secrets first if needed.
     pub(super) fn manage_user_secrets(&mut self, _: &ManageUserSecrets, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(project) = self.selected_project(cx) else { return };
         let Some(root) = user_secrets_root() else { return };
         let existing = user_secrets_id(&project);
@@ -127,6 +130,9 @@ impl SolutionExplorer {
     /// The selected C# project's usings, every file's, into its global usings file; the
     /// changes open in a tab to review and save.
     pub(super) fn move_usings_to_global_usings(&mut self, _: &MoveUsingsToGlobalUsings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(project) = self.selected_project(cx).filter(|p| !p.is_fsharp()) else { return };
         let Some(workspace) = self.workspace.upgrade() else { return };
         let dir = project.dir().to_path_buf();
@@ -205,6 +211,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn add_migration(&mut self, _: &AddMigration, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(workspace) = self.workspace.upgrade() else { return };
         let explorer = cx.entity().downgrade();
         workspace.update(cx, |ws, cx| {
@@ -218,14 +227,23 @@ impl SolutionExplorer {
     }
 
     pub(super) fn remove_migration(&mut self, _: &RemoveMigration, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.run_ef(EfCommand::RemoveMigration, None, window, cx);
     }
 
     pub(super) fn list_migrations(&mut self, _: &ListMigrations, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.run_ef(EfCommand::ListMigrations, None, window, cx);
     }
 
     pub(super) fn update_database(&mut self, _: &UpdateDatabase, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.run_ef(EfCommand::UpdateDatabase, None, window, cx);
     }
 }

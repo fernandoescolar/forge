@@ -14,6 +14,12 @@ futures.workspace = true
 gpui = { path = "../../vendor/zed/crates/gpui" }
 http_client = { path = "../../vendor/zed/crates/http_client" }
 log = "0.4"
+paths = { path = "../../vendor/zed/crates/paths" }
+release_channel = { path = "../../vendor/zed/crates/release_channel" }
+remote = { path = "../../vendor/zed/crates/remote" }
+remote_connection = { path = "../../vendor/zed/crates/remote_connection" }
+semver = "1"
+smol = "2"
 serde_json.workspace = true
 sha2 = "0.10"
 ring = "0.17"
@@ -29,6 +35,8 @@ settings = { path = "../../vendor/zed/crates/settings", features = ["test-suppor
 theme = { path = "../../vendor/zed/crates/theme" }
 theme_settings = { path = "../../vendor/zed/crates/theme_settings" }
 workspace = { path = "../../vendor/zed/crates/workspace", features = ["test-support"] }
+# The test features turn on `remote`'s mock connections, which remote_connection matches on too.
+remote_connection = { path = "../../vendor/zed/crates/remote_connection", features = ["test-support"] }
 serde_json.workspace = true
 # Embeds Zed's assets (default settings) instead of looking for them in a Zed checkout.
 util = { path = "../../vendor/zed/crates/util", features = ["debug-embed"] }

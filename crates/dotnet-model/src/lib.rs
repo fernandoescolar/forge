@@ -8,6 +8,7 @@ pub mod cli;
 pub mod decompiler;
 pub mod editorconfig;
 pub mod explorer;
+pub mod load;
 pub mod msbuild;
 pub mod nuget;
 pub mod paths;

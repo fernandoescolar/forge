@@ -650,6 +650,18 @@ impl SolutionExplorer {
         window.focus(&editor.focus_handle(cx), cx);
     }
 
+    /// Whether the project is remote, saying so: what changes a project from here (files,
+    /// references, packages, EF, decompiling) reads and writes this machine's disk or runs
+    /// its tools, and a remote project's are on its host. Loading, browsing, opening and the
+    /// `dotnet` commands (tasks, which run on the host) work.
+    pub(crate) fn not_on_remote(&self, cx: &mut Context<Self>) -> bool {
+        let remote = forge_ui::is_remote(self.model.read(cx).workspace_project().read(cx));
+        if remote && let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| forge_ui::show_not_on_remote(workspace, "Changing projects from the Solution Explorer", cx));
+        }
+        remote
+    }
+
     fn confirm_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.edit.take() else { return };
         let name = edit.editor.read(cx).text(cx).trim().to_string();

@@ -7,6 +7,7 @@ publish = false
 description = ".NET in Forge: solution explorer, NuGet package manager and project file editing"
 
 [dependencies]
+forge-host = { path = "../forge-host" }
 anyhow.workspace = true
 base64 = "0.22"
 collections = { path = "../../vendor/zed/crates/collections" }

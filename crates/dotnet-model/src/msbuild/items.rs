@@ -27,7 +27,7 @@ pub struct ProjectEntry {
     pub missing: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ItemOptions {
     /// Folder names never shown (`bin`, `obj`, …), compared case-insensitively.
     pub ignored: Vec<String>,

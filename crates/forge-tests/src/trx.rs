@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
     Passed,
     Skipped,
@@ -13,7 +13,7 @@ pub enum Outcome {
 }
 
 /// One execution of a test: a `[Fact]`, or one data row of a `[Theory]`, on one framework.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CaseResult {
     /// `Namespace.Class.Method`, shared by every row of a theory.
     pub method_fqn: String,

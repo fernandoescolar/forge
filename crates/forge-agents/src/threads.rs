@@ -181,6 +181,10 @@ fn toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>
 
 /// Creates a git worktree for a new thread with the default agent, then shows the thread.
 pub fn new_thread_in_worktree(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // The worktree would be made with this machine's git, under a path on the host.
+    if forge_ui::is_remote(workspace.project().read(cx)) {
+        return forge_ui::show_not_on_remote(workspace, "Agents", cx);
+    }
     let Some(root) = first_root(workspace, cx) else { return toast(workspace, "Open a project first.".into(), cx) };
     let create = cx.background_spawn(async move { crate::worktree::create(&root) });
     cx.spawn_in(window, async move |workspace, cx| {

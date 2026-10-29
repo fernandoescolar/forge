@@ -111,8 +111,14 @@ impl GitHub {
         this
     }
 
+    /// Where `gh` runs. None in a remote project: `gh` runs on this machine, and the
+    /// project's folder is on the host.
     fn root(&self, cx: &App) -> Option<PathBuf> {
-        self.project.read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf())
+        let project = self.project.read(cx);
+        if forge_ui::is_remote(project) {
+            return None;
+        }
+        project.visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf())
     }
 
     /// The project's shell environment, for running `gh`.

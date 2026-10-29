@@ -447,9 +447,16 @@ impl ExtensionHost {
 
     fn call(&mut self, method: String, args: Value, id: u64, cx: &mut Context<Self>) {
         let needs_workspace = ["workspace.", "editor.", "terminal.", "tabs.", "window."].iter().any(|p| method.starts_with(p));
-        if needs_workspace && self.workspace().is_none() {
-            self.deferred.push((method, args, id));
-            return;
+        if needs_workspace {
+            let Some(workspace) = self.workspace() else {
+                self.deferred.push((method, args, id));
+                return;
+            };
+            // Extensions read files and run processes on this machine, and a remote project's
+            // files are on its host.
+            if forge_ui::is_remote(workspace.read(cx).project().read(cx)) {
+                return self.reply(id, Err(anyhow::anyhow!(forge_ui::not_on_remote("Extensions"))));
+            }
         }
         let str_arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
         match method.as_str() {

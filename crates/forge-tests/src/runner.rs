@@ -13,7 +13,7 @@ use crate::discovery::{Kind, TestProject};
 use crate::trx::{self, CaseResult};
 
 /// What to run within one test project.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     Project,
     /// `Namespace.Class`
@@ -44,6 +44,7 @@ impl Scope {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RunOutput {
     pub results: Vec<CaseResult>,
     /// Everything `dotnet test` printed, for build errors and test output.
@@ -54,7 +55,7 @@ pub struct RunOutput {
 }
 
 /// How to run .NET tests.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunOptions {
     /// The configuration and framework (the title bar's).
     pub build: ActiveBuild,

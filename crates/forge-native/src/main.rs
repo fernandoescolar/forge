@@ -22,6 +22,7 @@ mod single_instance;
 mod debug_console;
 mod open_editors;
 mod prompts;
+mod remote;
 mod problems;
 mod statusbar;
 mod theme;
@@ -88,8 +89,10 @@ fn main() {
     adopt_usual_places();
 
     // Keep Forge's settings, database and caches apart from an installed Zed.
-    let data_dir = forge_data_dir();
+    let data_dir = forge_remote_server::data_dir();
     paths::set_custom_data_dir(&data_dir.to_string_lossy());
+    // Forge's own server on remote hosts, apart from Zed's.
+    forge_remote_server::use_forge_names();
 
     let paths = startup_paths(std::env::args().skip(1));
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
@@ -210,6 +213,7 @@ fn main() {
         forge_toolchain::init(cx);
         forge_github::init(cx);
         forge_update::init(cx);
+        remote::init(cx);
         forge_output::init(cx);
         forge_git::init(cx);
         forge_dotnet::init(cx);
@@ -250,8 +254,7 @@ fn main() {
             cx.spawn(async move |cx| {
                 let restored = restore_last_session(&app_state, cx).await;
                 if !paths.is_empty() {
-                    let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), own_window(), cx));
-                    open.await.context("failed to open the initial window").log_err();
+                    open_startup_paths(paths, app_state.clone(), cx).await.context("failed to open the initial window").log_err();
                 } else if !restored {
                     let open = cx.update(|cx| {
                         workspace::open_new(OpenOptions::default(), app_state.clone(), cx, |ws, window, cx| welcome::show(ws, window, cx))
@@ -269,13 +272,32 @@ fn main() {
                     cx.update(|cx| cx.activate(true));
                     continue;
                 }
-                let open = cx.update(|cx| workspace::open_paths(&paths, app_state.clone(), own_window(), cx));
-                open.await.with_context(|| format!("failed to open {paths:?}")).log_err();
+                open_startup_paths(paths.clone(), app_state.clone(), cx).await.with_context(|| format!("failed to open {paths:?}")).log_err();
             }
         })
         .detach();
         cx.activate(true);
     });
+}
+
+/// Opens what Forge was started with, or what another `forge` passed on: local folders and
+/// files in a window of their own, `ssh://` addresses on their hosts (see `remote`).
+async fn open_startup_paths(paths: Vec<PathBuf>, app_state: Arc<AppState>, cx: &mut gpui::AsyncApp) -> anyhow::Result<()> {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for path in paths {
+        match remote::ssh_target(&path) {
+            Some(target) => remote.push(target?),
+            None => local.push(path),
+        }
+    }
+    if !local.is_empty() {
+        cx.update(|cx| workspace::open_paths(&local, app_state.clone(), own_window(), cx)).await?;
+    }
+    if !remote.is_empty() {
+        remote::open_ssh_targets(remote, app_state, cx).await?;
+    }
+    Ok(())
 }
 
 /// Opening folders or files from outside (the command line, the Dock, Open With): in a window
@@ -335,23 +357,7 @@ async fn restore_last_session(app_state: &Arc<AppState>, cx: &mut gpui::AsyncApp
 /// of the last session; `forge .` opens the current directory. macOS may add a `-psn_…`
 /// argument to GUI launches; it is ignored.
 fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
-    args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).map(|p| p.canonicalize().unwrap_or(p)).collect()
-}
-
-/// Where Forge keeps its settings, database and caches: `~/Library/Application Support/Forge`
-/// on macOS, `%LOCALAPPDATA%\Forge` on Windows, `$XDG_DATA_HOME/forge` (`~/.local/share/forge`)
-/// on Linux.
-fn forge_data_dir() -> PathBuf {
-    let home = std::env::home_dir().unwrap_or_default();
-    if cfg!(target_os = "macos") {
-        return home.join("Library/Application Support/Forge");
-    }
-    if cfg!(windows) {
-        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local"));
-        return local.join("Forge");
-    }
-    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
-    data_home.join("forge")
+    args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).map(|p| if remote::ssh_target(&p).is_some() { p } else { p.canonicalize().unwrap_or(p) }).collect()
 }
 
 fn semver(v: &str) -> semver::Version {

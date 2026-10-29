@@ -6,29 +6,37 @@ license.workspace = true
 publish = false
 description = "Test explorer panel for Forge (.NET via dotnet test)"
 
+[features]
+default = ["ui"]
+# The Tests panel, the gutter and the agents' tools. The remote server runs discovery and
+# test runs (`host.rs`) without them.
+ui = ["dep:editor", "dep:language", "dep:settings", "dep:theme", "dep:ui", "dep:workspace", "dep:db", "dep:dap", "dep:util", "dep:project", "dep:forge-ui", "forge-languages/ui"]
+
 [dependencies]
 forge-process = { path = "../forge-process" }
 anyhow.workspace = true
-db = { path = "../../vendor/zed/crates/db" }
-editor = { path = "../../vendor/zed/crates/editor" }
-forge-languages = { path = "../forge-languages" }
-forge-ui = { path = "../forge-ui" }
+db = { path = "../../vendor/zed/crates/db", optional = true }
+editor = { path = "../../vendor/zed/crates/editor", optional = true }
+forge-languages = { path = "../forge-languages", default-features = false }
+forge-host = { path = "../forge-host" }
+serde.workspace = true
+forge-ui = { path = "../forge-ui", optional = true }
 gpui = { path = "../../vendor/zed/crates/gpui" }
-language = { path = "../../vendor/zed/crates/language" }
+language = { path = "../../vendor/zed/crates/language", optional = true }
 log = "0.4"
-project = { path = "../../vendor/zed/crates/project" }
+project = { path = "../../vendor/zed/crates/project", optional = true }
 regex = "1.5"
 roxmltree = "0.20"
 serde_json.workspace = true
-settings = { path = "../../vendor/zed/crates/settings" }
+settings = { path = "../../vendor/zed/crates/settings", optional = true }
 smol = "2.0"
 task = { path = "../../vendor/zed/crates/task" }
-dap = { path = "../../vendor/zed/crates/dap" }
+dap = { path = "../../vendor/zed/crates/dap", optional = true }
 tempfile.workspace = true
-theme = { path = "../../vendor/zed/crates/theme" }
-ui = { path = "../../vendor/zed/crates/ui" }
-util = { path = "../../vendor/zed/crates/util" }
-workspace = { path = "../../vendor/zed/crates/workspace" }
+theme = { path = "../../vendor/zed/crates/theme", optional = true }
+ui = { path = "../../vendor/zed/crates/ui", optional = true }
+util = { path = "../../vendor/zed/crates/util", optional = true }
+workspace = { path = "../../vendor/zed/crates/workspace", optional = true }
 
 [dev-dependencies]
 editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }

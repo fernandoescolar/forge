@@ -9,7 +9,7 @@ use crate::paths;
 use crate::sln::{self, SlnEditor, SlnFile};
 use crate::slnx::{self, SlnxEditor, SlnxFile};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SolutionFormat {
     Sln,
     Slnx,
@@ -17,7 +17,7 @@ pub enum SolutionFormat {
     Folder,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProjectKind {
     /// A regular MSBuild project.
     Default,
@@ -27,7 +27,7 @@ pub enum ProjectKind {
     NoReferences,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SolutionProject {
     /// The guid in a `.sln`, the relative path in a `.slnx`.
     pub id: String,
@@ -36,7 +36,7 @@ pub struct SolutionProject {
     pub kind: ProjectKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SolutionFolder {
     /// The guid in a `.sln`, the full name (`/a/b/`) in a `.slnx`.
     pub id: String,
@@ -47,7 +47,7 @@ pub struct SolutionFolder {
     pub files: Vec<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Solution {
     pub path: PathBuf,
     pub format: SolutionFormat,

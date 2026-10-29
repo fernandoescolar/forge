@@ -1,0 +1,26 @@
+[package]
+name = "forge-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Runs Forge's own work (discovery, test runs, .NET loads) on the machine a remote project lives on"
+
+[lib]
+path = "src/forge_host.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+gpui = { path = "../../vendor/zed/crates/gpui" }
+log = "0.4"
+paths = { path = "../../vendor/zed/crates/paths" }
+project = { path = "../../vendor/zed/crates/project" }
+release_channel = { path = "../../vendor/zed/crates/release_channel" }
+remote = { path = "../../vendor/zed/crates/remote" }
+serde.workspace = true
+serde_json.workspace = true
+smol = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

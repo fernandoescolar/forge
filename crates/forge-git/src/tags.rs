@@ -46,6 +46,10 @@ pub fn init(cx: &mut App) {
 
 /// Opens the dialog to tag `sha` (HEAD when `None`) in `repo`.
 pub fn open(workspace: &mut Workspace, repo: Entity<Repository>, sha: Option<Oid>, window: &mut Window, cx: &mut Context<Workspace>) {
+    // The dialog runs this machine's `git`, and a remote project's repository is on its host.
+    if forge_ui::is_remote(workspace.project().read(cx)) {
+        return forge_ui::show_not_on_remote(workspace, "Creating tags", cx);
+    }
     let weak = workspace.weak_handle();
     workspace.toggle_modal(window, cx, |window, cx| CreateTagModal::new(weak, repo, sha, window, cx));
 }

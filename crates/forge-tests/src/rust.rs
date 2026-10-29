@@ -294,6 +294,8 @@ static RESULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^test (\S+) \.\.\
 /// A test's outcome as libtest prints it while the run goes on (`test a::b ... ok`): what
 /// libtest calls the test, and how it ended. The full results come from [`parse`] at the
 /// end, which knows each test's target.
+// Only the Tests panel shows live results.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
 pub fn live_result(line: &str) -> Option<(&str, Outcome)> {
     let captures = RESULT.captures(line)?;
     let outcome = match captures.get(2)?.as_str() {
@@ -305,6 +307,8 @@ pub fn live_result(line: &str) -> Option<(&str, Outcome)> {
 }
 
 /// What libtest calls the test with id `id` (`package|target|path` → `path`).
+// Only the Tests panel shows live results.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
 pub fn libtest_name(id: &str) -> Option<&str> {
     split_id(id).map(|(_, path)| path)
 }

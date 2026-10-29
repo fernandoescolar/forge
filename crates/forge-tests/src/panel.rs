@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use editor::Editor;
 use forge_languages::active_build::ActiveBuild;
 use gpui::TaskExt as _;
@@ -20,6 +21,7 @@ use gpui::{
 };
 use project::Project;
 use regex::Regex;
+use util::ResultExt as _;
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, Disableable as _, Icon, IconButton, IconName,
@@ -296,15 +298,17 @@ impl TestPanel {
         let saved = db::kvp::KeyValueStore::global(cx).read_kvp(&key).ok().flatten().map(PathBuf::from);
         self.discovery_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            let Ok(listed) = cx.update(|_, cx| discovery::worktree_files(&project, cx)) else { return };
+            let Ok((listed, host)) = cx.update(|_, cx| (discovery::worktree_files(&project, cx), forge_host::Host::of(&project, cx))) else { return };
             let listed = listed.await;
-            let (projects, settings_files) = cx
-                .background_spawn(async move {
-                    let settings = listed.iter().flat_map(|(_, files)| files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("runsettings"))).cloned()).collect::<Vec<_>>();
-                    let projects = listed.into_iter().flat_map(|(root, files)| discovery::discover_in(&root, files)).collect::<Vec<_>>();
-                    (projects, settings)
-                })
-                .await;
+            let settings_files = listed.iter().flat_map(|(_, files)| files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("runsettings"))).cloned()).collect::<Vec<_>>();
+            // A remote project's files are on its host: discovery reads them there.
+            let projects = match host {
+                Some(host) => {
+                    let Ok(call) = cx.update(|_, cx| host.call::<Vec<TestProject>>(crate::host::DISCOVER, &crate::host::DiscoverParams { listed }, None, cx)) else { return };
+                    call.await.context("discovering tests on the host").log_err().unwrap_or_default()
+                }
+                None => cx.background_spawn(async move { listed.into_iter().flat_map(|(root, files)| discovery::discover_in(&root, files)).collect::<Vec<_>>() }).await,
+            };
             this.update(cx, |this, cx| {
                 // The file chosen before, while it is still there.
                 if this.settings.is_none() {
@@ -574,7 +578,23 @@ impl TestPanel {
                     None => Default::default(),
                 };
                 let job_options = options.clone();
-                let output = cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_options).await }).await;
+                let host = this.update(cx, |this, cx| forge_host::Host::of(&this.project, cx)).ok().flatten();
+                let output = match host {
+                    // A remote project's tests run on its host, with its tools.
+                    Some(host) => {
+                        let log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |text| {
+                            if let Ok(mut live) = job_live.lock() {
+                                live.push_str(text);
+                            }
+                        });
+                        let params = crate::host::RunParams { project: project.clone(), scope: scope.clone(), env, options: job_options };
+                        match this.update(cx, |_, cx| host.call::<runner::RunOutput>(crate::host::RUN, &params, Some(log), cx)) {
+                            Ok(call) => call.await,
+                            Err(error) => Err(error),
+                        }
+                    }
+                    None => cx.background_spawn(async move { runner::run(&project, &scope, job_live, &env, &job_options).await }).await,
+                };
                 let keep_going = this
                     .update(cx, |this, cx| {
                         let keep_going = this.finish_job(methods, output, partial, &mut log);

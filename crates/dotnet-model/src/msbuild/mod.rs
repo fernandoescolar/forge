@@ -21,7 +21,7 @@ use crate::paths;
 static PROPERTY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_\-]*)\)").unwrap());
 
 /// MSBuild properties: case-insensitive names, last write wins.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Properties {
     values: HashMap<String, (String, String)>,
 }
@@ -59,7 +59,7 @@ impl Properties {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvalOptions {
     pub configuration: String,
     pub platform: String,
@@ -74,7 +74,7 @@ impl Default for EvalOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ItemOpKind {
     Include,
     Remove,
@@ -82,7 +82,7 @@ pub enum ItemOpKind {
 }
 
 /// An item element, in evaluation order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ItemOp {
     pub kind: ItemOpKind,
     pub item_type: String,
@@ -95,7 +95,7 @@ pub struct ItemOp {
     pub defined_in: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VersionSource {
     /// `Version` on the `PackageReference`.
     Inline,
@@ -108,7 +108,7 @@ pub enum VersionSource {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PackageReference {
     pub name: String,
     pub version: Option<String>,
@@ -119,20 +119,20 @@ pub struct PackageReference {
     pub version_defined_in: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PackageVersion {
     pub name: String,
     pub version: String,
     pub defined_in: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssemblyReference {
     pub name: String,
     pub version: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub path: PathBuf,
     pub sdk: Option<String>,

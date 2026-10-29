@@ -1,0 +1,44 @@
+[package]
+name = "forge-remote-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The server Forge runs on a remote host to open its folders over SSH: Zed's remote server with Forge's languages"
+
+[lib]
+path = "src/forge_remote_server.rs"
+
+[[bin]]
+name = "forge-remote-server"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The server itself. Forge's app only needs the names and folders in the library, so it
+# depends on this crate without it.
+server = ["dep:remote_server", "dep:forge-languages", "dep:askpass", "dep:crashes", "dep:clap", "dep:util", "dep:forge-host", "dep:forge-tests", "dep:forge-run", "dep:dotnet-model"]
+# Zed's development builds compile the remote server with this feature (see
+# `remote::transport::build_remote_server_from_source`): it embeds the default settings and
+# keymaps in debug builds too.
+debug-embed = ["server", "remote_server/debug-embed"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+paths = { path = "../../vendor/zed/crates/paths" }
+askpass = { path = "../../vendor/zed/crates/askpass", optional = true }
+clap = { version = "4.4", features = ["derive"], optional = true }
+crashes = { path = "../../vendor/zed/crates/crashes", optional = true }
+forge-languages = { path = "../forge-languages", default-features = false, optional = true }
+forge-host = { path = "../forge-host", optional = true }
+dotnet-model = { path = "../dotnet-model", optional = true }
+forge-run = { path = "../forge-run", default-features = false, optional = true }
+forge-tests = { path = "../forge-tests", default-features = false, optional = true }
+remote_server = { path = "../../vendor/zed/crates/remote_server", default-features = false, optional = true }
+util = { path = "../../vendor/zed/crates/util", optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

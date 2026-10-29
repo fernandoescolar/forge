@@ -1,0 +1,127 @@
+diff --git a/crates/recent_projects/Cargo.toml b/crates/recent_projects/Cargo.toml
+--- a/crates/recent_projects/Cargo.toml
++++ b/crates/recent_projects/Cargo.toml
+@@ -13,7 +13,9 @@
+ doctest = false
+ 
+ [features]
+-default = []
++default = ["extensions"]
++# Installs the extensions a dev container asks for. Off in builds without Zed's extension store.
++extensions = ["dep:extension_host"]
+ test-support = ["remote/test-support", "remote_connection/test-support", "project/test-support", "workspace/test-support"]
+ 
+ [dependencies]
+@@ -23,7 +25,7 @@
+ db.workspace = true
+ dev_container.workspace = true
+ editor.workspace = true
+-extension_host.workspace = true
++extension_host = { workspace = true, optional = true }
+ fs.workspace = true
+ futures.workspace = true
+ fuzzy_nucleo.workspace = true
+diff --git a/crates/recent_projects/src/remote_servers.rs b/crates/recent_projects/src/remote_servers.rs
+--- a/crates/recent_projects/src/remote_servers.rs
++++ b/crates/recent_projects/src/remote_servers.rs
+@@ -12,6 +12,7 @@
+     start_dev_container_with_config,
+ };
+ use editor::Editor;
++#[cfg(feature = "extensions")]
+ use extension_host::ExtensionStore;
+ use filter::{FilterData, FilteredServer};
+ use futures::{FutureExt, StreamExt as _, channel::oneshot, future::Shared};
+@@ -2275,6 +2276,7 @@
+                         return;
+                     }
+                 };
++            #[cfg(feature = "extensions")]
+             cx.update(|_, cx| {
+                 ExtensionStore::global(cx).update(cx, |this, cx| {
+                     for extension in &dev_container_connection.extension_ids {
+diff --git a/crates/remote_server/Cargo.toml b/crates/remote_server/Cargo.toml
+--- a/crates/remote_server/Cargo.toml
++++ b/crates/remote_server/Cargo.toml
+@@ -17,7 +17,10 @@
+ name = "remote_server"
+ 
+ [features]
+-default = []
++default = ["extensions"]
++# Installs and syncs the client's Zed extensions on the server. Off in builds whose client has
++# no Zed extension store.
++extensions = ["dep:extension_host"]
+ debug-embed = ["dep:rust-embed", "util/debug-embed"]
+ test-support = ["fs/test-support"]
+ 
+@@ -33,7 +36,7 @@
+ debug_adapter_extension.workspace = true
+ env_logger.workspace = true
+ extension.workspace = true
+-extension_host.workspace = true
++extension_host = { workspace = true, optional = true }
+ fs.workspace = true
+ futures.workspace = true
+ git.workspace = true
+diff --git a/crates/remote_server/src/headless_project.rs b/crates/remote_server/src/headless_project.rs
+--- a/crates/remote_server/src/headless_project.rs
++++ b/crates/remote_server/src/headless_project.rs
+@@ -7,6 +7,7 @@
+ use lsp::LanguageServerId;
+ 
+ use extension::ExtensionHostProxy;
++#[cfg(feature = "extensions")]
+ use extension_host::headless_host::HeadlessExtensionStore;
+ use fs::Fs;
+ use futures::{channel::oneshot, stream::StreamExt as _};
+@@ -68,6 +69,7 @@
+     pub settings_observer: Entity<SettingsObserver>,
+     pub next_entry_id: Arc<AtomicUsize>,
+     pub languages: Arc<LanguageRegistry>,
++    #[cfg(feature = "extensions")]
+     pub extensions: Entity<HeadlessExtensionStore>,
+     pub git_store: Entity<GitStore>,
+     pub environment: Entity<ProjectEnvironment>,
+@@ -299,6 +301,7 @@
+         })
+         .detach();
+ 
++        #[cfg(feature = "extensions")]
+         let extensions = HeadlessExtensionStore::new(
+             fs.clone(),
+             http_client.clone(),
+@@ -348,14 +351,17 @@
+         session.add_entity_request_handler(BufferStore::handle_update_buffer);
+         session.add_entity_message_handler(BufferStore::handle_close_buffer);
+ 
+-        session.add_request_handler(
+-            extensions.downgrade(),
+-            HeadlessExtensionStore::handle_sync_extensions,
+-        );
+-        session.add_request_handler(
+-            extensions.downgrade(),
+-            HeadlessExtensionStore::handle_install_extension,
+-        );
++        #[cfg(feature = "extensions")]
++        {
++            session.add_request_handler(
++                extensions.downgrade(),
++                HeadlessExtensionStore::handle_sync_extensions,
++            );
++            session.add_request_handler(
++                extensions.downgrade(),
++                HeadlessExtensionStore::handle_install_extension,
++            );
++        }
+ 
+         session.add_request_handler(cx.weak_entity(), Self::handle_spawn_kernel);
+         session.add_request_handler(cx.weak_entity(), Self::handle_kill_kernel);
+@@ -440,6 +446,7 @@
+             agent_server_store,
+             context_server_store,
+             languages,
++            #[cfg(feature = "extensions")]
+             extensions,
+             git_store,
+             environment,

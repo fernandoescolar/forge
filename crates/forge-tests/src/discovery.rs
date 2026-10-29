@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub use forge_languages::csharp_discovery::DataCase;
 use forge_languages::csharp_discovery::csharp_tests;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestProject {
     pub name: String,
     /// The manifest: `.csproj`, `go.mod`, `Cargo.toml`, `package.json` or a Python project's
@@ -27,7 +27,7 @@ impl TestProject {
 }
 
 /// What runs a project's tests.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Dotnet,
     Go,
@@ -36,7 +36,7 @@ pub enum Kind {
     Python,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeRunner {
     Jest,
     Vitest,
@@ -58,7 +58,7 @@ impl Kind {
 /// `row` of a class with no line of its own (a Go package, a test file).
 pub const NO_ROW: u32 = u32::MAX;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestClass {
     /// `Namespace.Class`.
     pub fqn: String,
@@ -68,7 +68,7 @@ pub struct TestClass {
     pub tests: Vec<TestMethod>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestMethod {
     /// `Namespace.Class.Method`.
     pub fqn: String,
@@ -102,8 +102,9 @@ fn discover_with(listing: Listing) -> Vec<TestProject> {
     projects
 }
 
-/// The files of the project's local worktrees, as Zed indexed them (gitignored ones left
-/// out), by worktree root (`forge_ui::worktree::files`).
+/// The files of the project's worktrees, as Zed indexed them (gitignored ones left out), by
+/// worktree root (`forge_ui::worktree::files`).
+#[cfg(feature = "ui")]
 pub fn worktree_files(project: &gpui::Entity<project::Project>, cx: &gpui::App) -> gpui::Task<Vec<(PathBuf, Vec<PathBuf>)>> {
     forge_ui::worktree::files(project, cx)
 }

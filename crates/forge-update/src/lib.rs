@@ -12,6 +12,8 @@
 //! notification in every window, to restart now: restarting saves (or asks about) unsaved
 //! work and reopens the projects that were open.
 
+pub mod remote_server;
+
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

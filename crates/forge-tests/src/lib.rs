@@ -2,22 +2,29 @@
 //! Rust, Jest, Vitest and pytest), runs them with each one's tool, and shows results per test in
 //! a dock panel.
 
+#[cfg(feature = "ui")]
 pub mod agent_tools;
 pub mod cases;
 pub mod cobertura;
+#[cfg(feature = "ui")]
 pub mod coverage_view;
 pub mod discovery;
 mod go;
+#[cfg(feature = "ui")]
 mod gutter;
+pub mod host;
 mod node;
 pub mod python;
 mod rust;
+#[cfg(feature = "ui")]
 pub mod panel;
 pub mod runner;
 pub mod trx;
 
+#[cfg(feature = "ui")]
 pub use panel::TestPanel;
 
+#[cfg(feature = "ui")]
 pub fn init(cx: &mut gpui::App) {
     panel::init(cx);
     gutter::init(cx);

@@ -49,6 +49,9 @@ Forge keeps its state in `~/Library/Application Support/Forge` (on Linux, `$XDG_
 | `agent-sessions/` | Saved agent conversations, per project |
 | `themes/*.json` | Full Zed theme files, for those who prefer them to palettes |
 | `extensions/` | Installed extensions |
+| `remote_servers/` | Downloaded `forge-remote-server` releases, before they are copied to a host |
+
+On a host Forge opens folders on, its server lives in `~/.forge_server/` and keeps its own state (logs, downloaded language servers) in the same data folder as above, on the host.
 
 A project's own settings, tasks and debug scenarios live in its `.forge/` folder (patch `0006`), together with its instructions for agents (`.forge/AGENTS.md`), customized file templates (`.forge/templates/`) and the worktrees of threads that work in one (`.forge/worktrees/`, which git ignores).
 
@@ -57,6 +60,8 @@ A project's own settings, tasks and debug scenarios live in its `.forge/` folder
 ```text
 crates/
   forge-native/          the app: Zed bootstrap, menus, title and status bars, settings tab, themes
+  forge-remote-server/   the server Forge runs on hosts it opens folders on over SSH (Zed's, with Forge's languages)
+  forge-host/            Forge's own work on a remote project's host: the calls and the server's side of them
   forge-ui/              pieces shared by Forge crates: panel drag & drop, pickers, settings registry
   forge-process/         starting programs: PATH lookup, process groups, unblocked signals, git
   forge-toolchain/       the tools a project needs: checking them, installing the missing ones
@@ -79,7 +84,7 @@ packages/agy-acp/        @forge-ide/agy-acp: an ACP adapter for Google Antigravi
 extensions/              workspace-notes (example), db-explorer and containers (ship with Forge)
 patches/zed/             Forge's changes to Zed, applied by scripts/apply-zed-patches.sh
 patches/tree-sitter-c-sharp/  Forge's change to the C# grammar (file-based apps' `#:` lines)
-scripts/                 patches, packaging (bundle-macos.sh, bundle-linux.sh, bundle-windows.ps1), the installers (install.sh, install.ps1), icon
+scripts/                 patches, packaging (bundle-macos.sh, bundle-linux.sh, bundle-windows.ps1, bundle-remote-server.sh), the installers (install.sh, install.ps1), icon
 tools/                   the mock ACP agent used by tests
 .github/workflows/       CI and releases
 vendor/zed/              Zed, as a git submodule pinned to a release tag
@@ -111,6 +116,14 @@ open dist/Forge.app
 scripts/bundle-linux.sh        # on Linux → dist/forge/ and dist/Forge-<version>-linux-<arch>.tar.gz
 dist/forge/bin/forge
 ```
+
+```bash
+scripts/bundle-remote-server.sh   # on Linux → dist/forge-remote-server-<version>-linux-<arch>.gz
+```
+
+The remote server is its own build (`cargo build -p forge-remote-server`, never together with the app, or it gets the app's features), linked against glibc like the app. Releases publish it next to the tarballs.
+
+**Remote development while developing.** A debug Forge doesn't download the server: on connecting it builds `forge-remote-server` from this checkout and copies it to the host (Zed's `build_remote_server_from_source`). By default that is a static musl build (`rustup target add x86_64-unknown-linux-musl`, and a musl C compiler for the grammars); `ZED_BUILD_REMOTE_SERVER=nomusl` builds it against glibc instead, and `ZED_COPY_REMOTE_SERVER=target/debug/forge-remote-server` copies one you built (`cargo build -p forge-remote-server --features debug-embed`). Debug builds give the server only 5 seconds to start. Logs: the app's, with `RUST_LOG=info,remote=debug`, and the server's in `logs/server-<workspace>.log` of its data folder on the host. The server's Unix sockets live under that folder, so it needs a path short enough for them (about 60 characters). Forge's own calls to the host (`forge-host`) log each one with its time and size (`forge_host` target); `cargo test -p forge-remote-server` runs them against the built server, and a call can be made by hand by sending its parameters as one JSON line to `forge-remote-server forge-host <method>` (stdin must stay open until the answer: closing it cancels the call).
 
 The Linux tarball holds `forge/bin/forge`, the bundled extensions in `forge/share/forge/extensions`, and a `.desktop` file and icon that `install.sh` installs. On Linux only one Forge runs per user: a second `forge` hands its paths to the first over `$XDG_RUNTIME_DIR/forge.sock` (`single_instance.rs`). Development builds use `forge-dev.sock`, so `cargo run` starts its own window next to an installed Forge (they share settings and data).
 

@@ -19,6 +19,7 @@ use project::debugger::session::{OutputToken, Session};
 use task::{SaveStrategy, TaskContext, TaskId};
 use terminal::{TaskStatus, Terminal};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
+use anyhow::Context as _;
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -221,14 +222,18 @@ impl RunController {
         let kvp = KeyValueStore::global(cx);
         self.discovery = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            let listed = cx.update(|cx| forge_tests::discovery::worktree_files(&project, cx)).await;
-            let (targets, saved) = cx
-                .background_spawn(async move {
-                    let targets: Vec<_> = listed.into_iter().flat_map(|(root, files)| targets::discover_in(&root, files)).collect();
-                    let saved = key.and_then(|key| kvp.read_kvp(&key).ok().flatten());
-                    (targets, saved)
-                })
-                .await;
+            let (listed, host) = cx.update(|cx| (forge_tests::discovery::worktree_files(&project, cx), forge_host::Host::of(&project, cx)));
+            let listed = listed.await;
+            // A remote project's manifests are on its host: discovery reads them there.
+            let found = match host {
+                Some(host) => {
+                    let call = cx.update(|cx| host.call::<Vec<RunTarget>>(crate::host::DISCOVER, &crate::host::DiscoverParams { listed }, None, cx));
+                    call.await.context("finding run targets on the host").log_err().unwrap_or_default()
+                }
+                None => cx.background_spawn(async move { listed.into_iter().flat_map(|(root, files)| targets::discover_in(&root, files)).collect() }).await,
+            };
+            let saved = cx.background_spawn(async move { key.and_then(|key| kvp.read_kvp(&key).ok().flatten()) }).await;
+            let targets: Vec<RunTarget> = found;
             this.update(cx, |this, cx| {
                 if this.selected.is_none() {
                     this.selected = saved;
@@ -398,6 +403,13 @@ impl RunController {
             return;
         }
         if target.kind == Kind::Aspire {
+            // The app host would call back an endpoint Forge opens on this machine.
+            if forge_ui::is_remote(self.project.read(cx)) {
+                if let Some(workspace) = self.workspace.upgrade() {
+                    workspace.update(cx, |workspace, cx| forge_ui::show_not_on_remote(workspace, "Debugging Aspire app hosts", cx));
+                }
+                return;
+            }
             return self.debug_aspire(target, window, cx);
         }
         let Some(workspace) = self.workspace.upgrade() else { return };

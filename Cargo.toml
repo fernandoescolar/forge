@@ -5,6 +5,8 @@ members = [
   "crates/jsonrpc",
   "crates/acp-client",
   "crates/forge-native",
+  "crates/forge-remote-server",
+  "crates/forge-host",
   "crates/forge-extension-host",
   "crates/forge-agents",
   "crates/forge-ui",

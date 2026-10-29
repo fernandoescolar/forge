@@ -25,6 +25,25 @@ use workspace::{
     dock::{DockPosition, PanelHandle},
 };
 
+/// Whether the project's folders are on another machine, opened over SSH (File › Open
+/// Remote…). Forge's own features that read the project from this machine's disk or run
+/// tools on it here (agents, the Solution Explorer, `gh`, extensions…) are off for these
+/// until they work through the remote server; Zed's editor, language servers, terminals,
+/// search, Git panel and debugger already do.
+pub fn is_remote(project: &project::Project) -> bool {
+    project.is_via_remote_server()
+}
+
+/// The message for a feature that is off in remote projects (see [`is_remote`]).
+pub fn not_on_remote(feature: &str) -> String {
+    format!("{feature} isn't available yet for folders opened on another machine.")
+}
+
+/// Shows [`not_on_remote`] for `feature` as an error notification.
+pub fn show_not_on_remote(workspace: &mut Workspace, feature: &str, cx: &mut gpui::Context<Workspace>) {
+    workspace.show_error(anyhow::anyhow!(not_on_remote(feature)), cx);
+}
+
 /// Sends `prompt` to the agent panel, connecting the default agent first if needed.
 /// Lives here so any Forge crate can ask the agent without depending on forge-agents.
 #[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]

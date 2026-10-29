@@ -38,6 +38,11 @@ struct MissingTools;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
+        // It checks this machine's tools, and a remote project builds with its host's.
+        if forge_ui::is_remote(workspace.project().read(cx)) {
+            workspace.register_action(|workspace, _: &CheckTools, _, cx| forge_ui::show_not_on_remote(workspace, "Checking tools", cx));
+            return;
+        }
         workspace.register_action(|workspace, _: &CheckTools, window, cx| check_tools(workspace, window, cx));
         if window.is_some() {
             offer_when_missing(workspace, cx);

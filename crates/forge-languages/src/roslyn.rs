@@ -226,7 +226,7 @@ impl LspAdapter for RoslynLspAdapter {
 
     /// Decompiled sources are read outside any project, so they would be full of errors.
     fn process_diagnostics(&self, params: &mut lsp::PublishDiagnosticsParams, _: language::LanguageServerId) {
-        if crate::csharp_metadata::is_roslyn_metadata_path(params.uri.as_str()) {
+        if crate::is_roslyn_metadata_path(params.uri.as_str()) {
             params.diagnostics.clear();
         }
     }

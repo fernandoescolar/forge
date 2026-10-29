@@ -6,14 +6,20 @@ license.workspace = true
 publish = false
 description = "Languages Forge ships built in on top of Zed's: C# with Roslyn or OmniSharp"
 
+[features]
+default = ["ui"]
+# The editor features that go with the languages (C# metadata sources, Fix All, type
+# hierarchy, Roslyn's code actions). The remote server registers the languages without them.
+ui = ["dep:editor", "dep:workspace", "dep:forge-ui"]
+
 [dependencies]
 forge-process = { path = "../forge-process" }
-forge-ui = { path = "../forge-ui" }
+forge-ui = { path = "../forge-ui", optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
 collections = { path = "../../vendor/zed/crates/collections" }
 dap = { path = "../../vendor/zed/crates/dap" }
-editor = { path = "../../vendor/zed/crates/editor" }
+editor = { path = "../../vendor/zed/crates/editor", optional = true }
 futures.workspace = true
 gpui = { path = "../../vendor/zed/crates/gpui" }
 http_client = { path = "../../vendor/zed/crates/http_client" }
@@ -40,7 +46,7 @@ tree-sitter-language = "0.1"
 tree-sitter-make = "1.1"
 tree-sitter-xml = "0.7"
 util = { path = "../../vendor/zed/crates/util" }
-workspace = { path = "../../vendor/zed/crates/workspace" }
+workspace = { path = "../../vendor/zed/crates/workspace", optional = true }
 
 [build-dependencies]
 cc = "1"

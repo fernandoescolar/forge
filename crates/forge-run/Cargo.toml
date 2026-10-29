@@ -6,29 +6,36 @@ license.workspace = true
 publish = false
 description = "Run targets and run/debug/stop controls for Forge"
 
+[features]
+default = ["ui"]
+# The run / debug / stop controls, Aspire and the agents' tools. The remote server runs
+# target discovery (`host.rs`) without them.
+ui = ["dep:forge-ui", "dep:async-net", "dep:async-tungstenite", "dep:dap", "dep:db", "dep:project", "dep:terminal", "dep:terminal_view", "dep:util", "dep:uuid", "dep:workspace", "forge-languages/ui", "forge-tests/ui"]
+
 [dependencies]
-forge-ui = { path = "../forge-ui" }
+forge-ui = { path = "../forge-ui", optional = true }
 anyhow.workspace = true
-async-net = "2"
-async-tungstenite = "0.33"
-dap = { path = "../../vendor/zed/crates/dap" }
-db = { path = "../../vendor/zed/crates/db" }
-forge-languages = { path = "../forge-languages" }
-forge-tests = { path = "../forge-tests" }
+async-net = { version = "2", optional = true }
+async-tungstenite = { version = "0.33", optional = true }
+dap = { path = "../../vendor/zed/crates/dap", optional = true }
+db = { path = "../../vendor/zed/crates/db", optional = true }
+forge-languages = { path = "../forge-languages", default-features = false }
+forge-host = { path = "../forge-host" }
+forge-tests = { path = "../forge-tests", default-features = false }
 futures.workspace = true
 log = "0.4"
 gpui = { path = "../../vendor/zed/crates/gpui" }
-project = { path = "../../vendor/zed/crates/project" }
+project = { path = "../../vendor/zed/crates/project", optional = true }
 serde.workspace = true
 smol = "2"
 serde_json.workspace = true
 task = { path = "../../vendor/zed/crates/task" }
-terminal = { path = "../../vendor/zed/crates/terminal" }
-terminal_view = { path = "../../vendor/zed/crates/terminal_view" }
+terminal = { path = "../../vendor/zed/crates/terminal", optional = true }
+terminal_view = { path = "../../vendor/zed/crates/terminal_view", optional = true }
 toml = "0.8"
-util = { path = "../../vendor/zed/crates/util" }
-uuid.workspace = true
-workspace = { path = "../../vendor/zed/crates/workspace" }
+util = { path = "../../vendor/zed/crates/util", optional = true }
+uuid = { workspace = true, optional = true }
+workspace = { path = "../../vendor/zed/crates/workspace", optional = true }
 
 [dev-dependencies]
 editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }

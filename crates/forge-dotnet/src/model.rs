@@ -14,13 +14,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use db::kvp::KeyValueStore;
-use dotnet_model::explorer::{self, LoadedProjects, Node, ProjectChildren};
+use dotnet_model::explorer::{LoadedProjects, Node, ProjectChildren};
+use dotnet_model::load::{self, LoadOptions, Loaded};
 use dotnet_model::solution::{self, Solution};
 use dotnet_model::{Project as MsBuildProject, paths};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use project::{PathChange, Project};
 
-use crate::config::{self, DotnetConfig};
+use crate::config;
 use crate::language_server_sync::AssetsWatchers;
 use crate::roslyn_session::{ROSLYN, RoslynSession};
 use forge_languages::active_build::ActiveBuild;
@@ -31,6 +32,12 @@ pub enum ModelEvent {
 }
 
 /// What has to be loaded again.
+/// A load to run: here, or on a remote project's host.
+enum Job {
+    Here(Box<dyn FnOnce() -> Loaded + Send>),
+    OnHost(Task<anyhow::Result<Loaded>>),
+}
+
 #[derive(Default, Debug)]
 struct Pending {
     /// Look for solutions and load everything.
@@ -178,11 +185,17 @@ impl DotnetModel {
     }
 
     fn watch_restores(&mut self, cx: &mut Context<Self>) {
+        // It watches this machine's disk; a remote project's restores show up as updated
+        // entries of its worktrees instead.
+        if forge_ui::is_remote(self.project.read(cx)) {
+            return;
+        }
         let roots = self.roots(cx);
         let project = self.project.clone();
         self.assets_watchers.sync(&project, roots, cx);
     }
 
+    /// The project's folders, where solutions are looked for (on its host, for a remote one).
     pub fn roots(&self, cx: &App) -> Vec<PathBuf> {
         self.project.read(cx).visible_worktrees(cx).map(|tree| tree.read(cx).abs_path().to_path_buf()).collect()
     }
@@ -292,7 +305,10 @@ impl DotnetModel {
             // Changes come in bursts; gather them before loading.
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let Ok(job) = this.update(cx, |this, cx| this.take_job(cx)) else { return };
-            let result = cx.background_spawn(async move { job().finish() }).await;
+            let result = match job {
+                Job::Here(job) => cx.background_spawn(async move { job().finish() }).await,
+                Job::OnHost(call) => call.await.unwrap_or_else(|error| Loaded::failed(format!("{error:#}"))),
+            };
             this.update(cx, |this, cx| {
                 this.apply(result, cx);
                 this.load_task = None;
@@ -303,7 +319,7 @@ impl DotnetModel {
         }));
     }
 
-    fn take_job(&mut self, cx: &mut Context<Self>) -> Box<dyn FnOnce() -> LoadResult + Send> {
+    fn take_job(&mut self, cx: &mut Context<Self>) -> Job {
         let pending = std::mem::take(&mut self.pending);
         let mut config = config::get(cx);
         let build = ActiveBuild::get(cx);
@@ -316,18 +332,27 @@ impl DotnetModel {
         let roots = self.roots(cx);
         let chosen = self.chosen.take().or_else(|| self.solution.as_ref().map(|s| s.path.clone()));
         let kvp = KeyValueStore::global(cx);
+        let options = LoadOptions { eval: config.eval_options(), tree: config.tree_options(), solution_search_depth: config.solution_search_depth };
+        // A remote project's files are on its host: the load runs there, and always in full
+        // (what was loaded is here, not there).
+        if let Some(host) = forge_host::Host::of(&self.project, cx) {
+            let saved = kvp.read_kvp(&Self::selection_key(&roots)).ok().flatten().map(PathBuf::from);
+            let params = load::LoadParams { roots, chosen, saved, options };
+            return Job::OnHost(host.call(load::LOAD, &params, None, cx));
+        }
         let current = (self.solution.clone(), self.projects.clone(), self.children.clone());
-        Box::new(move || {
+        Job::Here(Box::new(move || {
             let saved = kvp.read_kvp(&Self::selection_key(&roots)).ok().flatten().map(PathBuf::from);
             if pending.full {
-                load_everything(roots, chosen, saved, &config)
+                load::load_everything(roots, chosen, saved, &options)
             } else {
-                load_some(current, pending, &config)
+                let (solution, previous, children) = current;
+                load::load_some(solution, previous, children, &pending.evaluate, &pending.relist, &options)
             }
-        })
+        }))
     }
 
-    fn apply(&mut self, result: LoadResult, cx: &mut Context<Self>) {
+    fn apply(&mut self, result: Loaded, cx: &mut Context<Self>) {
         if let Some(solutions) = result.solutions {
             self.solutions = solutions;
         }
@@ -382,110 +407,3 @@ impl DotnetModel {
 }
 
 impl EventEmitter<ModelEvent> for DotnetModel {}
-
-struct LoadResult {
-    solutions: Option<Vec<PathBuf>>,
-    solution: Option<Solution>,
-    projects: LoadedProjects,
-    children: ProjectChildren,
-    error: Option<String>,
-    /// Made by `finish`, off the UI thread like the rest.
-    tree: Option<Node>,
-    watched: HashMap<PathBuf, Vec<PathBuf>>,
-}
-
-impl LoadResult {
-    fn new(solutions: Option<Vec<PathBuf>>, solution: Option<Solution>, projects: LoadedProjects, children: ProjectChildren, error: Option<String>) -> Self {
-        Self { solutions, solution, projects, children, error, tree: None, watched: HashMap::new() }
-    }
-
-    /// Builds the explorer's tree and the index of watched files.
-    fn finish(mut self) -> Self {
-        self.tree = self.solution.as_ref().map(|s| explorer::build_with(s, &self.projects, &self.children));
-        for project in self.projects.values().filter_map(|p| p.as_ref().ok()) {
-            for file in project.watched_files().into_iter().chain([project.assets_file()]) {
-                self.watched.entry(file).or_default().push(project.path.clone());
-            }
-        }
-        self
-    }
-}
-
-/// Evaluates projects and lists their files on every core.
-fn evaluate_all(paths: Vec<PathBuf>, config: &DotnetConfig, evaluate: bool, previous: &LoadedProjects) -> Vec<(PathBuf, Result<MsBuildProject, String>, Option<Arc<Vec<Node>>>)> {
-    let options = config.eval_options();
-    let tree_options = config.tree_options();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(paths.len().max(1));
-    let chunks: Vec<Vec<PathBuf>> = (0..threads).map(|t| paths.iter().skip(t).step_by(threads).cloned().collect()).collect();
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| {
-                let (options, tree_options) = (&options, &tree_options);
-                scope.spawn(move || {
-                    chunk
-                        .into_iter()
-                        .map(|path| {
-                            let project = match previous.get(&path) {
-                                Some(existing) if !evaluate => existing.clone(),
-                                _ => dotnet_model::evaluate(&path, options).map_err(|e| format!("{e:#}")),
-                            };
-                            let children = project.as_ref().ok().map(|p| Arc::new(explorer::project_children(p, tree_options)));
-                            (path, project, children)
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
-}
-
-fn load_everything(roots: Vec<PathBuf>, chosen: Option<PathBuf>, saved: Option<PathBuf>, config: &DotnetConfig) -> LoadResult {
-    let solutions: Vec<PathBuf> = roots.iter().flat_map(|root| solution::find_solutions(root, config.solution_search_depth)).collect();
-    let chosen = chosen
-        .filter(|p| p.is_file() && solutions.contains(p))
-        .or_else(|| saved.filter(|p| solutions.contains(p)))
-        .or_else(|| solutions.first().cloned());
-    let loaded = match &chosen {
-        Some(path) => Solution::load(path).map_err(|e| format!("{e:#}")),
-        None => {
-            // No solution: show the projects in the workspace.
-            let root = roots.first().cloned().unwrap_or_default();
-            let projects: Vec<PathBuf> = roots.iter().flat_map(|r| solution::find_projects(r, config.solution_search_depth + 2)).collect();
-            if projects.is_empty() { Err(String::new()) } else { Ok(Solution::from_folder(&root, projects)) }
-        }
-    };
-    let (solution, error) = match loaded {
-        Ok(solution) => (Some(solution), None),
-        Err(e) if e.is_empty() => (None, None),
-        Err(e) => (None, Some(e)),
-    };
-    let mut projects = LoadedProjects::new();
-    let mut children = ProjectChildren::new();
-    if let Some(solution) = &solution {
-        let paths = solution.all_projects().into_iter().map(|p| p.path.clone()).collect();
-        for (path, project, nodes) in evaluate_all(paths, config, true, &LoadedProjects::new()) {
-            if let Some(nodes) = nodes {
-                children.insert(path.clone(), nodes);
-            }
-            projects.insert(path, project);
-        }
-    }
-    LoadResult::new(Some(solutions), solution, projects, children, error)
-}
-
-fn load_some(current: (Option<Arc<Solution>>, Arc<LoadedProjects>, ProjectChildren), pending: Pending, config: &DotnetConfig) -> LoadResult {
-    let (solution, previous, mut children) = current;
-    let mut projects: LoadedProjects = (*previous).clone();
-    let evaluate: Vec<PathBuf> = pending.evaluate.iter().filter(|p| projects.contains_key(*p)).cloned().collect();
-    let relist: Vec<PathBuf> = pending.relist.iter().filter(|p| projects.contains_key(*p) && !pending.evaluate.contains(*p)).cloned().collect();
-    for (path, project, nodes) in evaluate_all(evaluate, config, true, &previous).into_iter().chain(evaluate_all(relist, config, false, &previous)) {
-        match nodes {
-            Some(nodes) => children.insert(path.clone(), nodes),
-            None => children.remove(&path),
-        };
-        projects.insert(path, project);
-    }
-    LoadResult::new(None, solution.map(|s| (*s).clone()), projects, children, None)
-}

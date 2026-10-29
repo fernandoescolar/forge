@@ -120,7 +120,7 @@ impl LspAdapter for OmniSharpLspAdapter {
     /// Sources OmniSharp generates for compiled assemblies are analyzed outside any
     /// project, so every type in them is reported as missing (CS0518 and friends).
     fn process_diagnostics(&self, params: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {
-        if crate::csharp_metadata::is_metadata_path(params.uri.as_str()) {
+        if crate::is_metadata_path(params.uri.as_str()) {
             params.diagnostics.clear();
         }
     }

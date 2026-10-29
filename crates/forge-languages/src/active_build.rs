@@ -9,7 +9,7 @@ use gpui::{App, Global};
 
 /// What to build. `None` leaves it to the project: `Debug`, its platform, and for a
 /// project with several target frameworks, the last one it lists.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveBuild {
     pub configuration: Option<String>,
     /// A solution platform (`Any CPU`, `x64`…).

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 /// How a line was covered.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LineCoverage {
     pub hits: u64,
     /// Branches taken and branches there are, for a line that branches.
@@ -45,7 +45,7 @@ pub enum LineState {
 }
 
 /// Coverage by file, and in each file by line (from 1).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Coverage {
     pub files: HashMap<PathBuf, BTreeMap<u32, LineCoverage>>,
 }

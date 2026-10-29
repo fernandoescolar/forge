@@ -13,14 +13,18 @@ use rust_embed::RustEmbed;
 
 pub mod active_build;
 pub mod csharp_discovery;
+#[cfg(feature = "ui")]
 mod csharp_metadata;
 pub mod csharp_tasks;
 pub mod launch_settings;
 mod netcoredbg;
 mod omnisharp;
+#[cfg(feature = "ui")]
 mod csharp_fix_all;
 mod roslyn;
+#[cfg(feature = "ui")]
 mod roslyn_code_actions;
+#[cfg(feature = "ui")]
 pub mod type_hierarchy;
 
 pub use netcoredbg::target_frameworks;
@@ -30,11 +34,33 @@ pub use netcoredbg::target_frameworks;
 #[exclude = "*.rs"]
 pub(crate) struct LanguageDir;
 
-/// Registers Forge's built-in languages. Call after `languages::init`.
+/// OmniSharp's virtual location for a symbol in a compiled assembly
+/// (`file:///$metadata$/…`): nothing exists at that path.
+pub(crate) fn is_metadata_path(path: &str) -> bool {
+    path.contains("$metadata$/") || path.contains("%24metadata%24/")
+}
+
+/// A source Roslyn decompiled (or took from a symbol server) for an assembly.
+pub(crate) fn is_roslyn_metadata_path(path: &str) -> bool {
+    path.contains("/MetadataAsSource/") || path.contains("\\MetadataAsSource\\")
+}
+
+/// Registers Forge's built-in languages and the editor features that go with them. Call
+/// after `languages::init`.
+#[cfg(feature = "ui")]
 pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
     csharp_metadata::init(cx);
     csharp_fix_all::init(cx);
     type_hierarchy::init(cx);
+    if roslyn::use_roslyn() {
+        roslyn_code_actions::init(cx);
+    }
+    register_languages(languages, cx);
+}
+
+/// Registers Forge's built-in languages, their language servers and debug adapters, without
+/// the editor features: what a remote server, which has no editor, runs.
+pub fn register_languages(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
     cx.update_default_global(|registry: &mut dap::DapRegistry, _| {
         registry.add_adapter(Arc::new(netcoredbg::NetcoredbgAdapter));
         registry.add_locator(Arc::new(netcoredbg::DotnetTestLocator));
@@ -50,9 +76,6 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
         ("helm", HELM),
     ]);
     let use_roslyn = roslyn::use_roslyn();
-    if use_roslyn {
-        roslyn_code_actions::init(cx);
-    }
     let csharp_server: Arc<dyn LspAdapter> = if use_roslyn { Arc::new(roslyn::RoslynLspAdapter) } else { Arc::new(omnisharp::OmniSharpLspAdapter) };
     register(&languages, "csharp", vec![csharp_server], Some(Arc::new(csharp_tasks::CSharpContextProvider)));
     // Project files, .props/.targets and .slnx; package completions and version hints

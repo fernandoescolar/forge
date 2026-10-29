@@ -48,7 +48,12 @@ pub fn open(workspace: &mut Workspace, page: Option<&str>, window: &mut Window, 
         workspace.activate_item(&existing, true, true, window, cx);
         return;
     }
-    let project = workspace.visible_worktrees(cx).next().map(|tree| tree.read(cx).abs_path().to_path_buf());
+    // Project settings are read and written on this machine's disk: none for a remote project.
+    let project = if forge_ui::is_remote(workspace.project().read(cx)) {
+        None
+    } else {
+        workspace.visible_worktrees(cx).next().map(|tree| tree.read(cx).abs_path().to_path_buf())
+    };
     let view = cx.new(|cx| SettingsView::new(workspace.weak_handle(), project, window, cx));
     if let Some(page) = page {
         view.update(cx, |view, cx| view.select_page(page.to_string(), cx));

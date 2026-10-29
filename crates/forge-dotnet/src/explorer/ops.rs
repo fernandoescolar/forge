@@ -122,6 +122,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.new_file_with(None, None, window, cx);
     }
 
@@ -136,12 +139,18 @@ impl SolutionExplorer {
     }
 
     pub(super) fn new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some((dir, project)) = self.target_dir(cx) else { return };
         let Some(row) = self.target_row() else { return };
         self.start_edit(EditKind::NewFolder { dir, project }, row, "", true, window, cx);
     }
 
     pub(super) fn new_solution_folder(&mut self, _: &NewSolutionFolder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         if self.real_solution(cx).is_none() {
             return;
         }
@@ -154,6 +163,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(id) = self.selected.clone() else { return };
         let Some((kind, _)) = self.index.get(&id).cloned() else { return };
         let label = self.lines.iter().find_map(|l| match l {
@@ -340,6 +352,9 @@ impl SolutionExplorer {
 
     /// Removes what is selected; asks first when that deletes files or solution folders.
     pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let kinds = self.selected_kinds();
         let steps: Vec<(Vec<PathBuf>, Step)> = kinds.iter().filter_map(|k| self.removal(k, cx)).collect();
         if steps.is_empty() {
@@ -375,6 +390,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn remove_from_solution(&mut self, _: &RemoveFromSolution, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let steps = self
             .selected_kinds()
             .iter()
@@ -385,6 +403,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn add_solution_item(&mut self, _: &AddSolutionItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(solution) = self.real_solution(cx) else { return };
         let folder = self.target_solution_folder().flatten();
         let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
@@ -448,6 +469,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(clipboard) = self.clipboard.clone() else { return };
         let Some((dir, project)) = self.target_dir(cx) else { return };
         let config = self.config(cx);
@@ -463,6 +487,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn duplicate(&mut self, _: &Duplicate, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(NodeKind::File { path, project, is_link: false, .. } | NodeKind::Folder { path, project, is_link: false }) = self.selected_kind() else { return };
         let config = self.config(cx);
         self.run_job("Duplicating…", vec![project.clone()], window, cx, async move {
@@ -493,6 +520,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn reveal_in_finder(&mut self, _: &RevealInFinder, _: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         if let Some(path) = self.selected_disk_path(cx) {
             cx.reveal_path(&path);
         }
@@ -535,7 +565,9 @@ impl SolutionExplorer {
         let cwd = target.parent().map(Path::to_path_buf).unwrap_or_default();
         // Builds also log their errors and warnings for the Problems panel (when the
         // command is still `dotnet`, which takes MSBuild's arguments).
-        let log = (BUILDS.contains(&command) && args.first().is_some_and(|program| program == "dotnet")).then(build_problems::new_log_path);
+        // Not for a remote project: the log would be written on its host, and read here.
+        let remote = forge_ui::is_remote(self.model.read(cx).workspace_project().read(cx));
+        let log = (!remote && BUILDS.contains(&command) && args.first().is_some_and(|program| program == "dotnet")).then(build_problems::new_log_path);
         if let Some(log) = &log {
             args.extend(build_problems::logger_args(log));
         }
@@ -616,23 +648,35 @@ impl SolutionExplorer {
     }
 
     pub(super) fn manage_packages(&mut self, _: &ManagePackages, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let project = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf));
         let model = self.model.clone();
         pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::nuget_view::open(workspace, model, project, window, cx));
     }
 
     pub(super) fn project_properties(&mut self, _: &ProjectProperties, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
         let model = self.model.clone();
         pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::project_properties::open(workspace, model, project, window, cx));
     }
 
     pub(super) fn explore_assemblies(&mut self, _: &ExploreAssemblies, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(project) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
         pick::defer_workspace(self.workspace.clone(), window, cx, move |workspace, window, cx| crate::assembly_explorer::open(workspace, project, window, cx));
     }
 
     pub(super) fn add_project_reference(&mut self, _: &AddProjectReference, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(project_path) = self.selected_kind().and_then(|k| k.project().map(Path::to_path_buf)) else { return };
         let model = self.model.read(cx);
         let Some(project) = model.project(&project_path).cloned() else { return };
@@ -663,6 +707,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn remove_reference(&mut self, _: &RemoveReference, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let steps = self
             .selected_kinds()
             .iter()
@@ -673,6 +720,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn update_package(&mut self, _: &UpdatePackage, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(NodeKind::Package { project, name, version }) = self.selected_kind() else { return };
         let Some(client) = crate::fetch::client(cx) else { return };
         let config = self.config(cx);
@@ -724,10 +774,16 @@ impl SolutionExplorer {
     }
 
     pub(super) fn move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.move_item(Position::Before, window, cx);
     }
 
     pub(super) fn move_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         self.move_item(Position::After, window, cx);
     }
 
@@ -744,6 +800,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn add_existing_project(&mut self, _: &AddExistingProject, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(solution) = self.real_solution(cx) else { return };
         let parent = self.target_solution_folder().flatten();
         let model = self.model.read(cx);
@@ -808,6 +867,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn new_solution(&mut self, _: &NewSolution, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let model = self.model.read(cx);
         let Some(root) = model.roots(cx).into_iter().next() else {
             self.show_error("Open a folder first.".into(), cx);
@@ -857,6 +919,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn new_project(&mut self, _: &NewProject, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(templates) = self.project_templates.clone() else {
             self.busy = Some("Reading the project templates…".into());
             cx.notify();
@@ -940,6 +1005,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn centralize_packages(&mut self, _: &CentralizePackageVersions, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let model = self.model.read(cx);
         let Some(solution) = model.solution.clone() else { return };
         let projects = model.loaded_projects();
@@ -990,6 +1058,9 @@ impl SolutionExplorer {
     }
 
     pub(super) fn customize_templates(&mut self, _: &CustomizeFileTemplates, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some(root) = self.model.read(cx).roots(cx).into_iter().next() else { return };
         self.run_job("Writing templates…", Vec::new(), window, cx, async move {
             let dir = templates::install(&root)?;
@@ -1000,6 +1071,9 @@ impl SolutionExplorer {
     /// Drops dragged nodes on another: moves files and folders (copies them between
     /// projects), re-parents solution folders, projects and solution items.
     pub(super) fn drop_on(&mut self, dragged: DraggedNode, target_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.not_on_remote(cx) {
+            return;
+        }
         let Some((target, _)) = self.index.get(target_id).cloned() else { return };
         let steps: Vec<(Vec<PathBuf>, Step)> = dragged.nodes.iter().filter(|(id, _)| id != target_id).filter_map(|(_, kind)| self.drop_step(kind, &target, cx)).collect();
         let copies = steps.len() > 0
