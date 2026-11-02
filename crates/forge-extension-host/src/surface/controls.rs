@@ -116,8 +116,8 @@ impl Surface {
         let description = node.str_prop("description").map(str::to_string);
         let on_toggle = dispatch("onToggle", Value::Null);
         let (on_click, on_double_click) = (dispatch("onClick", Value::Null), dispatch("onDoubleClick", Value::Null));
-        let _ = cx;
-        ListItem::new(eid)
+        let drag_label = SharedString::from(label.clone());
+        let item = ListItem::new(eid)
             .indent_level(depth)
             .indent_step_size(px(12.))
             .spacing(ui::ListItemSpacing::Dense)
@@ -138,10 +138,57 @@ impl Surface {
                     .child(Label::new(label).truncate())
                     .when_some(description, |row, d| row.child(Label::new(d).size(LabelSize::Small).color(Color::Muted).truncate())),
             )
-            .on_click(move |event: &ClickEvent, _, cx| if event.click_count() >= 2 { on_double_click(cx) } else { on_click(cx) })
-            .into_any_element()
+            .on_click(move |event: &ClickEvent, _, cx| if event.click_count() >= 2 { on_double_click(cx) } else { on_click(cx) });
+        let row = div().id(gpui::ElementId::NamedInteger(SharedString::from(format!("forge-{}-row", self.panel)), id as u64));
+        self.drag_and_drop(row, node, id, drag_label, cx).child(item).into_any_element()
+    }
+
+    /// Makes `el` draggable when the node has `dragData`, and a drop target when it has
+    /// `onDrop` (called with the dragged node's `dragData`). Items move only within one surface.
+    pub(super) fn drag_and_drop(&self, el: Stateful<Div>, node: &Node, id: NodeId, label: SharedString, cx: &Context<Self>) -> Stateful<Div> {
+        let panel = self.panel.clone();
+        let el = match node.str_prop("dragData") {
+            Some(data) => el.on_drag(DraggedTreeItem { panel: panel.clone(), data: data.to_string(), label }, |dragged, _, _, cx| {
+                cx.new(|_| DraggedTreeItemView { label: dragged.label.clone() })
+            }),
+            None => el,
+        };
+        if !node.has_event("onDrop") {
+            return el;
+        }
+        let drop_background = cx.theme().colors().drop_target_background;
+        let (over_panel, can_panel, host) = (panel.clone(), panel, self.host.clone());
+        el.drag_over::<DraggedTreeItem>(move |style, dragged, _, _| if dragged.panel == over_panel { style.bg(drop_background) } else { style })
+            .can_drop(move |dragged, _, _| dragged.downcast_ref::<DraggedTreeItem>().is_some_and(|d| d.panel == can_panel))
+            .on_drop(move |dragged: &DraggedTreeItem, _, cx| host.read(cx).dispatch(id, "onDrop", json!(dragged.data)))
     }
 
     // ------------------------------------------------------------------------------------
     // Data grid
+}
+
+/// A tree item being dragged: its `dragData`, for the surface it came from.
+#[derive(Clone)]
+pub(super) struct DraggedTreeItem {
+    panel: String,
+    data: String,
+    label: SharedString,
+}
+
+struct DraggedTreeItemView {
+    label: SharedString,
+}
+
+impl Render for DraggedTreeItemView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .bg(colors.elevated_surface_background)
+            .border_1()
+            .border_color(colors.border_focused)
+            .child(Label::new(self.label.clone()).size(LabelSize::Small))
+    }
 }

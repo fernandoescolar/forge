@@ -57,7 +57,7 @@ const urlHost = (url: string) => url.replace(/^(mongodb(\+srv)?|rediss?):\/\//, 
 
 type Mode = 'host' | 'url' | 'sentinel';
 
-export function ConnectionForm({ id, message, onDone }: { id: string | null; message?: string; onDone: () => void }) {
+export function ConnectionForm({ id, message, folderId, onDone }: { id: string | null; message?: string; folderId?: string | null; onDone: () => void }) {
   const [form, setForm] = useState<Form>(blank);
   const [status, setStatus] = useState<{ kind: 'idle' | 'busy' | 'ok' | 'error'; text?: string }>(message ? { kind: 'error', text: message } : { kind: 'idle' });
 
@@ -130,6 +130,7 @@ export function ConnectionForm({ id, message, onDone }: { id: string | null; mes
     masterName: withSentinel ? form.masterName.trim() || 'mymaster' : undefined,
     hasPassword: !sqlite && !withUrl && !!form.password ? true : undefined,
     savePassword: form.savePassword,
+    folderId: (id ? store.connection(id)?.folderId : folderId) ?? undefined,
   });
 
   const badPort = !!form.port.trim() && !/^\d+$/.test(form.port.trim());

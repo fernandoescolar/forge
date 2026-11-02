@@ -202,6 +202,104 @@ async fn database_explorer_end_to_end(cx: &mut gpui::TestAppContext) {
     ui.text(&failing, "no such table");
 }
 
+/// Folders of connections: made from the header and a folder's menu, named in place, and
+/// connections and folders dragged into them and back out to the top.
+#[gpui::test]
+async fn database_explorer_folders(cx: &mut gpui::TestAppContext) {
+    let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extensions/db-explorer");
+    if !extension.join("dist/extension.js").is_file() || !crate::process::sidecar_path(&extension, "forge-sql").is_file() {
+        eprintln!("skipping: build extensions/db-explorer and its sidecar first");
+        return;
+    }
+    cx.executor().allow_parking();
+    let params = cx.update(workspace::AppState::test);
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        editor::init(cx);
+        crate::init_for_tests(cx);
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let database = tmp.path().join("shop.sqlite");
+    std::fs::write(&database, b"").unwrap();
+    let host = cx.update(|cx| ExtensionHost::init(vec![extension.clone()], cx)).unwrap();
+    params.fs.as_fake().insert_tree("/root", json!({})).await;
+    let project = project::Project::test(params.fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let weak = workspace.downgrade();
+    cx.update(|window, cx| host.update(cx, |h, cx| h.set_workspace(weak, window.window_handle(), cx)));
+    let mut ui = Ui { host: host.clone(), cx };
+    let panel = "db-explorer";
+
+    let add = ui.by_label(panel, "button", "Add Connection…");
+    ui.send(add, "onClick", Value::Null);
+    let form = ui.tab("db-explorer.connection:new");
+    let engine = ui.find(&form, "select", "the engine select", |_| true);
+    ui.send(engine, "onChange", json!("sqlite"));
+    let file = ui.find(&form, "input", "the file input", |p| p.get("placeholder").and_then(Value::as_str) == Some("/path/to/database.sqlite"));
+    ui.send(file, "onChange", json!(database.to_string_lossy()));
+    let save = ui.by_label(&form, "button", "Save and Connect");
+    ui.send(save, "onClick", Value::Null);
+    let connection = ui.find(panel, "treeItem", "the connection", |p| p.get("dragData").and_then(Value::as_str).is_some_and(|d| d.starts_with("connection:")));
+    let depth = |ui: &mut Ui, node: NodeId| ui.prop(panel, node, "depth").as_u64().unwrap_or(0);
+    assert_eq!(depth(&mut ui, connection), 0);
+
+    // "New Folder" in the header makes one and asks for its name in place.
+    let new_folder = ui.find(panel, "button", "New Folder", |p| p.get("tooltip").and_then(Value::as_str) == Some("New Folder"));
+    ui.send(new_folder, "onClick", Value::Null);
+    let input = ui.find(panel, "input", "the folder name", |p| p.get("value") == Some(&json!("New Folder")));
+    ui.send(input, "onChange", json!("Production"));
+    ui.send(input, "onSubmit", json!("Production"));
+    let production = ui.by_label(panel, "treeItem", "Production");
+    assert!(ui.prop(panel, production, "dragData").as_str().is_some_and(|d| d.starts_with("folder:")), "folders can be dragged");
+
+    // A folder in it, from its menu.
+    ui.send(production, "onContextMenu", json!({ "id": "new-folder" }));
+    let input = ui.find(panel, "input", "the subfolder name", |p| p.get("value") == Some(&json!("New Folder")));
+    ui.send(input, "onSubmit", json!("Europe"));
+    let europe = ui.by_label(panel, "treeItem", "Europe");
+    assert_eq!(depth(&mut ui, europe), 1, "Europe is inside Production");
+
+    // Drag the connection onto Europe: it moves in, under it.
+    let data = ui.prop(panel, connection, "dragData");
+    ui.send(europe, "onDrop", data.clone());
+    ui.wait("the connection inside Europe", |h| {
+        let tree = h.trees.get(panel)?;
+        let node = collect(tree, |n| n.str_prop("dragData") == data.as_str()).into_iter().next()?;
+        (tree.get(node)?.prop("depth")? == &json!(2)).then_some(())
+    });
+
+    // Dropped on empty space below the rows, it goes back to the top.
+    let scroll = ui.find(panel, "scroll", "the tree", |_| true);
+    ui.send(scroll, "onDrop", data.clone());
+    ui.wait("the connection back at the top", |h| {
+        let tree = h.trees.get(panel)?;
+        let node = collect(tree, |n| n.str_prop("dragData") == data.as_str()).into_iter().next()?;
+        (tree.get(node)?.prop("depth")? == &json!(0)).then_some(())
+    });
+
+    // A folder can't go into a folder inside it; it can go to the top.
+    let production_data = ui.prop(panel, production, "dragData");
+    let europe = ui.by_label(panel, "treeItem", "Europe");
+    ui.send(europe, "onDrop", production_data.clone());
+    assert_eq!(depth(&mut ui, europe), 1, "Production didn't move into Europe");
+    let europe_data = ui.prop(panel, europe, "dragData");
+    ui.send(scroll, "onDrop", europe_data);
+    ui.wait("Europe at the top", |h| {
+        let tree = h.trees.get(panel)?;
+        let node = collect(tree, |n| n.str_prop("label") == Some("Europe")).into_iter().next()?;
+        (tree.get(node)?.prop("depth")? == &json!(0)).then_some(())
+    });
+
+    // Renamed from its menu.
+    let production = ui.by_label(panel, "treeItem", "Production");
+    ui.send(production, "onContextMenu", json!({ "id": "rename-folder" }));
+    let input = ui.find(panel, "input", "the rename input", |p| p.get("value") == Some(&json!("Production")));
+    ui.send(input, "onSubmit", json!("Prod"));
+    ui.by_label(panel, "treeItem", "Prod");
+}
+
 /// MongoDB through the same UI: a connection by host and port, a database and its
 /// collection in the tree, its documents in a table, and one edited whole, one inserted and
 /// one deleted. Needs a server: FORGE_SQL_TEST_MONGO='{"host":"127.0.0.1","port":27099}'

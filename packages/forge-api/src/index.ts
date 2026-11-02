@@ -65,7 +65,13 @@ type Base = {
 
 // ---------------------------------------------------------------- host components
 
-export type ViewProps = Base & { onClick?: () => void; tooltip?: string; hidden?: boolean };
+export type ViewProps = Base & {
+  onClick?: () => void;
+  tooltip?: string;
+  hidden?: boolean;
+  /** Takes tree items dropped on it (from this panel or tab), with their `dragData`. */
+  onDrop?: (dragData: string) => void;
+};
 export type TextProps = Base & { selectable?: boolean };
 export type ButtonProps = Base & {
   label?: string;
@@ -124,6 +130,10 @@ export type TreeItemProps = Base & {
   onToggle?: () => void;
   onClick?: () => void;
   onDoubleClick?: () => void;
+  /** Makes the row draggable; this is what a drop target's `onDrop` gets. */
+  dragData?: string;
+  /** Takes tree items dropped on it (from this panel or tab), with their `dragData`. */
+  onDrop?: (dragData: string) => void;
 };
 
 /** A cell value; `null` shows as NULL. */

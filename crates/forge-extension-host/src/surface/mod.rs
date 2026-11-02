@@ -5,7 +5,8 @@
 //! `button`, `input` (single line, multi-line, password), `checkbox`, `icon`, `divider`,
 //! `spinner`, `select`, `treeItem`, `grid` (a virtualized data table with resizable
 //! columns, selection and cell editing), `markdown`, `image` and `chart` (chart.rs). Any
-//! element can carry a `contextMenu`.
+//! element can carry a `contextMenu`; tree items can be dragged (`dragData`) onto tree items
+//! and views that take them (`onDrop`).
 
 use crate::{
     host::ExtensionHost,
@@ -15,7 +16,7 @@ use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions,
-    anchored, deferred, div, prelude::FluentBuilder as _, px,
+    anchored, deferred, div, Div, Stateful, prelude::FluentBuilder as _, px,
 };
 use serde_json::{Value, json};
 use std::{
@@ -269,7 +270,7 @@ impl Surface {
             "chart" => self.render_chart(node, id, eid, &style, cx),
             // "view", "scroll" and anything unknown render as a flex container.
             _ => {
-                let mut el = styled(div().id(eid), &style, cx).children(children());
+                let mut el = self.drag_and_drop(styled(div().id(eid), &style, cx), node, id, SharedString::default(), cx).children(children());
                 if kind == "scroll" {
                     el = el.overflow_y_scroll();
                 }

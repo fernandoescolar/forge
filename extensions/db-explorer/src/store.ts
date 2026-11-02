@@ -1,5 +1,5 @@
-// Saved connections (their passwords in the keychain), whether each is connected, and the
-// explorer tree: what is expanded and the children loaded so far. A Redis database's keys
+// Saved connections (their passwords in the keychain) and the folders they are sorted into,
+// whether each is connected, and the explorer tree: what is expanded and the children loaded so far. A Redis database's keys
 // are found with SCAN a batch at a time (by a pattern) and shown as a tree split at `:`.
 import { useSyncExternalStore } from 'react';
 import { forge } from '@forge-ide/api';
@@ -31,7 +31,12 @@ export type ConnectionConfig = {
   hasPassword?: boolean;
   /** Keep the password in the keychain (else it is asked for on connect). */
   savePassword: boolean;
+  /** The folder it is in (at the top when unset). */
+  folderId?: string;
 };
+
+/** A folder of connections; folders nest (`parentId`). */
+export type Folder = { id: string; name: string; parentId: string | null };
 
 export type ConnectionState =
   | { status: 'disconnected' }
@@ -40,7 +45,7 @@ export type ConnectionState =
   | { status: 'error'; message: string };
 
 /** Redis adds `namespace` (keys sharing a prefix up to a `:`), `key`, and `more` (load the next batch). */
-export type NodeKind = 'connection' | 'database' | 'schema' | 'group' | 'object' | 'namespace' | 'key' | 'more';
+export type NodeKind = 'folder' | 'connection' | 'database' | 'schema' | 'group' | 'object' | 'namespace' | 'key' | 'more';
 export type TreeNode = {
   key: string;
   kind: NodeKind;
@@ -55,6 +60,8 @@ export type TreeNode = {
   /** Redis: the key a `key` node is, the prefix a `namespace` node groups (`user:1:`). */
   redisKey?: RedisKey;
   prefix?: string;
+  /** A `folder` node's folder. */
+  folderId?: string;
 };
 
 type Children = TreeNode[] | 'loading' | { error: string };
@@ -84,6 +91,9 @@ const listeners = new Set<() => void>();
 
 const state = {
   connections: [] as ConnectionConfig[],
+  folders: [] as Folder[],
+  /** The folder whose name is being typed (a new one, or renamed). */
+  renaming: null as string | null,
   status: new Map<string, ConnectionState>(),
   expanded: new Set<string>(),
   children: new Map<string, Children>(),
@@ -115,6 +125,8 @@ export function useStore() {
 export async function init(context: ExtensionContext) {
   ctx = context;
   state.connections = (await ctx.storage.get<ConnectionConfig[]>('connections')) ?? [];
+  state.folders = (await ctx.storage.get<Folder[]>('folders')) ?? [];
+  for (const id of (await ctx.storage.get<string[]>('openFolders')) ?? []) state.expanded.add(folderKey(id));
   onSidecarExit(() => {
     for (const id of state.status.keys()) state.status.set(id, { status: 'disconnected' });
     state.children.clear();
@@ -124,6 +136,12 @@ export async function init(context: ExtensionContext) {
 }
 
 const save = () => ctx.storage.set('connections', state.connections);
+const saveFolders = () => ctx.storage.set('folders', state.folders);
+const saveOpenFolders = () =>
+  ctx.storage.set(
+    'openFolders',
+    state.folders.filter((f) => state.expanded.has(folderKey(f.id))).map((f) => f.id),
+  );
 
 export const connection = (id: string) => state.connections.find((c) => c.id === id);
 export const connections = () => state.connections;
@@ -153,6 +171,93 @@ export async function deleteConnection(id: string) {
   await ctx.secrets.delete(`sentinel:${id}`);
   state.passwords.delete(id);
   await save();
+  changed();
+}
+
+// ------------------------------------------------------------------------------ folders
+
+const folderKey = (id: string) => `folder:${id}`;
+export const folder = (id: string) => state.folders.find((f) => f.id === id);
+const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
+
+/** Makes a folder in `parentId` (the top when null), opens it, and asks for its name. */
+export async function createFolder(parentId: string | null) {
+  const created: Folder = { id: `f${newId().slice(1)}`, name: 'New Folder', parentId };
+  state.folders.push(created);
+  state.folders.sort(byName);
+  if (parentId) state.expanded.add(folderKey(parentId));
+  state.selected = folderKey(created.id);
+  state.renaming = created.id;
+  await saveFolders();
+  await saveOpenFolders();
+  changed();
+}
+
+export function startRenaming(id: string | null) {
+  state.renaming = id;
+  changed();
+}
+
+export async function renameFolder(id: string, name: string) {
+  const target = folder(id);
+  state.renaming = null;
+  if (target && name.trim()) {
+    target.name = name.trim();
+    state.folders.sort(byName);
+    await saveFolders();
+  }
+  changed();
+}
+
+/** Deletes a folder; what it holds (connections and folders) moves to the folder it was in. */
+export async function deleteFolder(id: string) {
+  const target = folder(id);
+  if (!target) return;
+  for (const c of state.connections) if (c.folderId === id) c.folderId = target.parentId ?? undefined;
+  for (const f of state.folders) if (f.parentId === id) f.parentId = target.parentId;
+  state.folders = state.folders.filter((f) => f.id !== id);
+  state.expanded.delete(folderKey(id));
+  await save();
+  await saveFolders();
+  await saveOpenFolders();
+  changed();
+}
+
+/** Whether folder `id` is `ancestor` or inside it. */
+function isWithin(id: string | null, ancestor: string): boolean {
+  for (let f = id ? folder(id) : undefined; f; f = f.parentId ? folder(f.parentId) : undefined) if (f.id === ancestor) return true;
+  return false;
+}
+
+/** The value a tree item is dragged with: `connection:<id>` or `folder:<id>`. */
+export const dragData = (node: TreeNode) => (node.kind === 'folder' ? folderKey(node.folderId!) : node.kind === 'connection' ? `connection:${node.connectionId}` : undefined);
+
+/** The folder something dropped on `node` goes into: the folder itself, else the folder its connection is in. */
+export const dropFolder = (node: TreeNode): string | null => (node.kind === 'folder' ? node.folderId! : connection(node.connectionId)?.folderId ?? null);
+
+/** The folder of the node selected in the tree (where a new connection or folder goes). */
+export function selectedFolder(): string | null {
+  const node = visibleRows().find((r) => r.node.key === state.selected)?.node;
+  return node ? dropFolder(node) : null;
+}
+
+/** Moves a dragged connection or folder (`dragData`) into folder `folderId` (the top when null). */
+export async function moveTo(data: string, folderId: string | null) {
+  const [kind, id] = [data.slice(0, data.indexOf(':')), data.slice(data.indexOf(':') + 1)];
+  if (kind === 'connection') {
+    const config = connection(id);
+    if (!config || (config.folderId ?? null) === folderId) return;
+    config.folderId = folderId ?? undefined;
+    await save();
+  } else if (kind === 'folder') {
+    const moved = folder(id);
+    // Not into itself or a folder inside it.
+    if (!moved || moved.parentId === folderId || isWithin(folderId, id)) return;
+    moved.parentId = folderId;
+    await saveFolders();
+  } else return;
+  if (folderId) state.expanded.add(folderKey(folderId));
+  await saveOpenFolders();
   changed();
 }
 
@@ -225,10 +330,17 @@ export async function disconnect(id: string) {
 
 export function select(key: string | null) {
   state.selected = key;
+  if (state.renaming && key !== folderKey(state.renaming)) state.renaming = null;
   changed();
 }
 
 export async function toggle(node: TreeNode) {
+  if (node.kind === 'folder') {
+    if (!state.expanded.delete(node.key)) state.expanded.add(node.key);
+    changed();
+    await saveOpenFolders();
+    return;
+  }
   if (state.expanded.has(node.key)) {
     state.expanded.delete(node.key);
     changed();
@@ -241,6 +353,7 @@ export async function toggle(node: TreeNode) {
 }
 
 export async function refresh(node: TreeNode) {
+  if (node.kind === 'folder') return;
   for (const key of [...state.children.keys()]) if (key === node.key || key.startsWith(`${node.key}/`)) state.children.delete(key);
   // Redis: refreshing a database (or anything above) scans its keys again.
   for (const key of [...state.redisKeys.keys()]) if (key === node.key || key.startsWith(`${node.key}/`)) state.redisKeys.delete(key);
@@ -502,9 +615,19 @@ export function visibleRows(): VisibleRow[] {
     rows.push({ node, depth, children });
     if (state.expanded.has(node.key) && Array.isArray(children)) children.forEach((c) => walk(c, depth + 1));
   };
-  for (const c of state.connections) {
-    walk({ key: c.id, kind: 'connection', label: c.name, connectionId: c.id, database: null, schema: null }, 0);
-  }
+  // Folders (and the folders in them) first, then connections, each by name.
+  const walkFolder = (parentId: string | null, depth: number) => {
+    for (const f of state.folders.filter((f) => f.parentId === parentId)) {
+      const node: TreeNode = { key: folderKey(f.id), kind: 'folder', label: f.name, connectionId: '', database: null, schema: null, folderId: f.id };
+      const count = state.connections.filter((c) => c.folderId === f.id).length + state.folders.filter((x) => x.parentId === f.id).length;
+      rows.push({ node: { ...node, description: count ? String(count) : undefined }, depth, children: [] });
+      if (state.expanded.has(node.key)) walkFolder(f.id, depth + 1);
+    }
+    for (const c of state.connections.filter((c) => (c.folderId && folder(c.folderId) ? c.folderId : null) === parentId)) {
+      walk({ key: c.id, kind: 'connection', label: c.name, connectionId: c.id, database: null, schema: null }, depth);
+    }
+  };
+  walkFolder(null, 0);
   return rows;
 }
 
@@ -513,7 +636,7 @@ export const isExpanded = (key: string) => state.expanded.has(key);
 /** Where a new query runs: the node selected in the tree, else the first connection. */
 export function currentTarget(): { connectionId: string; database: string | null } | null {
   const node = visibleRows().find((r) => r.node.key === state.selected)?.node;
-  if (node) return { connectionId: node.connectionId, database: node.database };
+  if (node && node.kind !== 'folder') return { connectionId: node.connectionId, database: node.database };
   const first = state.connections[0];
   return first ? { connectionId: first.id, database: null } : null;
 }

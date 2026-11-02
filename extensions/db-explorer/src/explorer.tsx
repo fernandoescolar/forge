@@ -1,4 +1,5 @@
-// The Databases panel: saved connections and, inside them, databases, schemas, tables and
+// The Databases panel: saved connections, sorted into folders (and folders in folders) you
+// drag them between, and, inside them, databases, schemas, tables and
 // views (MongoDB: databases and collections; Redis: databases and their keys, split at `:`
 // into namespaces, filtered by a pattern). Double-click a table, view, collection or key to
 // open it; right-click anything for more.
@@ -10,13 +11,13 @@ import type { TreeNode, VisibleRow } from './store';
 import { openConnectionForm, openConsole, openKey, openNewKey, openQuery, openTable, redisKeyIcon } from './tabs';
 import { selectScript } from './dialect';
 
-const ICONS: Record<string, string> = { connection: 'server', database: 'database_zap', schema: 'folder', group: 'folder', table: 'table', view: 'eye', collection: 'json', namespace: 'folder', more: 'ellipsis' };
+const ICONS: Record<string, string> = { folder: 'folder', connection: 'server', database: 'database_zap', schema: 'folder', group: 'folder', table: 'table', view: 'eye', collection: 'json', namespace: 'folder', more: 'ellipsis' };
 
 export function Explorer() {
   const state = store.useStore();
   const rows = store.visibleRows();
 
-  if (state.connections.length === 0) {
+  if (state.connections.length === 0 && state.folders.length === 0) {
     return (
       <View style={{ padding: 12, gap: 8 }}>
         <Text style={{ color: 'muted' }}>No connections yet.</Text>
@@ -25,17 +26,21 @@ export function Explorer() {
       </View>
     );
   }
-  const selected = rows.find((r) => r.node.key === state.selected)?.node ?? null;
+  const selectedRow = rows.find((r) => r.node.key === state.selected)?.node ?? null;
+  // A folder has no connection to query or refresh.
+  const selected = selectedRow?.kind === 'folder' ? null : selectedRow;
   const selectedEngine = selected ? store.connection(selected.connectionId)?.engine : undefined;
   // MongoDB has no query tab (a collection's tab finds and aggregates); Redis has its console.
   const canQuery = !!selected && !store.isMongo(selectedEngine);
   const redisDb = selected && store.isRedis(selectedEngine) ? store.redisDatabaseKey(selected) : null;
   return (
     <View style={{ grow: true }}>
-      <View style={{ direction: 'row', gap: 2, paddingX: 6, paddingY: 4, borderSide: 'bottom' }}>
+      {/* Dropping on the header (or below the rows) takes a connection or folder out to the top. */}
+      <View style={{ direction: 'row', gap: 2, paddingX: 6, paddingY: 4, borderSide: 'bottom' }} onDrop={(data) => store.moveTo(data, null)}>
         <Text style={{ weight: 'medium', size: 'sm' }}>Connections</Text>
         <View style={{ grow: true }} />
         <Button icon="plus" variant="ghost" tooltip="Add Connection" onClick={() => openConnectionForm(null)} />
+        <Button icon="folder_add" variant="ghost" tooltip="New Folder" onClick={() => store.createFolder(store.selectedFolder())} />
         {store.isRedis(selectedEngine) ? (
           <Button icon="terminal" variant="ghost" tooltip="Open Console" onClick={() => selected && openConsole(selected.connectionId, Number(selected.database ?? store.connection(selected.connectionId)?.database ?? 0))} />
         ) : (
@@ -44,10 +49,14 @@ export function Explorer() {
         <Button icon="rotate_cw" variant="ghost" tooltip="Refresh" disabled={!selected} onClick={() => selected && store.refresh(selected)} />
       </View>
       {redisDb && <KeyFilter dbKey={redisDb} />}
-      <Scroll style={{ grow: true, padding: 4 }}>
-        {rows.map((row) => (
-          <Row key={row.node.key} row={row} selected={row.node.key === state.selected} />
-        ))}
+      <Scroll style={{ grow: true, padding: 4 }} onDrop={(data) => store.moveTo(data, null)}>
+        {rows.map((row) =>
+          row.node.kind === 'folder' && row.node.folderId === state.renaming ? (
+            <FolderName key={row.node.key} row={row} />
+          ) : (
+            <Row key={row.node.key} row={row} selected={row.node.key === state.selected} />
+          ),
+        )}
       </Scroll>
     </View>
   );
@@ -79,6 +88,22 @@ function KeyFilter({ dbKey }: { dbKey: string }) {
   );
 }
 
+/** The name of a folder being made or renamed. */
+function FolderName({ row }: { row: VisibleRow }) {
+  const id = row.node.folderId!;
+  const [draft, setDraft] = useState(row.node.label);
+  return (
+    <View style={{ direction: 'row', gap: 4, paddingY: 2 }}>
+      <View style={{ width: row.depth * 12 + 4 }} />
+      <View style={{ grow: true }}>
+        <Input value={draft} autoFocus onChange={setDraft} onSubmit={(v) => store.renameFolder(id, v)} />
+      </View>
+      <Button icon="check" variant="ghost" tooltip="Rename" onClick={() => store.renameFolder(id, draft)} />
+      <Button icon="close" variant="ghost" tooltip="Cancel" onClick={() => store.startRenaming(null)} />
+    </View>
+  );
+}
+
 function Row({ row, selected }: { row: VisibleRow; selected: boolean }) {
   const { node, depth, children } = row;
   const status = node.kind === 'connection' ? store.statusOf(node.connectionId) : null;
@@ -87,7 +112,7 @@ function Row({ row, selected }: { row: VisibleRow; selected: boolean }) {
   const loading = status?.status === 'connecting' || (expanded && children === 'loading');
   const error = status?.status === 'error' ? status.message : children && typeof children === 'object' && 'error' in children ? children.error : null;
   const config = store.connection(node.connectionId);
-  const icon = node.kind === 'object' ? ICONS[node.object!.kind] : node.kind === 'key' ? redisKeyIcon(node.redisKey!.type) : ICONS[node.kind];
+  const icon = node.kind === 'folder' ? (expanded ? 'folder_open' : 'folder') : node.kind === 'object' ? ICONS[node.object!.kind] : node.kind === 'key' ? redisKeyIcon(node.redisKey!.type) : ICONS[node.kind];
   let description: string | undefined = node.description;
   if (node.kind === 'connection' && config) {
     const where = config.engine === 'sqlite' ? 'file' : config.useUrl ? 'connection string' : config.useSentinel ? `sentinel ${config.masterName ?? ''}` : config.host ?? '';
@@ -123,6 +148,8 @@ function Row({ row, selected }: { row: VisibleRow; selected: boolean }) {
           else if (!leaf) store.toggle(node);
         }}
         onDoubleClick={open}
+        dragData={store.dragData(node)}
+        onDrop={(data) => store.moveTo(data, store.dropFolder(node))}
         contextMenu={menu(node)}
         onContextMenu={(e) => {
           store.select(node.key);
@@ -134,6 +161,15 @@ function Row({ row, selected }: { row: VisibleRow; selected: boolean }) {
 }
 
 function menu(node: TreeNode): MenuItem[] {
+  if (node.kind === 'folder') {
+    return [
+      { id: 'add-connection', label: 'Add Connection…', icon: 'plus' },
+      { id: 'new-folder', label: 'New Folder', icon: 'folder_add' },
+      { separator: true },
+      { id: 'rename-folder', label: 'Rename…', icon: 'pencil' },
+      { id: 'delete-folder', label: 'Delete Folder…', icon: 'trash', danger: true },
+    ];
+  }
   const mongodb = store.isMongo(store.connection(node.connectionId)?.engine);
   if (mongodb && node.kind === 'object') {
     return [
@@ -179,6 +215,7 @@ function menu(node: TreeNode): MenuItem[] {
         { id: 'refresh', label: 'Refresh', icon: 'rotate_cw' },
         { separator: true },
         { id: 'edit', label: 'Edit Connection…', icon: 'pencil' },
+        ...(store.connection(node.connectionId)?.folderId ? [{ id: 'move-out', label: 'Move to Top', icon: 'arrow_up' }] : []),
         { id: 'duplicate', label: 'Duplicate', icon: 'copy' },
         { id: 'delete', label: 'Delete Connection…', icon: 'trash', danger: true },
       ];
@@ -200,6 +237,7 @@ function menu(node: TreeNode): MenuItem[] {
 }
 
 async function act(node: TreeNode, id: string) {
+  if (node.kind === 'folder') return actOnFolder(node.folderId!, id);
   const config = store.connection(node.connectionId);
   if (!config) return;
   switch (id) {
@@ -218,6 +256,9 @@ async function act(node: TreeNode, id: string) {
       break;
     case 'edit':
       openConnectionForm(config.id);
+      break;
+    case 'move-out':
+      await store.moveTo(store.dragData(node)!, null);
       break;
     case 'duplicate': {
       const copy = { ...config, id: store.newId(), name: `${config.name} copy` };
@@ -271,5 +312,26 @@ async function act(node: TreeNode, id: string) {
     case 'copy-select':
       await forge.clipboard.writeText(selectScript(config.engine, node.schema, node.label));
       break;
+  }
+}
+
+async function actOnFolder(folderId: string, id: string) {
+  const folder = store.folder(folderId);
+  if (!folder) return;
+  switch (id) {
+    case 'add-connection':
+      openConnectionForm(null);
+      break;
+    case 'new-folder':
+      await store.createFolder(folderId);
+      break;
+    case 'rename-folder':
+      store.startRenaming(folderId);
+      break;
+    case 'delete-folder': {
+      const answer = await forge.window.confirm(`Delete the folder “${folder.name}”?`, { detail: 'The connections and folders in it move to the folder above. No connection is deleted.', buttons: ['Delete', 'Cancel'], level: 'warning' });
+      if (answer === 0) await store.deleteFolder(folderId);
+      break;
+    }
   }
 }

@@ -9,14 +9,15 @@ import { TableView } from './tableView';
 import * as store from './store';
 import type { TreeNode } from './store';
 
-/** The form to add a connection (`id` null) or edit one. */
+/** The form to add a connection (`id` null; into the selected folder) or edit one. */
 export function openConnectionForm(id: string | null, message?: string) {
+  const folderId = id ? null : store.selectedFolder();
   const tabId = `db-explorer.connection:${id ?? 'new'}`;
   const tab = forge.tabs.open({
     id: tabId,
     title: id ? `Connection: ${store.connection(id)?.name ?? id}` : 'New Connection',
     icon: 'server',
-    render: () => <ConnectionForm id={id} message={message} onDone={() => tab.close()} />,
+    render: () => <ConnectionForm id={id} message={message} folderId={folderId} onDone={() => tab.close()} />,
   });
 }
 
