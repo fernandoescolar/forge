@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Runs Forge's own work (discovery, test runs, .NET loads) on the machine a remote project lives on"
+description = "Runs Forge's own work (discovery, test runs, .NET loads, agents) on the machine a remote project lives on"
 
 [lib]
 path = "src/forge_host.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
+forge-process = { path = "../forge-process" }
 futures.workspace = true
 gpui = { path = "../../vendor/zed/crates/gpui" }
 log = "0.4"
@@ -21,6 +23,7 @@ remote = { path = "../../vendor/zed/crates/remote" }
 serde.workspace = true
 serde_json.workspace = true
 smol = "2"
+tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

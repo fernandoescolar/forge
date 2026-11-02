@@ -13,6 +13,7 @@ pub mod context;
 pub mod commit_message;
 mod commit_proposal;
 pub mod configure;
+pub mod disk;
 pub mod conflicts;
 pub mod config;
 pub mod diff;

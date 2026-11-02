@@ -286,10 +286,14 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 /// Who `git commit --signoff` signs as in `dir`: "Name <email>", the committer.
 pub fn signer(dir: &Path) -> Option<String> {
     let output = git(dir, &["var", "GIT_COMMITTER_IDENT"]).ok().filter(|o| o.status.success())?;
-    let ident = String::from_utf8_lossy(&output.stdout);
+    ident(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// "Name <email>", from what `git var GIT_COMMITTER_IDENT` prints.
+pub fn ident(output: &str) -> Option<String> {
     // "Name <email> 1700000000 +0100": the date follows the email.
-    let end = ident.rfind('>')?;
-    Some(ident[..=end].trim().to_string())
+    let end = output.rfind('>')?;
+    Some(output[..=end].trim().to_string())
 }
 
 /// `message` without `Signed-off-by:` lines: only the user signs off, through git.

@@ -396,6 +396,9 @@ pub struct Thread {
     /// This thread's place on Forge's own MCP server (`forge_mcp`), for agents that take
     /// HTTP MCP servers.
     forge_mcp: Option<crate::forge_mcp::Registration>,
+    /// Where Forge's tools are on a remote project's host, for its running agent (the port
+    /// its connection opened there).
+    host_port: Arc<std::sync::Mutex<Option<u16>>>,
     /// Permission requests to run `git commit` or `git push`, and what Forge offers instead.
     git_redirects: HashMap<String, GitRedirect>,
     /// The session got Forge's tools.
@@ -518,7 +521,7 @@ impl Thread {
             .detach();
             registration
         });
-        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host.clone()).with_terminal_auth().with_display_terminals().with_session_meta(crate::forge_mcp::session_meta(forge_mcp.as_ref().map(|m| m.url()))));
+        let runtime = Arc::new(AcpRuntime::new(bus, fs).with_terminals(terminal_host.clone()).with_terminal_auth().with_display_terminals().with_session_meta(crate::forge_mcp::session_meta(forge_mcp.as_ref().map(|m| m.url()), true)));
 
         // Closing the window or the thread stops its agents: tasks still waiting on them
         // would otherwise keep them (and what they started) running until Forge quits.
@@ -592,6 +595,7 @@ impl Thread {
             mcp_servers,
             tool_timeout_seconds: config.as_ref().and_then(|c| c.tool_timeout_seconds),
             forge_mcp,
+            host_port: Default::default(),
             git_redirects: HashMap::new(),
             forge_tools: false,
             warned_auth: false,
@@ -780,13 +784,20 @@ impl Thread {
         self.changed(cx);
     }
 
-    pub fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Agents run here, on this machine's files and with its tools: in a remote project
-        // they would read and write the wrong disk.
-        if self.project.upgrade().is_some_and(|project| forge_ui::is_remote(project.read(cx))) {
-            self.system(forge_ui::not_on_remote("Agents"), Color::Warning);
-            return self.changed(cx);
+    /// The disk the project's files are on (a remote project's host).
+    pub(crate) fn disk(&self, cx: &gpui::App) -> crate::disk::Disk {
+        match self.project.upgrade() {
+            Some(project) => crate::disk::Disk::of(&project, cx),
+            None => crate::disk::Disk::Here(<dyn fs::Fs>::global(cx)),
         }
+    }
+
+    /// The disk `path` is on: the project's for its files, this machine's for Forge's own.
+    pub(crate) fn disk_for(&self, path: &std::path::Path, cx: &gpui::App) -> crate::disk::Disk {
+        if path.starts_with(&self.root) { self.disk(cx) } else { crate::disk::Disk::Here(<dyn fs::Fs>::global(cx)) }
+    }
+
+    pub fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ended {
             self.system("This thread's worktree was removed; start a new thread.", Color::Warning);
             return self.changed(cx);
@@ -825,10 +836,17 @@ impl Thread {
         let tool_timeout = self.tool_timeout_seconds;
         let forge_server = self.forge_mcp.as_ref().map(|r| r.acp_server());
         let forge_url = self.forge_mcp.as_ref().map(|r| r.url().to_string());
+        let forge_port = self.forge_mcp.as_ref().and_then(|r| r.port());
         let spec_for_auth = spec.clone();
+        // In a remote project the agent runs on its host, on the project's files: Forge's
+        // tools reach it through its connection (`forge_host::agent`).
+        let host = self.project.upgrade().and_then(|project| forge_host::Host::of(&project, cx));
+        let host_command = host.as_ref().map(|host| host.agent_command(cx));
+        let host_port = self.host_port.clone();
+        let is_remote = host.is_some();
         // The user's own hooks for Claude's shell tool may change the commands Forge's hook does.
         let other_shell_hooks = match crate::agent_setup::kind(&spec) {
-            crate::agent_setup::AgentKind::Claude => crate::shell_guard::other_shell_hooks(crate::agent_setup::dirs_home().as_deref(), &self.root),
+            crate::agent_setup::AgentKind::Claude if host.is_none() => crate::shell_guard::other_shell_hooks(crate::agent_setup::dirs_home().as_deref(), &self.root),
             _ => vec![],
         };
         // The agent's `initialize` answer, kept even when `session/new` fails: its login
@@ -843,8 +861,9 @@ impl Thread {
             // Entries from agents.json win over the shell environment.
             env.append(&mut spec.env);
             spec.env = env;
-            // What Forge adds for the agents it knows (see `agent_setup`).
-            if let Ok(exe) = std::env::current_exe() {
+            // What Forge adds for the agents it knows (see `agent_setup`): its files and hook
+            // are on this machine, so not for an agent on a remote project's host.
+            if let (Ok(exe), None) = (std::env::current_exe(), &host_command) {
                 crate::agent_setup::prepare(&mut spec, &exe, &paths::data_dir().join("agents"), forge_url.as_deref());
             }
             crate::agent_setup::set_tool_timeout(&mut spec, tool_timeout);
@@ -862,11 +881,25 @@ impl Thread {
                         }
                     }
                     if !rt.running().contains(&spec.id) {
-                        rt.start(spec).await?;
+                        match host_command {
+                            Some(command) => {
+                                let launch = forge_host::agent::Launch { command: spec.command.clone(), args: spec.args.clone(), env: spec.env.clone(), cwd: spec.cwd.clone().unwrap_or_else(|| root.clone()) };
+                                let remote = forge_host::agent::start(command?, &launch, forge_port).await?;
+                                *host_port.lock().unwrap() = Some(remote.port);
+                                rt.set_session_meta(crate::forge_mcp::session_meta(forge_url.as_deref().map(|url| crate::forge_mcp::url_on_port(url, remote.port)).as_deref(), false));
+                                rt.attach(&spec.id, remote.child, remote.stdin, remote.stdout, Some(remote.stderr))?;
+                            }
+                            None => rt.start(spec).await?,
+                        }
                     }
                     let init = rt.initialize(&id, PROTOCOL_VERSION).await?;
                     *initialized_slot.lock().unwrap() = Some(init.clone());
-                    // Forge's own tools, for agents that take HTTP MCP servers.
+                    // Forge's own tools, for agents that take HTTP MCP servers; on a remote
+                    // project's host, at the port its connection opened there.
+                    let forge_server = match *host_port.lock().unwrap() {
+                        Some(port) if is_remote => forge_url.as_deref().map(|url| crate::forge_mcp::acp_server(&crate::forge_mcp::url_on_port(url, port))),
+                        _ => forge_server,
+                    };
                     if let (Some(server), true) = (forge_server, init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool).unwrap_or(false)) {
                         mcp.push(server);
                     }
@@ -1042,7 +1075,7 @@ impl Thread {
             blocks.push(serde_json::json!({ "type": "image", "mimeType": image.format.mime_type(), "data": data }));
         }
         let extras = crate::context::gather(&specials, self.workspace.clone(), self.project.clone(), self.root.clone(), cx);
-        let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.root.clone(), crate::rules::user_file(), self.instructions_files()));
+        let rules = (!self.rules_sent).then(|| crate::rules::load(<dyn fs::Fs>::global(cx), self.disk(cx), self.root.clone(), crate::rules::user_file(), self.instructions_files()));
         if !self.rules_sent && self.forge_tools {
             blocks.push(json!({ "type": "text", "text": crate::forge_mcp::instructions(&self.root) }));
         }

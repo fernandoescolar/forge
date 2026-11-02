@@ -98,8 +98,8 @@ pub struct ProjectFs {
 impl ProjectFs {
     pub fn new(project: &Entity<Project>, root: PathBuf, policy: ReviewPolicy, cx: &mut App) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<Request>();
+        let fs = crate::disk::Disk::of(&project, cx);
         let project = project.downgrade();
-        let fs = <dyn fs::Fs>::global(cx);
         // Writes go one after another, in the order the agent sent them; one may wait for
         // the user's review for minutes. Reads don't wait for them: each runs at once.
         let (writes_tx, mut writes) = mpsc::unbounded::<(PathBuf, String, oneshot::Sender<IdeResult<()>>)>();
@@ -114,9 +114,19 @@ impl ProjectFs {
         .detach();
         let project_root = root.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
+            // On a remote project's host, read again once they are a few seconds old.
+            let mut remote_kept: Option<(std::time::Instant, Arc<crate::agent_ignore::AgentIgnore>)> = None;
             while let Some(req) = rx.next().await {
                 // Files kept from agents (secrets, `.forge/agentignore`), as it reads now.
-                let kept = crate::agent_ignore::AgentIgnore::load(&project_root);
+                let kept = match &remote_kept {
+                    _ if !fs.is_remote() => Arc::new(crate::agent_ignore::AgentIgnore::load(&project_root)),
+                    Some((read, kept)) if read.elapsed() < std::time::Duration::from_secs(10) => kept.clone(),
+                    _ => {
+                        let kept = Arc::new(crate::agent_ignore::AgentIgnore::load_from(&fs, &project_root).await);
+                        remote_kept = Some((std::time::Instant::now(), kept.clone()));
+                        kept
+                    }
+                };
                 match req {
                     Request::Read(path, reply) if kept.denies(&path) => {
                         let _ = reply.send(Err(IdeError::InvalidInput(kept.refusal(&path))));
@@ -155,7 +165,7 @@ fn worktree_roots(project: &Project, cx: &App) -> Vec<PathBuf> {
 /// `path` really is inside one of `roots` once symlinks are followed: a link in the
 /// project to `~` must not take the agent out of it. Files that don't exist yet count by
 /// their nearest existing folder.
-async fn resolves_inside(fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, roots: &[PathBuf]) -> bool {
+async fn resolves_inside(fs: &crate::disk::Disk, path: &Path, roots: &[PathBuf]) -> bool {
     let mut existing = path;
     let mut missing = Vec::new();
     let real = loop {
@@ -178,7 +188,7 @@ async fn resolves_inside(fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, roots: &[
     false
 }
 
-async fn read(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, outside_ok: bool, cx: &mut AsyncApp) -> IdeResult<String> {
+async fn read(project: &WeakEntity<Project>, fs: &crate::disk::Disk, path: &Path, outside_ok: bool, cx: &mut AsyncApp) -> IdeResult<String> {
     let (open, roots) = project
         .update(cx, |project, cx| {
             let open = project.find_project_path(path, cx).map(|project_path| project.get_open_buffer(&project_path, cx).map(|b| b.read(cx).text()));
@@ -197,7 +207,7 @@ async fn read(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, pa
     }
 }
 
-async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, text: String, policy: &ReviewPolicy, cx: &mut AsyncApp) -> IdeResult<()> {
+async fn write(project: &WeakEntity<Project>, fs: &crate::disk::Disk, path: &Path, text: String, policy: &ReviewPolicy, cx: &mut AsyncApp) -> IdeResult<()> {
     let permissions = policy.permissions.get();
     let (target, roots) = project
         .update(cx, |project, cx| {
@@ -210,9 +220,6 @@ async fn write(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, p
         // Scratch files (`/tmp`): straight to disk, not reviewed nor listed as the thread's
         // changes to the project.
         _ if crate::forge_tools::in_temp(path) => {
-            if let Some(parent) = path.parent() {
-                fs.create_dir(parent).await.map_err(|e| IdeError::Io(format!("{e:#}")))?;
-            }
             return apply(project, fs, path, None, text, cx).await;
         }
         // Outside the project: written straight to disk, when allowed.
@@ -287,7 +294,10 @@ fn open_buffer(project: &WeakEntity<Project>, path: &Path, cx: &mut AsyncApp) ->
 /// Puts `path` back as it was before the agent touched it: `original` written through its
 /// buffer when open (and saved), or the file removed when the agent created it.
 pub async fn restore(project: &WeakEntity<Project>, path: &Path, original: Option<String>, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
+    let fs = match project.upgrade() {
+        Some(project) => cx.update(|cx| crate::disk::Disk::of(&project, cx)),
+        None => anyhow::bail!("project closed"),
+    };
     let target = open_buffer(project, path, cx);
     match original {
         Some(text) => apply(project, &fs, path, target, text, cx).await.map_err(|e| anyhow::anyhow!("{e:?}")),
@@ -296,12 +306,12 @@ pub async fn restore(project: &WeakEntity<Project>, path: &Path, original: Optio
                 // Leave no editor showing a file that no longer exists as modified.
                 cx.update(|cx| buffer.update(cx, |b, cx| b.set_text("", cx)));
             }
-            fs.remove_file(path, fs::RemoveOptions { recursive: false, ignore_if_not_exists: true }).await
+            fs.remove_file(path).await
         }
     }
 }
 
-async fn apply(project: &WeakEntity<Project>, fs: &std::sync::Arc<dyn fs::Fs>, path: &Path, target: Option<Entity<language::Buffer>>, text: String, cx: &mut AsyncApp) -> IdeResult<()> {
+async fn apply(project: &WeakEntity<Project>, fs: &crate::disk::Disk, path: &Path, target: Option<Entity<language::Buffer>>, text: String, cx: &mut AsyncApp) -> IdeResult<()> {
     match target {
         Some(buffer) => {
             let save = project

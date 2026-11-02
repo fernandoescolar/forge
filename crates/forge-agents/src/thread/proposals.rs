@@ -7,14 +7,14 @@ impl Thread {
     /// Shows a commit card for `files` (relative to the thread's folder; every change when
     /// empty), signed off when the project signs off.
     pub(super) fn propose_commit(&mut self, message: String, files: Vec<String>, origin: crate::commit_proposal::Origin, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>>, cx: &mut Context<Self>) {
-        let (root, project_root) = (self.root.clone(), self.project_root(cx));
+        let (root, project_root, git) = (self.root.clone(), self.project_root(cx), self.git(cx));
         // Only the user signs off, through git.
         let message = forge_git::signoff::without_trailer(&message);
         cx.spawn(async move |this, cx| {
             let resolved = cx
                 .background_spawn(async move {
-                    let files = crate::commit_proposal::resolve_files(&root, &files)?;
-                    anyhow::Ok((files, forge_git::signoff::configured(&project_root).unwrap_or(false), forge_git::signoff::signer(&root)))
+                    let files = crate::commit_proposal::resolve_files(&git, &root, &files)?;
+                    anyhow::Ok((files, forge_git::signoff::configured(&project_root).unwrap_or(false), git.signer(&root)))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -51,9 +51,9 @@ impl Thread {
     pub(crate) fn commit_proposal(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some((message, files, signoff)) = self.open_commit(ix) else { return };
         self.set_commit_state(ix, crate::commit_proposal::CommitState::Committing, cx);
-        let root = self.root.clone();
+        let (root, git) = (self.root.clone(), self.git(cx));
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { crate::commit_proposal::commit(&root, &files, &message, signoff) }).await;
+            let result = cx.background_spawn(async move { crate::commit_proposal::commit(&git, &root, &files, &message, signoff) }).await;
             let state = match result {
                 Ok((sha, message)) => crate::commit_proposal::CommitState::Committed { sha, message },
                 Err(e) => crate::commit_proposal::CommitState::Failed(format!("{e:#}")),
@@ -69,11 +69,11 @@ impl Thread {
         use crate::commit_proposal::{CommitState, head, last_commit, stage_only};
         // The Git panel's Signoff toggle follows the project's setting, like the card.
         let Some((message, files, _)) = self.open_commit(ix) else { return };
-        let (root, workspace) = (self.root.clone(), self.workspace.clone());
+        let (root, workspace, git) = (self.root.clone(), self.workspace.clone(), self.git(cx));
         cx.spawn_in(window, async move |this, cx| {
             let staged = cx.background_spawn({
-                let root = root.clone();
-                async move { stage_only(&root, &files).map(|()| head(&root)) }
+                let (root, git) = (root.clone(), git.clone());
+                async move { stage_only(&git, &root, &files).map(|()| head(&git, &root)) }
             });
             let before = match staged.await {
                 Ok(before) => before,
@@ -96,9 +96,9 @@ impl Thread {
                 if !waiting {
                     break;
                 }
-                let root = root.clone();
+                let (root, git) = (root.clone(), git.clone());
                 let before = before.clone();
-                let made = cx.background_spawn(async move { (head(&root) != before).then(|| last_commit(&root).ok()).flatten() }).await;
+                let made = cx.background_spawn(async move { (head(&git, &root) != before).then(|| last_commit(&git, &root).ok()).flatten() }).await;
                 if let Some((sha, message)) = made {
                     this.update(cx, |this, cx| this.set_commit_state(ix, CommitState::Committed { sha, message }, cx)).ok();
                     break;
@@ -117,6 +117,11 @@ impl Thread {
         }
         forge_git::signoff::set(self.project_root(cx), !signoff, cx);
         self.changed(cx);
+    }
+
+    /// Where the thread's git commands run (a remote project's host).
+    fn git(&self, cx: &gpui::App) -> crate::commit_proposal::Git {
+        crate::commit_proposal::Git::of(&self.project, cx)
     }
 
     /// The project's folder, whose `.forge/` holds its settings (not the thread's worktree,
@@ -147,9 +152,9 @@ impl Thread {
 
     /// Shows a push card for the thread's current branch (to `remote`, or its upstream).
     pub(super) fn propose_push(&mut self, remote: Option<String>, origin: crate::commit_proposal::Origin, reply: Option<oneshot::Sender<crate::forge_mcp::ToolReply>>, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let (root, git) = (self.root.clone(), self.git(cx));
         cx.spawn(async move |this, cx| {
-            let plan = cx.background_spawn(async move { crate::push_proposal::plan(&root, remote.as_deref()) }).await;
+            let plan = cx.background_spawn(async move { crate::push_proposal::plan(&git, &root, remote.as_deref()) }).await;
             this.update(cx, |this, cx| {
                 match plan {
                     Ok(plan) => {

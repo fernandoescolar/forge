@@ -40,5 +40,7 @@ remote_server = { path = "../../vendor/zed/crates/remote_server", default-featur
 util = { path = "../../vendor/zed/crates/util", optional = true }
 
 [dev-dependencies]
+forge-host = { path = "../forge-host" }
 serde_json.workspace = true
 tempfile.workspace = true
+tokio.workspace = true

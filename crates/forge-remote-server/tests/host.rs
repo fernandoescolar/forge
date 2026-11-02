@@ -125,3 +125,30 @@ fn says_what_it_does_not_know() {
     let (_, answer) = call("no.such.method", json!({}), data.path());
     assert!(answer.unwrap_err().contains("no `no.such.method`"));
 }
+
+#[test]
+fn reads_writes_and_runs_git_on_the_host() {
+    let (project, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let root = project.path().canonicalize().unwrap();
+    let file = root.join("src/new.txt");
+
+    let (_, written) = call("fs.write", json!({ "path": file, "text": "hello\n" }), data.path());
+    written.unwrap();
+    let (_, read) = call("fs.read", json!({ "path": file }), data.path());
+    assert_eq!(read.unwrap(), "hello\n", "written with its folder");
+    let (_, real) = call("fs.canonicalize", json!({ "path": root.join("src/../src/new.txt") }), data.path());
+    assert_eq!(real.unwrap(), json!(file));
+
+    let git = |args: &[&str], input: Option<&str>| call("git", json!({ "dir": root, "args": args, "input": input }), data.path()).1;
+    git(&["init", "-q"], None).unwrap();
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], None).unwrap();
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-F", "-"], Some("From stdin\n")).unwrap();
+    assert_eq!(git(&["log", "-1", "--format=%s"], None).unwrap().as_str().unwrap().trim(), "From stdin");
+    assert!(git(&["no-such-command"], None).unwrap_err().contains("no-such-command"), "git's own error");
+
+    let (_, removed) = call("fs.remove", json!({ "path": file }), data.path());
+    removed.unwrap();
+    assert!(!file.exists());
+    let (_, missing) = call("fs.read", json!({ "path": file }), data.path());
+    assert!(missing.unwrap_err().contains("new.txt"));
+}

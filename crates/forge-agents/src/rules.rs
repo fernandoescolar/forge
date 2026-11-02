@@ -76,12 +76,17 @@ impl Rules {
 }
 
 /// The instructions that apply to the project in `root`, if any file has some:
-/// `user_file`, then the project's `project_files` (relative to `root`).
-pub async fn load(fs: Arc<dyn fs::Fs>, root: PathBuf, user_file: PathBuf, project_files: Vec<String>) -> Option<Rules> {
+/// `user_file` (on this machine, in `fs`), then the project's `project_files` (relative to
+/// `root`, on the project's `disk`).
+pub async fn load(fs: Arc<dyn fs::Fs>, disk: crate::disk::Disk, root: PathBuf, user_file: PathBuf, project_files: Vec<String>) -> Option<Rules> {
     let mut sources = Vec::new();
-    let files = std::iter::once(("your AGENTS.md".to_string(), user_file)).chain(project_files.into_iter().map(|f| (f.clone(), root.join(&f))));
-    for (name, path) in files {
-        if let Ok(text) = fs.load(Path::new(&path)).await {
+    if let Ok(text) = fs.load(&user_file).await {
+        if !text.trim().is_empty() {
+            sources.push(("your AGENTS.md".to_string(), text));
+        }
+    }
+    for (name, path) in project_files.into_iter().map(|f| (f.clone(), root.join(&f))) {
+        if let Ok(text) = disk.load(Path::new(&path)).await {
             if !text.trim().is_empty() {
                 sources.push((name, text));
             }
@@ -112,20 +117,20 @@ mod tests {
         fs.insert_tree("/empty", serde_json::json!({ ".forge": { "AGENTS.md": "  \n" } })).await;
 
         let files = crate::config::default_instructions_files();
-        let rules = load(fs.clone(), "/p".into(), "/config/AGENTS.md".into(), files.clone()).await.unwrap();
+        let rules = load(fs.clone(), crate::disk::Disk::Here(fs.clone()), "/p".into(), "/config/AGENTS.md".into(), files.clone()).await.unwrap();
         assert_eq!(rules.label(), "your AGENTS.md and .forge/AGENTS.md");
         let text = rules.block()["text"].as_str().unwrap().to_string();
         assert!(text.contains("<instructions source=\"your AGENTS.md\">\nAnswer in Spanish.\n</instructions>"), "{text}");
         assert!(text.contains("<instructions source=\".forge/AGENTS.md\">\nRun `cargo test` before finishing.\n</instructions>"), "{text}");
 
-        let project_only = load(fs.clone(), "/p".into(), "/nowhere/AGENTS.md".into(), files.clone()).await.unwrap();
+        let project_only = load(fs.clone(), crate::disk::Disk::Here(fs.clone()), "/p".into(), "/nowhere/AGENTS.md".into(), files.clone()).await.unwrap();
         assert_eq!(project_only.label(), ".forge/AGENTS.md");
-        assert_eq!(load(fs.clone(), "/empty".into(), "/nowhere/AGENTS.md".into(), files.clone()).await, None, "blank files don't count");
+        assert_eq!(load(fs.clone(), crate::disk::Disk::Here(fs.clone()), "/empty".into(), "/nowhere/AGENTS.md".into(), files.clone()).await, None, "blank files don't count");
 
         // The repository's AGENTS.md too, by default; other files when configured.
         fs.insert_tree("/both", serde_json::json!({ ".forge": { "AGENTS.md": "Forge's." }, "AGENTS.md": "The repo's.", "docs": { "agents.md": "Docs'." } })).await;
-        assert_eq!(load(fs.clone(), "/both".into(), "/nowhere/AGENTS.md".into(), files).await.unwrap().label(), ".forge/AGENTS.md and AGENTS.md");
-        let custom = load(fs, "/both".into(), "/nowhere/AGENTS.md".into(), vec!["docs/agents.md".into()]).await.unwrap();
+        assert_eq!(load(fs.clone(), crate::disk::Disk::Here(fs.clone()), "/both".into(), "/nowhere/AGENTS.md".into(), files).await.unwrap().label(), ".forge/AGENTS.md and AGENTS.md");
+        let custom = load(fs.clone(), crate::disk::Disk::Here(fs), "/both".into(), "/nowhere/AGENTS.md".into(), vec!["docs/agents.md".into()]).await.unwrap();
         assert_eq!(custom.label(), "docs/agents.md");
     }
 }

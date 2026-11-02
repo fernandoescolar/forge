@@ -13,6 +13,9 @@
 //! Dropping the call's task kills the local `ssh`: the host side sees its stdin close and
 //! stops, with everything it started.
 
+pub mod agent;
+pub mod files;
+
 use std::io::{BufRead as _, Write as _};
 use std::sync::{Arc, Mutex};
 
@@ -155,6 +158,13 @@ impl Host {
         Some(Self { client, program: server_binary(cx) })
     }
 
+    /// The command that starts an agent on the host ([`agent::start`]).
+    pub fn agent_command(&self, cx: &App) -> Result<agent::AgentCommand> {
+        let command = RemoteCommand { program: self.program.clone(), args: vec![SUBCOMMAND.to_string(), agent::AGENT.to_string()], env: Default::default(), working_dir: None };
+        let (template, preamble) = self.client.read(cx).build_stdio_command(command).context("starting the agent on the host")?;
+        Ok(agent::AgentCommand { program: template.program, args: template.args, env: template.env.into_iter().collect(), preamble })
+    }
+
     /// Calls `method` on the host with `params` and returns its result. `log` gets the
     /// output the call sends as it works.
     pub fn call<R: DeserializeOwned + Send + 'static>(
@@ -225,6 +235,76 @@ impl Host {
             log::info!("forge-host {method}: {:?}, {} bytes", started.elapsed(), value.to_string().len());
             serde_json::from_value(value).with_context(|| format!("reading the answer to `{method}`"))
         })
+    }
+}
+
+/// A call to the host made from a thread that doesn't wait on the UI's executor (a
+/// background job running git commands one after another): the `ssh` command is built once,
+/// on the UI thread, and run for each call.
+#[derive(Clone)]
+pub struct Blocking {
+    method: String,
+    program: String,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    preamble: Vec<u8>,
+}
+
+impl Host {
+    /// Calls of `method` that [`Blocking::call`] makes from any thread.
+    pub fn blocking(&self, method: &str, cx: &App) -> Result<Blocking> {
+        let command = RemoteCommand { program: self.program.clone(), args: vec![SUBCOMMAND.to_string(), method.to_string()], env: Default::default(), working_dir: None };
+        let (template, preamble) = self.client.read(cx).build_stdio_command(command).context("running Forge's work on the host")?;
+        Ok(Blocking { method: method.to_string(), program: template.program, args: template.args, env: template.env.into_iter().collect(), preamble })
+    }
+}
+
+impl Blocking {
+    /// Calls the method with `params` and waits for its result.
+    pub fn call<R: DeserializeOwned>(&self, params: &impl Serialize) -> Result<R> {
+        let mut line = serde_json::to_string(params).context("writing the call's parameters")?;
+        line.push('\n');
+        let mut child = std::process::Command::new(&self.program)
+            .args(&self.args)
+            .envs(&self.env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("starting ssh")?;
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        stdin.write_all(&self.preamble)?;
+        stdin.write_all(line.as_bytes())?;
+        stdin.flush()?;
+        let stdout = child.stdout.take().context("no stdout")?;
+        let mut outcome = None;
+        for line in std::io::BufReader::new(stdout).lines() {
+            match serde_json::from_str::<Event>(&line?) {
+                Ok(Event::Ok(value)) => {
+                    outcome = Some(Ok(value));
+                    break;
+                }
+                Ok(Event::Err(error)) => {
+                    outcome = Some(Err(anyhow!(error)));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(stdin);
+        let value = match outcome {
+            Some(outcome) => outcome?,
+            None => {
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    std::io::Read::read_to_string(&mut err, &mut stderr).ok();
+                }
+                child.kill().ok();
+                bail!("Forge's server on the host ended without answering `{}`: {}", self.method, stderr.trim());
+            }
+        };
+        child.wait().ok();
+        serde_json::from_value(value).with_context(|| format!("reading the answer to `{}`", self.method))
     }
 }
 

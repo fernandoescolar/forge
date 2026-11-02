@@ -62,8 +62,60 @@ pub(crate) fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    forge_process::git(dir, args)
+/// Where a thread's git commands run: here, or on a remote project's host.
+#[derive(Clone)]
+pub(crate) enum Git {
+    Here,
+    Host(forge_host::Blocking),
+}
+
+impl Git {
+    pub(crate) fn of(project: &gpui::WeakEntity<project::Project>, cx: &gpui::App) -> Self {
+        let host = project.upgrade().and_then(|project| forge_host::Host::of(&project, cx));
+        match host.and_then(|host| host.blocking(forge_host::files::GIT, cx).ok()) {
+            Some(call) => Self::Host(call),
+            None => Self::Here,
+        }
+    }
+
+    /// `git` in `dir`: its output, or why it failed.
+    pub(crate) fn run(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        self.run_with_input(dir, args, None)
+    }
+
+    /// Same, with `input` on git's stdin.
+    fn run_with_input(&self, dir: &Path, args: &[&str], input: Option<&str>) -> Result<String> {
+        match (self, input) {
+            (Self::Here, None) => forge_process::git(dir, args),
+            (Self::Here, Some(input)) => {
+                let mut child = ide_api::std_command("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("cannot run git; is it installed?")?;
+                {
+                    use std::io::Write as _;
+                    child.stdin.take().context("no stdin")?.write_all(input.as_bytes())?;
+                }
+                let out = child.wait_with_output()?;
+                anyhow::ensure!(out.status.success(), "{}", stderr(&out));
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            }
+            (Self::Host(call), input) => call.call(&forge_host::files::GitParams { dir: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect(), input: input.map(str::to_string) }),
+        }
+    }
+
+    /// Who commits in `dir` ("Name <email>"), as git says.
+    pub(crate) fn signer(&self, dir: &Path) -> Option<String> {
+        match self {
+            Self::Here => forge_git::signoff::signer(dir),
+            Self::Host(_) => forge_git::signoff::ident(&self.run(dir, &["var", "GIT_COMMITTER_IDENT"]).ok()?),
+        }
+    }
 }
 
 fn stderr(out: &std::process::Output) -> String {
@@ -73,22 +125,22 @@ fn stderr(out: &std::process::Output) -> String {
 }
 
 /// The repository's top folder for `dir`.
-pub(crate) fn top_level(dir: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?.trim()))
+pub(crate) fn top_level(git: &Git, dir: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git.run(dir, &["rev-parse", "--show-toplevel"])?.trim()))
 }
 
-pub(crate) fn head(dir: &Path) -> Option<String> {
-    git(dir, &["rev-parse", "HEAD"]).ok().map(|s| s.trim().to_string())
+pub(crate) fn head(git: &Git, dir: &Path) -> Option<String> {
+    git.run(dir, &["rev-parse", "HEAD"]).ok().map(|s| s.trim().to_string())
 }
 
 /// The files to commit, absolute: those named (relative to `root`), or every change.
-pub(crate) fn resolve_files(root: &Path, files: &[String]) -> Result<Vec<PathBuf>> {
+pub(crate) fn resolve_files(git: &Git, root: &Path, files: &[String]) -> Result<Vec<PathBuf>> {
     if !files.is_empty() {
         return Ok(files.iter().map(|f| root.join(f)).collect());
     }
-    let top = top_level(root)?;
+    let top = top_level(git, root)?;
     // `-z`: paths as they are, NUL-separated; renames carry their old path next.
-    let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+    let status = git.run(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
     let mut files = Vec::new();
     let mut entries = status.split('\0').filter(|e| !e.is_empty());
     while let Some(entry) = entries.next() {
@@ -107,55 +159,54 @@ fn paths(files: &[PathBuf]) -> Vec<String> {
 }
 
 /// Stages `files` as they are on disk (new, changed or deleted).
-fn stage(root: &Path, files: &[PathBuf]) -> Result<()> {
+fn stage(git: &Git, root: &Path, files: &[PathBuf]) -> Result<()> {
     let paths = paths(files);
     let mut args = vec!["add", "-A", "--"];
     args.extend(paths.iter().map(String::as_str));
-    git(root, &args)?;
+    git.run(root, &args)?;
     Ok(())
 }
 
 /// Makes the index hold exactly `files` as they are on disk, for the Git panel to commit
 /// them (the user sees what else was staged come off there).
-pub(crate) fn stage_only(root: &Path, files: &[PathBuf]) -> Result<()> {
+pub(crate) fn stage_only(git: &Git, root: &Path, files: &[PathBuf]) -> Result<()> {
     // Nothing to reset before the first commit.
-    if head(root).is_some() {
-        git(root, &["reset", "-q"])?;
+    if head(git, root).is_some() {
+        git.run(root, &["reset", "-q"])?;
     }
-    stage(root, files)
+    stage(git, root, files)
 }
 
 /// Commits `files` with `message`, signed off as the user when `signoff`; returns the new
 /// commit's SHA and its final message. Whatever else the user had staged stays staged.
-pub(crate) fn commit(root: &Path, files: &[PathBuf], message: &str, signoff: bool) -> Result<(String, String)> {
+pub(crate) fn commit(git: &Git, root: &Path, files: &[PathBuf], message: &str, signoff: bool) -> Result<(String, String)> {
     // Staged first so new and deleted files are known to `--only`.
-    stage(root, files)?;
-    let mut command = ide_api::std_command("git");
-    command.arg("-C").arg(root).args(["commit", "-q", "-F", "-"]);
+    stage(git, root, files)?;
+    let paths = paths(files);
+    let mut args = vec!["commit", "-q", "-F", "-"];
     if signoff {
-        command.arg("--signoff");
+        args.push("--signoff");
     }
-    command.args(["--only", "--"]).args(paths(files));
-    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("cannot run git; is it installed?")?;
-    {
-        use std::io::Write as _;
-        child.stdin.take().context("no stdin")?.write_all(message.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
-    anyhow::ensure!(out.status.success(), "{}", stderr(&out));
-    last_commit(root)
+    args.extend(["--only", "--"]);
+    args.extend(paths.iter().map(String::as_str));
+    git.run_with_input(root, &args, Some(message))?;
+    last_commit(git, root)
 }
 
 /// HEAD's SHA and message.
-pub(crate) fn last_commit(root: &Path) -> Result<(String, String)> {
-    let sha = head(root).context("no commit")?;
-    let message = git(root, &["log", "-1", "--format=%B"])?.trim().to_string();
+pub(crate) fn last_commit(git: &Git, root: &Path) -> Result<(String, String)> {
+    let sha = head(git, root).context("no commit")?;
+    let message = git.run(root, &["log", "-1", "--format=%B"])?.trim().to_string();
     Ok((sha, message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> Result<String> {
+        Git::Here.run(dir, args)
+    }
 
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -174,13 +225,13 @@ mod tests {
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         // The first commit: nothing to reset yet.
-        let (first, _) = commit(root, &[root.join("a.txt")], "Add a", false).unwrap();
+        let (first, _) = commit(&Git::Here, root, &[root.join("a.txt")], "Add a", false).unwrap();
         assert_eq!(git(root, &["show", "--name-only", "--format=", &first]).unwrap().trim(), "a.txt");
 
         // Already staged files that weren't proposed stay out, and stay staged.
         std::fs::write(root.join("a.txt"), "a2\n").unwrap();
         git(root, &["add", "b.txt"]).unwrap();
-        let (sha, message) = commit(root, &[root.join("a.txt")], "Change a\n\nWith a body.", false).unwrap();
+        let (sha, message) = commit(&Git::Here, root, &[root.join("a.txt")], "Change a\n\nWith a body.", false).unwrap();
         assert_eq!(message, "Change a\n\nWith a body.");
         assert_eq!(git(root, &["show", "--name-only", "--format=", &sha]).unwrap().trim(), "a.txt");
         assert_eq!(git(root, &["status", "--porcelain"]).unwrap().trim(), "A  b.txt");
@@ -191,11 +242,11 @@ mod tests {
         let dir = repo();
         let root = dir.path();
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        commit(root, &[root.join("a.txt")], "Add a", false).unwrap();
+        commit(&Git::Here, root, &[root.join("a.txt")], "Add a", false).unwrap();
         std::fs::write(root.join("a.txt"), "a2\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         git(root, &["add", "b.txt"]).unwrap();
-        stage_only(root, &[root.join("a.txt")]).unwrap();
+        stage_only(&Git::Here, root, &[root.join("a.txt")]).unwrap();
         assert_eq!(git(root, &["diff", "--cached", "--name-only"]).unwrap().trim(), "a.txt");
     }
 
@@ -204,7 +255,7 @@ mod tests {
         let dir = repo();
         let root = dir.path();
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        let (_, message) = commit(root, &[root.join("a.txt")], "Add a", true).unwrap();
+        let (_, message) = commit(&Git::Here, root, &[root.join("a.txt")], "Add a", true).unwrap();
         assert_eq!(message, "Add a\n\nSigned-off-by: t <t@t>");
     }
 
@@ -213,26 +264,26 @@ mod tests {
         let dir = repo();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        commit(&root, &[root.join("a.txt")], "Add a", false).unwrap();
-        assert!(resolve_files(&root, &[]).is_err(), "nothing to commit");
+        commit(&Git::Here, &root, &[root.join("a.txt")], "Add a", false).unwrap();
+        assert!(resolve_files(&Git::Here, &root, &[]).is_err(), "nothing to commit");
 
         std::fs::remove_file(root.join("a.txt")).unwrap();
         std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(root.join("src/new file.rs"), "x").unwrap();
-        let mut files = resolve_files(&root, &[]).unwrap();
+        let mut files = resolve_files(&Git::Here, &root, &[]).unwrap();
         files.sort();
         assert_eq!(files, vec![root.join("a.txt"), root.join("src/new file.rs")]);
-        assert_eq!(resolve_files(&root, &["src/x.rs".into()]).unwrap(), vec![root.join("src/x.rs")]);
+        assert_eq!(resolve_files(&Git::Here, &root, &["src/x.rs".into()]).unwrap(), vec![root.join("src/x.rs")]);
 
         // Deletions commit too.
-        let (sha, _) = commit(&root, &files, "Replace a", false).unwrap();
+        let (sha, _) = commit(&Git::Here, &root, &files, "Replace a", false).unwrap();
         assert_eq!(git(&root, &["show", "--name-status", "--format=", &sha]).unwrap().trim(), "D\ta.txt\nA\tsrc/new file.rs");
     }
 
     #[test]
     fn reports_failures() {
         let dir = repo();
-        let err = commit(dir.path(), &[dir.path().join("missing.txt")], "Nope", false).unwrap_err();
+        let err = commit(&Git::Here, dir.path(), &[dir.path().join("missing.txt")], "Nope", false).unwrap_err();
         assert!(format!("{err:#}").contains("missing.txt"), "{err:#}");
     }
 }

@@ -130,7 +130,7 @@ pub(crate) async fn search(ide: Ide, args: Value, cx: &mut AsyncWindowContext) -
         let found = cx
             .update(|_, cx| {
                 let buffer = buffer.read(cx);
-                let path = buffer.file().and_then(|f| f.as_local().map(|l| l.abs_path(cx)))?;
+                let path = buffer.file().and_then(|f| forge_ui::abs_path(f, cx))?;
                 let snapshot = buffer.snapshot();
                 let rows: Vec<u32> = ranges.iter().map(|r| language::ToPoint::to_point(&r.start, &snapshot).row).collect();
                 Some((path, snapshot.text(), rows))

@@ -56,7 +56,7 @@ pub fn init(cx: &mut App) {
                 this.update(cx, |editor, cx| {
                     let Some(workspace) = editor.workspace() else { return };
                     let Some(buffer) = editor.buffer().read(cx).as_singleton() else { return };
-                    let Some(path) = buffer.read(cx).file().and_then(|f| f.as_local()).map(|f| f.abs_path(cx)) else { return };
+                    let Some(path) = buffer.read(cx).file().and_then(|f| forge_ui::abs_path(f, cx)) else { return };
                     let problems = crate::verify::problems_of(&buffer.read(cx).snapshot(), crate::verify::BASELINE_LIMIT);
                     let root = workspace.read(cx).project().read(cx).visible_worktrees(cx).next().map(|wt| wt.read(cx).abs_path().to_path_buf()).unwrap_or_default();
                     match fix_problems_prompt(&[(path, problems)], &root, "in this file") {
@@ -167,7 +167,7 @@ fn prompt(buffer: &Entity<Buffer>, workspace: &Entity<Workspace>, diagnostics: &
     let (range, _, _) = diagnostics.first()?;
     let buffer = buffer.read(cx);
     let file = buffer.file()?;
-    let abs_path = file.as_local()?.abs_path(cx);
+    let abs_path = forge_ui::abs_path(file, cx)?;
     let root = workspace.read(cx).project().read(cx).visible_worktrees(cx).next()?.read(cx).abs_path().to_path_buf();
     let path = abs_path.strip_prefix(&root).unwrap_or(&abs_path).to_string_lossy().into_owned();
     let line = range.start.row + 1;

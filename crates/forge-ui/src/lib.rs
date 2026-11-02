@@ -27,11 +27,18 @@ use workspace::{
 
 /// Whether the project's folders are on another machine, opened over SSH (File › Open
 /// Remote…). Forge's own features that read the project from this machine's disk or run
-/// tools on it here (agents, the Solution Explorer, `gh`, extensions…) are off for these
-/// until they work through the remote server; Zed's editor, language servers, terminals,
-/// search, Git panel and debugger already do.
+/// tools on it here (the Solution Explorer's edits, `gh`, extensions…) are off for these
+/// until they work through the remote server (`forge-host`); Zed's editor, language
+/// servers, terminals, search, Git panel and debugger already do.
 pub fn is_remote(project: &project::Project) -> bool {
     project.is_via_remote_server()
+}
+
+/// Where a buffer's `file` is, on the machine its project's files are: this one's path for a
+/// local project, the host's for a remote one (where `as_local` has none).
+pub fn abs_path(file: &std::sync::Arc<dyn language::File>, cx: &gpui::App) -> Option<std::path::PathBuf> {
+    let file = project::File::from_dyn(Some(file))?;
+    Some(file.worktree.read(cx).absolutize(&file.path))
 }
 
 /// The message for a feature that is off in remote projects (see [`is_remote`]).

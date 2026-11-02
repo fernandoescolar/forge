@@ -88,6 +88,21 @@ impl AgentIgnore {
         ignore
     }
 
+    /// [`AgentIgnore::load`] for a project on `disk`. On a remote project's host only the
+    /// files at the root count: folders' own files would each be a call to the host.
+    pub async fn load_from(disk: &crate::disk::Disk, root: &Path) -> Self {
+        if !disk.is_remote() {
+            return Self::load(root);
+        }
+        let mut own = Vec::new();
+        for name in files() {
+            if let Ok(text) = disk.load(&root.join(&name)).await {
+                own.push(text);
+            }
+        }
+        Self::from_text(root, &own.join("\n"))
+    }
+
     /// The defaults and `own` (patterns relative to `root`), without looking in folders.
     pub fn from_text(root: &Path, own: &str) -> Self {
         let mut builder = GitignoreBuilder::new(root);

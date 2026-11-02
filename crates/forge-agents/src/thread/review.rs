@@ -341,7 +341,7 @@ impl Thread {
         if edits.is_empty() {
             return;
         }
-        let fs = <dyn fs::Fs>::global(cx);
+        let fs = self.disk(cx);
         cx.spawn(async move |this, cx| {
             let mut now = Vec::new();
             for (path, old_text, new_text) in edits {

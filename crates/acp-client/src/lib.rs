@@ -176,14 +176,14 @@ pub struct AcpRuntime {
     terminal_auth: bool,
     display_terminals: bool,
     /// `_meta` sent with `session/new` and `session/load` (agent-specific options).
-    session_meta: Option<Value>,
+    session_meta: std::sync::Mutex<Option<Value>>,
     agents: Arc<DashMap<String, Arc<AgentProcess>>>,
     permissions: Arc<PermissionWaiters>,
 }
 
 impl AcpRuntime {
     pub fn new(events: EventBus, workspace: Arc<dyn WorkspaceEngine>) -> Self {
-        Self { events, workspace, terminals: None, terminal_auth: false, display_terminals: false, session_meta: None, agents: Default::default(), permissions: Default::default() }
+        Self { events, workspace, terminals: None, terminal_auth: false, display_terminals: false, session_meta: Default::default(), agents: Default::default(), permissions: Default::default() }
     }
 
     /// Lets agents run commands (`terminal/*`); advertised in `initialize` only when set.
@@ -209,14 +209,20 @@ impl AcpRuntime {
 
     /// `_meta` for every `session/new` and `session/load`: options agents read there
     /// (Claude Code's adapter takes `claudeCode.options`); others ignore it.
-    pub fn with_session_meta(mut self, meta: Value) -> Self {
-        self.session_meta = Some(meta);
+    pub fn with_session_meta(self, meta: Value) -> Self {
+        self.set_session_meta(meta);
         self
+    }
+
+    /// Replaces the session `_meta`, for the sessions started from now on (an agent on a
+    /// remote project's host gets the paths and URL it has there).
+    pub fn set_session_meta(&self, meta: Value) {
+        *self.session_meta.lock().unwrap() = Some(meta);
     }
 
     /// `params` with the session `_meta`, when there is one.
     fn with_meta(&self, mut params: Value) -> Value {
-        if let Some(meta) = &self.session_meta {
+        if let Some(meta) = &*self.session_meta.lock().unwrap() {
             params["_meta"] = meta.clone();
         }
         params
@@ -239,6 +245,58 @@ impl AcpRuntime {
         for agent in self.agents.iter() {
             agent.terminate(agent.key());
         }
+    }
+
+    /// Runs the agent `agent_id` speaking ACP on `stdin` and `stdout`: the one [`AgentService::start`]
+    /// starts here, or one started elsewhere (on a remote project's host, through `child`).
+    /// Stopping it stops `child`'s process group.
+    pub fn attach<W, R, E>(&self, agent_id: &str, child: Child, stdin: W, stdout: R, stderr: Option<E>) -> IdeResult<()>
+    where
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+        E: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        if self.agents.contains_key(agent_id) {
+            return Err(IdeError::InvalidInput(format!("agent {agent_id} already started")));
+        }
+        if let Some(stderr) = stderr {
+            let (events, agent_id) = (self.events.clone(), agent_id.to_string());
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = events.send(IdeEvent::Agent(AgentEvent::Stderr { agent_id: agent_id.clone(), line }));
+                }
+            });
+        }
+
+        let handler = Arc::new(AcpHandler { agent_id: agent_id.to_string(), events: self.events.clone(), workspace: self.workspace.clone(), terminals: self.terminals.clone(), permissions: self.permissions.clone() });
+        let (peer, reader) = Peer::start(stdout, stdin, Framing::Newline, handler, Duration::from_secs(120));
+        let pid = child.id();
+        let process = Arc::new(AgentProcess { peer, child: Mutex::new(child), pid });
+        self.agents.insert(agent_id.to_string(), process.clone());
+        info!(agent = %agent_id, "agent started");
+        let _ = self.events.send(IdeEvent::Agent(AgentEvent::Started { agent_id: agent_id.to_string() }));
+
+        // Reap the process once its stdout closes, whether it crashed or was stopped.
+        let (agents, permissions, events, agent_id) = (self.agents.clone(), self.permissions.clone(), self.events.clone(), agent_id.to_string());
+        tokio::spawn(async move {
+            let _ = reader.await;
+            let code = {
+                let mut child = process.child.lock().await;
+                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                    Ok(Ok(status)) => status.code(),
+                    _ => {
+                        let _ = child.kill().await;
+                        None
+                    }
+                }
+            };
+            agents.remove_if(&agent_id, |_, p| Arc::ptr_eq(p, &process));
+            permissions.retain(|(a, _), _| a != &agent_id);
+            info!(agent = %agent_id, ?code, "agent exited");
+            let _ = events.send(IdeEvent::Agent(AgentEvent::Exited { agent_id, code }));
+        });
+        Ok(())
     }
 }
 
@@ -282,44 +340,8 @@ impl AgentService for AcpRuntime {
         let mut child = cmd.spawn().map_err(|e| IdeError::Unavailable(format!("failed to start agent {} ({}): {e}", spec.id, spec.command)))?;
         let stdin = child.stdin.take().ok_or_else(|| IdeError::Internal("agent stdin unavailable".into()))?;
         let stdout = child.stdout.take().ok_or_else(|| IdeError::Internal("agent stdout unavailable".into()))?;
-        if let Some(stderr) = child.stderr.take() {
-            let (events, agent_id) = (self.events.clone(), spec.id.clone());
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = events.send(IdeEvent::Agent(AgentEvent::Stderr { agent_id: agent_id.clone(), line }));
-                }
-            });
-        }
-
-        let handler = Arc::new(AcpHandler { agent_id: spec.id.clone(), events: self.events.clone(), workspace: self.workspace.clone(), terminals: self.terminals.clone(), permissions: self.permissions.clone() });
-        let (peer, reader) = Peer::start(stdout, stdin, Framing::Newline, handler, Duration::from_secs(120));
-        let pid = child.id();
-        let process = Arc::new(AgentProcess { peer, child: Mutex::new(child), pid });
-        self.agents.insert(spec.id.clone(), process.clone());
-        info!(agent = %spec.id, "agent started");
-        let _ = self.events.send(IdeEvent::Agent(AgentEvent::Started { agent_id: spec.id.clone() }));
-
-        // Reap the process once its stdout closes, whether it crashed or was stopped.
-        let (agents, permissions, events, agent_id) = (self.agents.clone(), self.permissions.clone(), self.events.clone(), spec.id);
-        tokio::spawn(async move {
-            let _ = reader.await;
-            let code = {
-                let mut child = process.child.lock().await;
-                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                    Ok(Ok(status)) => status.code(),
-                    _ => {
-                        let _ = child.kill().await;
-                        None
-                    }
-                }
-            };
-            agents.remove_if(&agent_id, |_, p| Arc::ptr_eq(p, &process));
-            permissions.retain(|(a, _), _| a != &agent_id);
-            info!(agent = %agent_id, ?code, "agent exited");
-            let _ = events.send(IdeEvent::Agent(AgentEvent::Exited { agent_id, code }));
-        });
-        Ok(())
+        let stderr = child.stderr.take();
+        self.attach(&spec.id, child, stdin, stdout, stderr)
     }
 
     async fn stop(&self, agent_id: &str) -> IdeResult<()> {

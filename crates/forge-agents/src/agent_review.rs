@@ -136,7 +136,7 @@ impl editor::Addon for Overlay {
 }
 
 fn buffer_path(buffer: &Entity<Buffer>, cx: &App) -> Option<PathBuf> {
-    Some(buffer.read(cx).file()?.as_local()?.abs_path(cx))
+    forge_ui::abs_path(buffer.read(cx).file()?, cx)
 }
 
 /// Makes the editor show the agent's pending changes for its buffers (or stop showing them).

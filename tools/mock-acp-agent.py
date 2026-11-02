@@ -7,18 +7,41 @@ Prompts it understands:
   edit <path> <text>   -> fs/write_text_file straight away (the client may review it)
   read <path> [line]   -> a read tool call with its location, then fs/read_text_file
   run <shell command>  -> session/request_permission, then terminal/create + wait + output
+  tools                -> the tools it listed on the session's HTTP MCP servers (MOCK_MCP=1)
   anything else        -> echoed back as an agent_message_chunk
+
+With MOCK_MCP=1 it takes HTTP MCP servers, like Claude's adapter, and lists their tools as
+each session starts (which Forge waits for before the first prompt).
 
 With MOCK_REQUIRE_AUTH=1 the agent behaves like one that needs a login: it offers a
 terminal auth method (this script with --login), reports "Not logged in" and refuses
 prompts until the marker file (MOCK_AUTH_MARKER, default $TMPDIR/forge-mock-auth) exists.
 """
-import json, os, sys, tempfile, uuid
+import json, os, sys, tempfile, urllib.request, uuid
 
 REQUIRE_AUTH = os.environ.get("MOCK_REQUIRE_AUTH") == "1"
 # Like Copilot CLI: refuse to start a session at all until signed in.
 AUTH_ON_NEW = os.environ.get("MOCK_AUTH_ON_NEW_SESSION") == "1"
 AUTH_MARKER = os.environ.get("MOCK_AUTH_MARKER") or os.path.join(tempfile.gettempdir(), "forge-mock-auth")
+MCP = os.environ.get("MOCK_MCP") == "1"
+
+
+def mcp_tools(servers):
+    """Names of the tools on the HTTP MCP servers, or why they couldn't be listed."""
+    names = []
+    for server in servers:
+        if server.get("type") != "http":
+            continue
+        try:
+            for rid, method in ((1, "initialize"), (2, "tools/list")):
+                body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": {"protocolVersion": "2025-06-18"} if rid == 1 else {}}).encode()
+                request = urllib.request.Request(server["url"], data=body, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    answer = json.loads(response.read() or b"{}")
+            names += [tool["name"] for tool in answer.get("result", {}).get("tools", [])]
+        except Exception as e:
+            names.append(f"(error from {server.get('url')}: {e})")
+    return names
 
 
 def authed():
@@ -162,6 +185,10 @@ def prompt(sid, text):
         # Like Claude's adapter: a local command, answered without the model.
         say(sid, USAGE_MARKDOWN)
         return "end_turn"
+    if text.strip() == "tools":
+        tools = sessions[sid].get("tools", [])
+        say(sid, f"{len(tools)} MCP tools: {', '.join(tools[:5])}")
+        return "end_turn"
     words = text.split(" ", 2)
     if words[0] == "run" and len(text) > 4:
         return run_command(sid, text[4:])
@@ -227,13 +254,15 @@ for line in sys.stdin:
                                  "_meta": {"terminal-auth": {"command": sys.executable, "args": [os.path.abspath(__file__), "--login"], "label": "Mock login",
                                                                  "env": {"MOCK_AUTH_MARKER": AUTH_MARKER}}}}]
             result = {"echoClientCapabilities": client_capabilities, "protocolVersion": params.get("protocolVersion", 1), "agentInfo": {"name": "Forge Mock ACP", "version": "0.2"},
-                      "agentCapabilities": {"loadSession": True, "promptCapabilities": {"image": True}}, "authMethods": auth_methods}
+                      "agentCapabilities": {"loadSession": True, "promptCapabilities": {"image": True}, "mcpCapabilities": {"http": MCP}}, "authMethods": auth_methods}
         elif method == "session/new":
             if AUTH_ON_NEW and not authed():
                 raise ValueError("Authentication required")
             sid = "mock-" + uuid.uuid4().hex[:10]
             sessions[sid] = {"cwd": params.get("cwd") or os.getcwd(), "history": []}
             sessions[sid]["mode"] = "default"
+            if MCP:
+                sessions[sid]["tools"] = mcp_tools(params.get("mcpServers") or [])
             result = {"sessionId": sid, "echoMcpServers": params.get("mcpServers") or [], "echoMeta": params.get("_meta"),
                       "modes": {"currentModeId": "default", "availableModes": MODES}, "configOptions": config_options(sessions[sid])}
             notify("session/update", {"sessionId": sid, "update": {"sessionUpdate": "available_commands_update", "availableCommands": [

@@ -8,6 +8,8 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 
+use crate::commit_proposal::Git;
+
 /// What a push would do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PushPlan {
@@ -70,19 +72,19 @@ pub(crate) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    Ok(forge_process::git(dir, args)?.trim().to_string())
+fn run(git: &Git, dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(git.run(dir, args)?.trim().to_string())
 }
 
 /// The push of the current branch in `dir`: to its upstream, or to `remote` (the branch's
 /// push remote, `origin` or the only remote when not given) as a new branch.
-pub(crate) fn plan(dir: &Path, remote: Option<&str>) -> Result<PushPlan> {
-    let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+pub(crate) fn plan(git: &Git, dir: &Path, remote: Option<&str>) -> Result<PushPlan> {
+    let branch = run(git, dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     anyhow::ensure!(branch != "HEAD", "HEAD is detached: there is no branch to push");
-    let remotes: Vec<String> = git(dir, &["remote"])?.lines().map(str::to_string).collect();
+    let remotes: Vec<String> = run(git, dir, &["remote"])?.lines().map(str::to_string).collect();
     anyhow::ensure!(!remotes.is_empty(), "the repository has no remote");
     // `origin/main` → (`origin`, `main`); remote names have no slash in practice.
-    let upstream = git(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).ok().and_then(|u| u.split_once('/').map(|(r, b)| (r.to_string(), b.to_string())));
+    let upstream = run(git, dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).ok().and_then(|u| u.split_once('/').map(|(r, b)| (r.to_string(), b.to_string())));
     let (remote, remote_branch, set_upstream) = match (remote, upstream) {
         (Some(asked), Some((r, b))) if asked == r => (r, b, false),
         (None, Some((r, b))) => (r, b, false),
@@ -90,7 +92,7 @@ pub(crate) fn plan(dir: &Path, remote: Option<&str>) -> Result<PushPlan> {
             if let Some(asked) = asked {
                 anyhow::ensure!(remotes.iter().any(|r| r == asked), "the repository has no remote named {asked}");
             }
-            let configured = git(dir, &["config", &format!("branch.{branch}.pushRemote")]).ok();
+            let configured = run(git, dir, &["config", &format!("branch.{branch}.pushRemote")]).ok();
             let remote = asked
                 .map(str::to_string)
                 .or(configured)
@@ -102,14 +104,14 @@ pub(crate) fn plan(dir: &Path, remote: Option<&str>) -> Result<PushPlan> {
         }
     };
     let remote_ref = format!("refs/remotes/{remote}/{remote_branch}");
-    let range = if git(dir, &["rev-parse", "--verify", "-q", &remote_ref]).is_ok() { format!("{remote_ref}..HEAD") } else { "HEAD".into() };
+    let range = if run(git, dir, &["rev-parse", "--verify", "-q", &remote_ref]).is_ok() { format!("{remote_ref}..HEAD") } else { "HEAD".into() };
     let mut args = vec!["log", "-50", "--format=%h%x09%s", range.as_str()];
     let not_remote = format!("--remotes={remote}");
     if range == "HEAD" {
         // A new branch: what the remote has under any branch is already there.
         args.extend(["--not", not_remote.as_str()]);
     }
-    let commits: Vec<(String, String)> = git(dir, &args)?.lines().filter_map(|l| l.split_once('\t')).map(|(h, s)| (h.to_string(), s.to_string())).collect();
+    let commits: Vec<(String, String)> = run(git, dir, &args)?.lines().filter_map(|l| l.split_once('\t')).map(|(h, s)| (h.to_string(), s.to_string())).collect();
     anyhow::ensure!(!commits.is_empty() || set_upstream, "{branch} is up to date with {remote}/{remote_branch}: there is nothing to push");
     Ok(PushPlan { branch, remote, remote_branch, set_upstream, commits })
 }
@@ -119,7 +121,7 @@ mod tests {
     use super::*;
 
     fn run(dir: &Path, args: &[&str]) {
-        git(dir, args).unwrap();
+        super::run(&Git::Here, dir, args).unwrap();
     }
 
     fn commit(dir: &Path, file: &str, message: &str) {
@@ -136,15 +138,15 @@ mod tests {
         let root = dir.path();
         run(root, &["init", "-q", "-b", "main"]);
         commit(root, "a.txt", "Start");
-        assert!(format!("{:#}", plan(root, None).unwrap_err()).contains("no remote"));
+        assert!(format!("{:#}", plan(&Git::Here, root, None).unwrap_err()).contains("no remote"));
 
         run(root, &["remote", "add", "origin", &remote.path().to_string_lossy()]);
         run(root, &["push", "-q", "-u", "origin", "main"]);
-        assert!(format!("{:#}", plan(root, None).unwrap_err()).contains("nothing to push"));
+        assert!(format!("{:#}", plan(&Git::Here, root, None).unwrap_err()).contains("nothing to push"));
 
         commit(root, "b.txt", "Add b");
         commit(root, "c.txt", "Add c");
-        let p = plan(root, None).unwrap();
+        let p = plan(&Git::Here, root, None).unwrap();
         assert_eq!((p.branch.as_str(), p.target(), p.set_upstream), ("main", "origin/main".to_string(), false));
         assert_eq!(p.commits.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["Add c", "Add b"]);
 
@@ -152,10 +154,10 @@ mod tests {
         run(root, &["push", "-q"]);
         run(root, &["checkout", "-q", "-b", "forge/fix"]);
         commit(root, "d.txt", "Fix d");
-        let p = plan(root, None).unwrap();
+        let p = plan(&Git::Here, root, None).unwrap();
         assert_eq!((p.target(), p.set_upstream), ("origin/forge/fix".to_string(), true));
         assert_eq!(p.commits.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["Fix d"]);
-        assert!(format!("{:#}", plan(root, Some("upstream")).unwrap_err()).contains("no remote named upstream"));
+        assert!(format!("{:#}", plan(&Git::Here, root, Some("upstream")).unwrap_err()).contains("no remote named upstream"));
     }
 
     #[test]

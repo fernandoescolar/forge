@@ -77,10 +77,29 @@ impl Registration {
         self.listed.store(false, Ordering::SeqCst);
     }
 
+    /// The server's port on this machine.
+    pub fn port(&self) -> Option<u16> {
+        self.url.strip_prefix("http://127.0.0.1:")?.split('/').next()?.parse().ok()
+    }
+
     /// The ACP `McpServer` object to pass in `session/new`.
     pub fn acp_server(&self) -> Value {
-        json!({ "type": "http", "name": SERVER_NAME, "url": self.url, "headers": [] })
+        acp_server(&self.url)
     }
+}
+
+/// A thread's `url` on `port` of a remote project's host, where its agent reaches the server
+/// through the agent's connection (`forge_host::agent`).
+pub fn url_on_port(url: &str, port: u16) -> String {
+    match url.split_once("/mcp/") {
+        Some((_, token)) => format!("http://127.0.0.1:{port}/mcp/{token}"),
+        None => url.to_string(),
+    }
+}
+
+/// The ACP `McpServer` object for the server at `url`.
+pub fn acp_server(url: &str) -> Value {
+    json!({ "type": "http", "name": SERVER_NAME, "url": url, "headers": [] })
 }
 
 impl Drop for Registration {
@@ -357,13 +376,14 @@ tools yourself saves the step.";
 /// tools and its own instead of the shell, and installs a hook that runs the simple shell
 /// commands that do through Forge's tools and refuses the rest (see
 /// [`crate::shell_guard`]), with the tool to use instead; `url` is the thread's server, which
-/// the hook calls. It also
+/// the hook calls, and `shell_hook` whether to install it (not for an agent on a remote
+/// project's host, which has no Forge to run it with). It also
 /// asks for summaries of Claude's thinking: recent models otherwise send it empty, and
 /// the thread only says "Working".
-pub fn session_meta(url: Option<&str>) -> Value {
+pub fn session_meta(url: Option<&str>, shell_hook: bool) -> Value {
     let mut options = json!({ "extraArgs": { "thinking-display": "summarized" } });
     let mut meta = json!({ "systemPrompt": { "append": SYSTEM_PROMPT_APPEND } });
-    if let Ok(exe) = std::env::current_exe() {
+    if let (Ok(exe), true) = (std::env::current_exe(), shell_hook) {
         options["settings"] = crate::shell_guard::hook_settings(&exe, url);
         // Forge's own adapters (agy's) install it as their agent's hook.
         meta["forge"] = json!({ "shellHook": { "command": crate::shell_guard::hook_command(&exe) } });

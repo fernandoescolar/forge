@@ -2,7 +2,8 @@
 //! server (`remote_server`) with Forge's languages, language servers and debug adapters
 //! registered next to Zed's. Forge uploads it to `~/.forge_server/` on first connection.
 //! The command line is Zed's, which the client drives (`run`, `proxy`, `version`…), plus
-//! `forge-host <method>` for Forge's own work on the host (`forge_host`).
+//! `forge-host <method>` for Forge's own work on the host (`forge_host`), and
+//! `forge-host agent` for the agents of remote projects (`forge_host::agent`).
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -26,7 +27,7 @@ struct Cli {
 }
 
 /// Forge's own work that runs where a remote project's files are (`forge_host`): each
-/// feature's discovery, runs and loads, by method.
+/// feature's discovery, runs and loads, by method (with `forge_host::files`).
 const HOST_HANDLERS: &[(&str, forge_host::Handler)] = &[
     (forge_tests::host::DISCOVER, forge_tests::host::discover),
     (forge_tests::host::RUN, forge_tests::host::run),
@@ -49,7 +50,12 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some(forge_host::SUBCOMMAND) {
         let method = args.next().unwrap_or_default();
-        forge_host::serve(&method, HOST_HANDLERS);
+        // An agent of a remote project: runs until it exits, not one call.
+        if method == forge_host::agent::AGENT {
+            forge_host::agent::serve();
+        }
+        let handlers: Vec<_> = HOST_HANDLERS.iter().chain(forge_host::files::HANDLERS).copied().collect();
+        forge_host::serve(&method, &handlers);
     }
 
     let cli = Cli::parse();

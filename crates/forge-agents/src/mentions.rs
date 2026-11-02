@@ -41,7 +41,7 @@ pub fn active_context(workspace: &Workspace, cx: &App) -> Option<ActiveContext> 
     let editor = workspace.active_item(cx)?.downcast::<Editor>()?;
     let editor = editor.read(cx);
     let buffer = editor.buffer().read(cx);
-    let path = buffer.as_singleton()?.read(cx).file()?.as_local()?.abs_path(cx);
+    let path = forge_ui::abs_path(buffer.as_singleton()?.read(cx).file()?, cx)?;
     let snapshot = buffer.snapshot(cx);
     let selection = editor.selections.newest_anchor();
     let (start, end) = (selection.start.to_point(&snapshot), selection.end.to_point(&snapshot));

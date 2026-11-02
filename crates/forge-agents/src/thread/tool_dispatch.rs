@@ -460,6 +460,8 @@ impl Thread {
 
     pub(crate) fn answer_remember(&mut self, ix: usize, keep: bool, cx: &mut Context<Self>) {
         use crate::forge_tools::EditState;
+        let Some(Entry::Remember { file, .. }) = self.entries.get(ix) else { return };
+        let fs = self.disk_for(file, cx);
         let Some(Entry::Remember { note, file, state, reply }) = self.entries.get_mut(ix) else { return };
         if !state.is_open() {
             return;
@@ -474,19 +476,13 @@ impl Thread {
         }
         *state = EditState::Applying;
         note.update(cx, |e, _| e.set_read_only(true));
-        let (file, fs) = (file.clone(), <dyn fs::Fs>::global(cx));
+        let file = file.clone();
         let shown = file.strip_prefix(&self.root).unwrap_or(&file).to_string_lossy().into_owned();
         self.changed(cx);
         cx.spawn(async move |this, cx| {
             let before = fs.load(&file).await.unwrap_or_default();
             let after = crate::rules::with_note(&before, &text);
-            let written = async {
-                if let Some(dir) = file.parent() {
-                    fs.create_dir(dir).await?;
-                }
-                fs.atomic_write(file.clone(), after).await
-            }
-            .await;
+            let written = fs.atomic_write(file.clone(), after).await;
             this.update(cx, |this, cx| {
                 if let Some(Entry::Remember { state, .. }) = this.entries.get_mut(ix) {
                     *state = match &written {

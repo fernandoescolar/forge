@@ -111,7 +111,7 @@ pub(crate) fn ask_here(editor: &Entity<Editor>, window: &mut Window, cx: &mut Ap
 
         let buffer = editor.buffer().read(cx).as_singleton();
         let root = workspace.read(cx).project().read(cx).visible_worktrees(cx).next().map(|t| t.read(cx).abs_path().to_path_buf());
-        let path = buffer.as_ref().and_then(|b| b.read(cx).file()).and_then(|f| f.as_local()).map(|f| f.abs_path(cx)).map(|abs: PathBuf| match &root {
+        let path = buffer.as_ref().and_then(|b| b.read(cx).file()).and_then(|f| forge_ui::abs_path(f, cx)).map(|abs: PathBuf| match &root {
             Some(root) => abs.strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| abs.to_string_lossy().into_owned()),
             None => abs.to_string_lossy().into_owned(),
         });
@@ -226,7 +226,7 @@ impl AnchoredCard {
     fn update_inline_diff(&mut self, cx: &mut Context<Self>) {
         let (Some(editor), Some(thread)) = (self.editor.upgrade(), self.thread.as_ref()) else { return };
         let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton() else { return };
-        let Some(path) = buffer.read(cx).file().and_then(|f| f.as_local()).map(|f| f.abs_path(cx)) else { return };
+        let Some(path) = buffer.read(cx).file().and_then(|f| forge_ui::abs_path(f, cx)) else { return };
         let thread = thread.read(cx);
         let base = thread.changes.iter().find(|c| c.path == path).map(|c| c.original.clone().unwrap_or_default());
         match base {

@@ -54,7 +54,7 @@ pub(crate) async fn symbol_at(ide: &Ide, args: &Value, cx: &mut AsyncWindowConte
 /// `path:line:column  code` for a location.
 fn describe(ide: &Ide, buffer: &Entity<Buffer>, start: Point, cx: &gpui::App) -> String {
     let buffer = buffer.read(cx);
-    let path = buffer.file().and_then(|f| f.as_local()).map(|f| ide.show(&f.abs_path(cx))).unwrap_or_else(|| "(unsaved buffer)".into());
+    let path = buffer.file().and_then(|f| forge_ui::abs_path(f, cx)).map(|p| ide.show(&p)).unwrap_or_else(|| "(unsaved buffer)".into());
     let snapshot = buffer.snapshot();
     let code: String = snapshot.text_for_range(Point::new(start.row, 0)..Point::new(start.row, snapshot.line_len(start.row))).collect();
     format!("{path}:{}:{}  {}", start.row + 1, start.column + 1, code.trim())
@@ -350,7 +350,7 @@ pub(crate) async fn edit_plan(name: &str, ide: &Ide, args: &Value, cx: &mut Asyn
 }
 
 fn buffer_path(buffer: &Entity<Buffer>, cx: &gpui::App) -> Option<PathBuf> {
-    buffer.read(cx).file().and_then(|f| f.as_local()).map(|f| f.abs_path(cx))
+    buffer.read(cx).file().and_then(|f| forge_ui::abs_path(f, cx))
 }
 
 /// Makes the edit with the language server, through the open buffers, and saves the files:
@@ -383,11 +383,12 @@ pub(crate) async fn apply_edit(ide: &Ide, plan: &EditPlan, cx: &mut AsyncWindowC
         return Ok(Vec::new());
     }
     let mut records = Vec::new();
+    let disk = cx.update(|_, cx| ide.project.upgrade().map(|project| crate::disk::Disk::of(&project, cx))).map_err(|_| closed())?.ok_or_else(closed)?;
     for buffer in transaction.0.into_keys() {
         let (path, new_text) = cx.update(|_, cx| (buffer_path(&buffer, cx), buffer.read(cx).text())).map_err(|_| closed())?;
         let Some(path) = path else { continue };
         // Not saved yet: the file on disk is still the old text.
-        let old_text = std::fs::read_to_string(&path).ok();
+        let old_text = disk.load(&path).await.ok();
         let save = ide.project.update(cx, |p, cx| p.save_buffer(buffer.clone(), cx)).map_err(|_| closed())?;
         save.await.map_err(|e| format!("Couldn't save {}: {e:#}", ide.show(&path)))?;
         records.push(crate::project_fs::WriteRecord { path, old_text, new_text, problems_before: None });
@@ -600,7 +601,7 @@ pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolR
                 Some(editor) => {
                     let editor = editor.read(cx);
                     let buffer = editor.buffer().read(cx);
-                    let path = buffer.as_singleton().and_then(|b| b.read(cx).file().and_then(|f| f.as_local()).map(|f| f.abs_path(cx)));
+                    let path = buffer.as_singleton().and_then(|b| b.read(cx).file().and_then(|f| forge_ui::abs_path(f, cx)));
                     let snapshot = buffer.snapshot(cx);
                     let selection = editor.selections.newest_anchor();
                     let (start, end) = (selection.start.to_point(&snapshot), selection.end.to_point(&snapshot));
@@ -618,7 +619,7 @@ pub(crate) async fn user_context(ide: Ide, cx: &mut AsyncWindowContext) -> ToolR
             }
             let mut open: Vec<String> = ws
                 .items_of_type::<editor::Editor>(cx)
-                .filter_map(|e| e.read(cx).buffer().read(cx).as_singleton()?.read(cx).file()?.as_local().map(|f| ide.show(&f.abs_path(cx))))
+                .filter_map(|e| forge_ui::abs_path(e.read(cx).buffer().read(cx).as_singleton()?.read(cx).file()?, cx).map(|p| ide.show(&p)))
                 .collect();
             open.sort();
             open.dedup();

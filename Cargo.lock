@@ -3495,6 +3495,7 @@ dependencies = [
  "editor",
  "file_icons",
  "forge-git",
+ "forge-host",
  "forge-process",
  "forge-ui",
  "fs",
@@ -3525,6 +3526,7 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
+ "smol",
  "task",
  "tempfile",
  "terminal",
@@ -3685,6 +3687,8 @@ name = "forge-host"
 version = "0.0.1-beta"
 dependencies = [
  "anyhow",
+ "base64",
+ "forge-process",
  "futures",
  "gpui",
  "libc",
@@ -3696,6 +3700,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tokio",
 ]
 
 [[package]]
@@ -3900,6 +3905,7 @@ dependencies = [
  "remote_server",
  "serde_json",
  "tempfile",
+ "tokio",
  "util",
 ]
 
@@ -4000,6 +4006,7 @@ dependencies = [
  "futures",
  "fuzzy",
  "gpui",
+ "language",
  "log",
  "paths",
  "picker",
