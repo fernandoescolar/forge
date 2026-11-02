@@ -110,6 +110,8 @@ pub struct ExtensionHost {
     /// Agents' calls to extension tools waiting for their answer.
     pub(crate) agent_calls: crate::agent_tools::PendingCalls,
     pub(crate) next_process: u64,
+    /// Read-only editors opened with `workspace.openText`, by the id they were opened with.
+    pub(crate) text_views: HashMap<String, WeakEntity<editor::Editor>>,
 }
 
 /// Where extension settings are stored: one object, keyed by setting (`notes.sortBy`).
@@ -153,6 +155,7 @@ impl ExtensionHost {
             processes: HashMap::new(),
             next_process: 1,
             agent_calls: Default::default(),
+            text_views: HashMap::new(),
         });
         cx.set_global(GlobalHost(host.clone()));
         // Agents' calls to extensions' tools run on the JS thread.
@@ -586,6 +589,29 @@ impl ExtensionHost {
                         .detach();
                     })
                     .log_err();
+            }
+            "workspace.openText" => {
+                let (Some(workspace), Some((_, window))) = (self.workspace(), self.workspace.clone()) else {
+                    return self.reply(id, Err(anyhow!("no workspace is open")));
+                };
+                let key = str_arg("id");
+                let text = str_arg("text").unwrap_or_default();
+                let title = str_arg("title").unwrap_or_else(|| "Untitled".into());
+                let language = str_arg("language").filter(|l| !l.is_empty());
+                let existing = key.as_ref().and_then(|k| self.text_views.get(k)).and_then(|v| v.upgrade());
+                let result = window.update(cx, |_, window, cx| {
+                    workspace.update(cx, |ws, cx| crate::text_view::open(ws, existing, text, title, language, window, cx))
+                }).and_then(|r| r);
+                match result {
+                    Ok(view) => {
+                        if let Some(key) = key {
+                            self.text_views.retain(|_, v| v.upgrade().is_some());
+                            self.text_views.insert(key, view.downgrade());
+                        }
+                        self.reply(id, Ok(Value::Null));
+                    }
+                    Err(e) => self.reply(id, Err(e)),
+                }
             }
             other if self.call_api(other, &args, id, cx) => {}
             other => self.reply(id, Err(anyhow!("unknown host method {other}"))),

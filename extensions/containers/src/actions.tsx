@@ -1,5 +1,5 @@
 // What the panel's buttons and menus do to a container, a Compose project or an image.
-import { forge, Scroll, Text } from '@forge-ide/api';
+import { forge } from '@forge-ide/api';
 import * as docker from './docker';
 import type { Container, Image } from './docker';
 import * as store from './store';
@@ -48,7 +48,7 @@ export async function openComposeFile(p: Project) {
   else forge.window.showMessage(`Docker didn't record ${p.name}'s compose file.`, 'warning');
 }
 
-/** `docker inspect` in a tab. */
+/** `docker inspect` in a read-only editor tab (searchable, selectable). */
 export async function inspect(id: string, name: string) {
   let text: string;
   try {
@@ -56,16 +56,7 @@ export async function inspect(id: string, name: string) {
   } catch (e) {
     return forge.window.showMessage(e instanceof Error ? e.message : String(e), 'error');
   }
-  forge.tabs.open({
-    id: `containers.inspect.${id}`,
-    title: `Inspect: ${name}`,
-    icon: 'json',
-    render: () => (
-      <Scroll style={{ grow: true, padding: 8 }}>
-        <Text selectable style={{ mono: true, size: 'sm' }}>{text}</Text>
-      </Scroll>
-    ),
-  });
+  await forge.workspace.openText(text, { id: `containers.inspect.${id}`, title: `Inspect: ${name}`, language: 'JSON' });
 }
 
 /** Compose files in the project's folders, for Compose Up. */

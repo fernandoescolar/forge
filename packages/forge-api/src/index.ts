@@ -736,6 +736,12 @@ export function forgeFor(extension: string | null) {
     /** Reads a file; returns the editor buffer contents if it is open with unsaved changes. */
     readFile: (path: string) => call<string>('workspace.readFile', { path }),
     openFile: (path: string, line?: number) => call<void>('workspace.openFile', { path, line }),
+    /**
+     * Shows `text` in a read-only editor tab (with its search, selection and copy), highlighted
+     * as `language` (Forge's name for it: "JSON", "YAML"…). Opening again with the same `id`
+     * updates that tab instead of opening another. Ids are shared by all extensions: prefix yours.
+     */
+    openText: (text: string, options: { title: string; language?: string; id?: string }) => call<void>('workspace.openText', { text, ...options }),
     /** Path of the file in the active editor, if any. */
     activeFile: () => call<string | null>('workspace.activeFile'),
     /** When another file (or none: `null`) becomes the active one. */

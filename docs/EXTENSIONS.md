@@ -274,6 +274,7 @@ During development, `FORGE_EXTENSIONS_PANEL=<panel id>` opens the Extensions pan
 const roots = await forge.workspace.roots();               // the project's folders
 const text = await forge.workspace.readFile('src/main.rs'); // with unsaved changes, when it's open
 await forge.workspace.openFile('src/main.rs', 41);          // zero-based line
+await forge.workspace.openText(json, { title: 'Result', language: 'JSON', id: 'me.result' }); // read-only tab; same id reuses it
 const active = await forge.workspace.activeFile();          // path or null
 forge.workspace.onDidChangeActiveFile((path) => { /* … */ });
 forge.workspace.onDidSaveFile((path) => { /* … */ });
@@ -463,7 +464,7 @@ Extensions run with the user's rights: they can read files and run programs. Say
 | `forge.panels` | `register({ id, title, icon, position, layout, render })` |
 | `forge.tabs` | `open({ id, title, icon, render, onClose })` → `{ setTitle, update, close }` |
 | `forge.commands` | `register(id, title, handler)` |
-| `forge.workspace` | `roots`, `readFile`, `openFile`, `activeFile`, `onDidChangeActiveFile`, `onDidSaveFile` |
+| `forge.workspace` | `roots`, `readFile`, `openFile`, `openText`, `activeFile`, `onDidChangeActiveFile`, `onDidSaveFile` |
 | `forge.editor` | `active`, `getText`, `edit`, `replaceSelections`, `select`, `setDecorations`, `onDidChangeSelection` |
 | `forge.process` | `exec`, `spawn`, `sidecar` |
 | `forge.terminal` | `run` |

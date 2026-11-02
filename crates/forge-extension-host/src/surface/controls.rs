@@ -63,6 +63,18 @@ impl Surface {
                 let text = secondary_editor.read(cx).text(cx);
                 secondary_host.read(cx).dispatch(id, "onSubmit", json!(text));
             })
+            // A single line takes and gives text without the spaces and line breaks around it
+            // (a value copied from a terminal or a document often brings them).
+            .when(!multiline, |el| {
+                let paste_editor = editor.clone();
+                el.capture_action(move |_: &editor::actions::Paste, window, cx| {
+                    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+                    cx.stop_propagation();
+                    paste_editor.update(cx, |e, cx| e.insert(text.trim(), window, cx));
+                })
+                .capture_action(|_: &editor::actions::Copy, window, cx| trim_clipboard_after(window, cx))
+                .capture_action(|_: &editor::actions::Cut, window, cx| trim_clipboard_after(window, cx))
+            })
             .px_2()
             .py_1()
             .border_1()
@@ -191,4 +203,15 @@ impl Render for DraggedTreeItemView {
             .border_color(colors.border_focused)
             .child(Label::new(self.label.clone()).size(LabelSize::Small))
     }
+}
+
+/// Trims what the editor puts on the clipboard, once the copy (or cut) it is handling is done.
+fn trim_clipboard_after(window: &mut Window, cx: &mut App) {
+    window.defer(cx, |_, cx| {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let trimmed = text.trim();
+        if trimmed.len() != text.len() {
+            cx.write_to_clipboard(ClipboardItem::new_string(trimmed.to_string()));
+        }
+    });
 }
