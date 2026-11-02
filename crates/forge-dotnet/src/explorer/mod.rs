@@ -689,7 +689,7 @@ impl SolutionExplorer {
                     .indent_level(*depth)
                     .indent_step_size(px(12.))
                     .spacing(ListItemSpacing::ExtraDense)
-                    .start_slot(Icon::new(if *is_dir { IconName::Folder } else { IconName::File }).size(IconSize::Small).color(Color::Muted))
+                    .start_slot(Icon::new(if *is_dir { IconName::Folder } else { IconName::File }).color(Color::Muted))
                     .child(div().w_full().h(px(20.)).children(editor))
                     .into_any_element()
             }
@@ -811,7 +811,7 @@ impl SolutionExplorer {
                             this.toggle(&toggle_id, cx);
                         }))
                     })
-                    .start_slot(self.row_icon(row, cx).size(IconSize::Small))
+                    .start_slot(self.row_icon(row, cx))
                     .child(label)
                     .end_slot::<AnyElement>(git_mark.map(|mark| {
                         div().pr_2().child(Label::new(mark).size(LabelSize::Small).color(git_color.unwrap_or(Color::Muted))).into_any_element()
