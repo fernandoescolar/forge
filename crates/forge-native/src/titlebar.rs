@@ -5,17 +5,19 @@
 //! (target, run, debug, stop) and the result of the last test run on the right. Where
 //! there is no global menu bar (Linux, Windows), the app menus take the left as buttons,
 //! and the project and its git state move to the right, ahead of the solution and run
-//! controls: next to the menus they read as one more menu.
+//! controls: next to the menus they read as one more menu. A remote project's window shows
+//! the host it is on first, filled with the accent color.
 
 use forge_languages::active_build::ActiveBuild;
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
 use gpui::{
     Action, AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use platform_title_bar::PlatformTitleBar;
 use project::Project;
+use remote::{ConnectionState, RemoteConnectionOptions};
 use theme::ActiveTheme as _;
 use ui::{
     ButtonCommon as _, ButtonLike, ButtonStyle, Clickable as _, Color, ContextMenu, Disableable as _, Icon, IconButton, IconName, IconSize, Label,
@@ -67,12 +69,50 @@ impl ForgeTitleBar {
             // Panels and the active item change what the bar shows.
             cx.observe(workspace_entity, |_, _, cx| cx.notify()),
         ];
+        // The connection to a remote project's host: connected, reconnecting, lost.
+        let subscriptions = subscriptions.into_iter().chain(project.read(cx).remote_client().map(|client| cx.observe(&client, |_, _, cx| cx.notify()))).collect();
         Self { platform, workspace: workspace.weak_handle(), project, watched_run: false, watched_tests: false, watched_solution: false, _subscriptions: subscriptions }
     }
 
     fn project_name(&self, cx: &gpui::App) -> Option<SharedString> {
         let names: Vec<String> = self.project.read(cx).visible_worktrees(cx).map(|wt| wt.read(cx).root_name().as_unix_str().to_string()).collect();
         (!names.is_empty()).then(|| names.join(", ").into())
+    }
+
+    /// "SSH user@host" for a remote project, in the accent color while connected and in the
+    /// warning or error color while it reconnects or after it lost the host.
+    fn remote_host(&self, cx: &gpui::App) -> Option<AnyElement> {
+        let project = self.project.read(cx);
+        let options = project.remote_connection_options(cx)?;
+        let state = project.remote_connection_state(cx)?;
+        let (theme, host) = (cx.theme(), remote_label(&options));
+        let (fill, status) = match state {
+            ConnectionState::Connected => (theme.colors().text_accent, None),
+            ConnectionState::Connecting => (theme.status().warning, Some("connecting…")),
+            ConnectionState::HeartbeatMissed | ConnectionState::Reconnecting => (theme.status().warning, Some("reconnecting…")),
+            ConnectionState::Disconnected => (theme.status().error, Some("disconnected")),
+        };
+        let text = Color::Custom(theme.colors().editor_background);
+        let tooltip: SharedString = match status {
+            None => format!("Connected to {host} over {}: files, terminals, language servers and agents run there", options.connection_type().to_uppercase()),
+            Some(status) => format!("{host}: {status}"),
+        }
+        .into();
+        Some(
+            h_flex()
+                .id("tb-remote-host")
+                .gap_1()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(fill)
+                .child(Icon::new(IconName::Server).size(IconSize::XSmall).color(text))
+                .child(Label::new(options.connection_type().to_uppercase()).size(LabelSize::XSmall).weight(FontWeight::BOLD).color(text))
+                .child(Label::new(host).size(LabelSize::Small).weight(FontWeight::SEMIBOLD).color(text))
+                .children(status.map(|status| Label::new(status).size(LabelSize::XSmall).color(text)))
+                .tooltip(Tooltip::text(tooltip))
+                .into_any_element(),
+        )
     }
 
     fn branch(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -444,6 +484,7 @@ impl Render for ForgeTitleBar {
             // Breathing room after the traffic lights.
             .pl_4()
             .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
+            .children(self.remote_host(cx).map(clickable))
             .when(!global_menu_bar, |row| row.children(app_menu_bar(cx)))
             .children(project_left);
 
@@ -468,6 +509,17 @@ impl Render for ForgeTitleBar {
             .into_any_element()];
         self.platform.update(cx, |bar, _| bar.set_children(children));
         self.platform.clone()
+    }
+}
+
+/// The host as you would type it after `ssh` (its nickname in Zed's settings, when it has one).
+fn remote_label(options: &RemoteConnectionOptions) -> String {
+    match options {
+        RemoteConnectionOptions::Ssh(ssh) if ssh.nickname.is_none() => match &ssh.username {
+            Some(user) => format!("{user}@{}", ssh.host.to_string()),
+            None => ssh.host.to_string(),
+        },
+        other => other.display_name(),
     }
 }
 
@@ -528,4 +580,24 @@ fn fill_menu(menu: ContextMenu, items: &[gpui::OwnedMenuItem]) -> ContextMenu {
         }
     }
     menu
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_the_host_as_ssh_would() {
+        let ssh = |username: Option<&str>, nickname: Option<&str>| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "build-box".into(),
+                username: username.map(Into::into),
+                nickname: nickname.map(Into::into),
+                ..Default::default()
+            })
+        };
+        assert_eq!(remote_label(&ssh(Some("me"), None)), "me@build-box");
+        assert_eq!(remote_label(&ssh(None, None)), "build-box");
+        assert_eq!(remote_label(&ssh(Some("me"), Some("lab"))), "lab");
+    }
 }
