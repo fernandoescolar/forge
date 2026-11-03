@@ -143,6 +143,9 @@ fn main() {
         zed_actions::init();
         release_channel::init(semver(env!("CARGO_PKG_VERSION")), cx);
         gpui_tokio::init(cx);
+        // Zed's bundled Lilex and IBM Plex: where text falls back to when the configured
+        // font (Hack Nerd Font Mono) isn't installed, instead of a proportional system font.
+        Assets.load_fonts(cx).log_err();
         settings::init(cx);
         apply_forge_defaults(cx);
         config_files::ensure();
