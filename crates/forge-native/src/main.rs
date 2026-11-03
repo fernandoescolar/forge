@@ -205,6 +205,9 @@ fn main() {
         theme_selector::init(cx);
         diagnostics::init(cx);
         outline::init(cx);
+        markdown_preview::init(cx);
+        svg_preview::init(cx);
+        image_viewer::init(cx);
         forge_extension_host::init(cx);
         forge_agents::init(cx);
         forge_tests::init(cx);

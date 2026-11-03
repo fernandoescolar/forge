@@ -1,6 +1,7 @@
 //! The find bar (⌘F) and the project search's query bar (⌘⇧F). Both live in a pane's
 //! toolbar: without them the actions have nowhere to show up. Zed adds them in its
-//! `initialize_pane`, which Forge doesn't run.
+//! `initialize_pane`, which Forge doesn't run. The image viewer's zoom controls go in the
+//! same toolbar.
 
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use search::{BufferSearchBar, project_search::ProjectSearchBar};
@@ -29,6 +30,8 @@ fn add_to_pane(workspace: &Workspace, pane: &Entity<Pane>, window: &mut Window, 
             toolbar.add_item(buffer_search_bar, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());
             toolbar.add_item(project_search_bar, window, cx);
+            let image_view_toolbar = cx.new(|_| image_viewer::ImageViewToolbarControls::new());
+            toolbar.add_item(image_view_toolbar, window, cx);
         })
     });
 }

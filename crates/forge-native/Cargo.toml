@@ -63,8 +63,10 @@ go_to_line = { path = "../../vendor/zed/crates/go_to_line" }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
 gpui_tokio = { path = "../../vendor/zed/crates/gpui_tokio" }
+image_viewer = { path = "../../vendor/zed/crates/image_viewer" }
 language = { path = "../../vendor/zed/crates/language" }
 markdown = { path = "../../vendor/zed/crates/markdown" }
+markdown_preview = { path = "../../vendor/zed/crates/markdown_preview" }
 languages = { path = "../../vendor/zed/crates/languages", features = ["load-grammars"] }
 menu = { path = "../../vendor/zed/crates/menu" }
 node_runtime = { path = "../../vendor/zed/crates/node_runtime" }
@@ -76,6 +78,7 @@ reqwest_client = { path = "../../vendor/zed/crates/reqwest_client" }
 search = { path = "../../vendor/zed/crates/search" }
 session = { path = "../../vendor/zed/crates/session" }
 settings = { path = "../../vendor/zed/crates/settings" }
+svg_preview = { path = "../../vendor/zed/crates/svg_preview" }
 terminal_view = { path = "../../vendor/zed/crates/terminal_view" }
 theme = { path = "../../vendor/zed/crates/theme" }
 theme_settings = { path = "../../vendor/zed/crates/theme_settings" }

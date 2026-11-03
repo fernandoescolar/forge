@@ -15,6 +15,8 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     // "Resolve merge conflicts with agent", while the project has some.
     let conflicts = cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
     let pull_request = cx.new(|cx| forge_github::PullRequestStatus::new(workspace, cx));
+    // Size and dimensions of the open image.
+    let image_info = cx.new(|_| image_viewer::ImageInfo::new(workspace));
     workspace.status_bar().update(cx, |bar, cx| {
         bar.add_left_item(diagnostics, window, cx);
         bar.add_left_item(servers, window, cx);
@@ -22,6 +24,7 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         bar.add_left_item(agents, window, cx);
         bar.add_left_item(conflicts, window, cx);
         bar.add_left_item(pull_request, window, cx);
+        bar.add_right_item(image_info, window, cx);
         bar.add_right_item(cursor, window, cx);
     });
 }

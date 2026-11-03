@@ -3818,11 +3818,13 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "image",
+ "image_viewer",
  "language",
  "language_model",
  "languages",
  "log",
  "markdown",
+ "markdown_preview",
  "menu",
  "multi_buffer",
  "node_runtime",
@@ -3845,6 +3847,7 @@ dependencies = [
  "serde_json_lenient",
  "session",
  "settings",
+ "svg_preview",
  "tempfile",
  "terminal_view",
  "theme",
@@ -5615,6 +5618,26 @@ checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error 2.0.1",
+]
+
+[[package]]
+name = "image_viewer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "editor",
+ "file_icons",
+ "gpui",
+ "language",
+ "log",
+ "menu",
+ "project",
+ "settings",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
