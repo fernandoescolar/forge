@@ -1,0 +1,23 @@
+diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
+index 8060738..bb5b1dc 100644
+--- a/crates/project/src/lsp_store.rs
++++ b/crates/project/src/lsp_store.rs
+@@ -9652,7 +9652,17 @@ impl LspStore {
+ 
+             let build_change = || {
+                 if line_ending_changed {
+-                    build_full_change()
++                    // Spelled out as an edit of the whole document: Roslyn advertises incremental
++                    // sync, dereferences `range` unchecked, and the failure ends its process.
++                    let previous_end = previous_snapshot.snapshot.max_point_utf16();
++                    vec![lsp::TextDocumentContentChangeEvent {
++                        range: Some(lsp::Range::new(
++                            lsp::Position::new(0, 0),
++                            point_to_lsp(previous_end),
++                        )),
++                        range_length: None,
++                        text: next_snapshot.text_with_line_endings(),
++                    }]
+                 } else {
+                     build_incremental_change()
+                 }

@@ -1,0 +1,19 @@
+diff --git a/crates/lsp/src/lsp.rs b/crates/lsp/src/lsp.rs
+index 2b602d2..60711f9 100644
+--- a/crates/lsp/src/lsp.rs
++++ b/crates/lsp/src/lsp.rs
+@@ -1492,6 +1492,14 @@ impl LanguageServer {
+         self.server.lock().as_ref().map(|child| child.id())
+     }
+ 
++    /// How the server's process ended, if it has.
++    pub fn exit_status(&self) -> Option<std::process::ExitStatus> {
++        self.server
++            .lock()
++            .as_mut()
++            .and_then(|child| child.try_status().ok().flatten())
++    }
++
+     /// Get the binary information of the running language server.
+     pub fn binary(&self) -> &LanguageServerBinary {
+         &self.binary

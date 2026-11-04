@@ -23,7 +23,7 @@ use project::{PathChange, Project};
 
 use crate::config;
 use crate::language_server_sync::AssetsWatchers;
-use crate::roslyn_session::{ROSLYN, RoslynSession};
+use crate::roslyn_session::{ROSLYN, RoslynSession, WATCH_INTERVAL};
 use forge_languages::active_build::ActiveBuild;
 
 pub enum ModelEvent {
@@ -77,6 +77,7 @@ pub struct DotnetModel {
     assets_watchers: AssetsWatchers,
     /// Tells Roslyn which solution to load.
     roslyn: RoslynSession,
+    _roslyn_watch: Task<()>,
     /// The solution whose saved configuration and framework were last restored.
     build_for: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
@@ -121,6 +122,18 @@ impl DotnetModel {
                 this.schedule(cx);
             }
         });
+        let roslyn_watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_INTERVAL).await;
+                let watched = this.update(cx, |this, cx| {
+                    let project = this.project.clone();
+                    this.roslyn.watch(&project, cx);
+                });
+                if watched.is_err() {
+                    break;
+                }
+            }
+        });
         let mut model = Self {
             project,
             solutions: Vec::new(),
@@ -137,6 +150,7 @@ impl DotnetModel {
             load_task: None,
             assets_watchers: AssetsWatchers::default(),
             roslyn: RoslynSession::default(),
+            _roslyn_watch: roslyn_watch,
             build_for: None,
             _subscriptions: vec![subscription, build_subscription],
         };

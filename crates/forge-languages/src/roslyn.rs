@@ -9,7 +9,7 @@
 //!
 //! Unlike OmniSharp, Roslyn loads nothing until the client tells it what to open
 //! (`solution/open`, `project/open`); `forge-dotnet` does that with the Solution Explorer's
-//! solution. Its options come through `workspace/configuration`, as `csharp|section.option`
+//! solution, and starts the server again if it dies. Its options come through `workspace/configuration`, as `csharp|section.option`
 //! keys.
 
 use std::path::{Path, PathBuf};
