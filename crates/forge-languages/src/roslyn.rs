@@ -10,7 +10,10 @@
 //! Unlike OmniSharp, Roslyn loads nothing until the client tells it what to open
 //! (`solution/open`, `project/open`); `forge-dotnet` does that with the Solution Explorer's
 //! solution, and starts the server again if it dies. Its options come through `workspace/configuration`, as `csharp|section.option`
-//! keys.
+//! keys. When a project needs a restore before it can load (new or changed packages), Roslyn
+//! asks the client to run it (`workspace/_roslyn_projectNeedsRestore`) and reloads when the
+//! answer comes. The adapter answers, as it runs where the server does: on the host, in a
+//! remote project.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,8 +26,10 @@ use gpui::{App, AsyncApp};
 use http_client::github::AssetKind;
 use http_client::github_download::download_server_binary;
 use language::{LanguageServerName, LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
-use lsp::{InitializeParams, LanguageServerBinary, Uri};
+use lsp::{InitializeParams, IoKind, LanguageServer, LanguageServerBinary, Uri};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use util::command::{Stdio, new_command};
 use util::fs::remove_matching;
 
 pub(crate) const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("roslyn");
@@ -123,6 +128,48 @@ fn find_server_dll(package_dir: &Path) -> Option<PathBuf> {
     })
 }
 
+enum ProjectInitializationComplete {}
+
+impl lsp::notification::Notification for ProjectInitializationComplete {
+    type Params = Option<Value>;
+    const METHOD: &'static str = "workspace/projectInitializationComplete";
+}
+
+enum ProjectNeedsRestore {}
+
+impl lsp::request::Request for ProjectNeedsRestore {
+    type Params = RestoreParams;
+    type Result = ();
+    const METHOD: &'static str = "workspace/_roslyn_projectNeedsRestore";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreParams {
+    #[serde(default)]
+    project_file_paths: Vec<PathBuf>,
+}
+
+/// Restores a project in the server's environment. Failures are only logged: the server loads
+/// the project as it can.
+async fn restore(project: &Path, env: &collections::HashMap<String, String>) {
+    let mut command = new_command("dotnet");
+    command.arg("restore").arg(project).arg("--nologo").envs(env).stdin(Stdio::null()).kill_on_drop(true);
+    if let Some(dir) = project.parent() {
+        command.current_dir(dir);
+    }
+    match forge_process::spawn_unblocked(move || command.spawn()) {
+        Ok(child) => match child.output().await {
+            Ok(output) if !output.status.success() => {
+                log::warn!("Roslyn: restoring {} failed: {}{}", project.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("Roslyn: restoring {}: {error:#}", project.display()),
+        },
+        Err(error) => log::warn!("Roslyn: starting `dotnet`: {error:#}"),
+    }
+}
+
 pub struct RoslynVersion {
     version: String,
     url: String,
@@ -217,6 +264,31 @@ impl RoslynLspAdapter {
 impl LspAdapter for RoslynLspAdapter {
     fn name(&self) -> LanguageServerName {
         SERVER_NAME
+    }
+
+    fn register_server_handlers(&self, server: &LanguageServer) {
+        server.on_notification::<ProjectInitializationComplete, _>(|_, _| log::info!("Roslyn: projects loaded")).detach();
+        let env = server.binary().env.clone().unwrap_or_default();
+        server
+            .on_request::<ProjectNeedsRestore, _, _>(move |params, _| {
+                let env = env.clone();
+                async move {
+                    for project in &params.project_file_paths {
+                        log::info!("Roslyn: restoring {}", project.display());
+                        restore(project, &env).await;
+                    }
+                    Ok(())
+                }
+            })
+            .detach();
+        // Roslyn only writes to stderr when it fails: this is the stack trace of what ended it.
+        server
+            .on_io(|kind, message| {
+                if matches!(kind, IoKind::StdErr) {
+                    log::error!("Roslyn: {}", message.trim_end());
+                }
+            })
+            .detach();
     }
 
     /// The "N references" lens asks the client to show the references at its position.
@@ -322,6 +394,12 @@ impl LspInstaller for RoslynLspAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_what_to_restore() {
+        let params: RestoreParams = serde_json::from_str(r#"{ "projectFilePaths": ["/src/App/App.csproj"] }"#).unwrap();
+        assert_eq!(params.project_file_paths, vec![PathBuf::from("/src/App/App.csproj")]);
+    }
 
     #[test]
     fn picks_the_newest_stable_version() {

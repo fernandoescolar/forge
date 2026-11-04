@@ -1,0 +1,220 @@
+diff --git a/crates/language/src/language.rs b/crates/language/src/language.rs
+--- a/crates/language/src/language.rs
++++ b/crates/language/src/language.rs
+@@ -520,6 +520,10 @@
+ 
+     fn process_diagnostics(&self, _: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {}
+ 
++    /// Called with a server before it is initialized, on the machine it runs on, to handle
++    /// the requests and notifications only this adapter knows about.
++    fn register_server_handlers(&self, _: &lsp::LanguageServer) {}
++
+     /// When processing new `lsp::PublishDiagnosticsParams` diagnostics, whether to retain previous one(s) or not.
+     fn retain_old_diagnostic(&self, _previous_diagnostic: &Diagnostic) -> bool {
+         false
+diff --git a/crates/lsp/src/lsp.rs b/crates/lsp/src/lsp.rs
+--- a/crates/lsp/src/lsp.rs
++++ b/crates/lsp/src/lsp.rs
+@@ -1691,6 +1691,20 @@
+         Self::notify_internal::<T>(&outbound, params)
+     }
+ 
++    /// Sends a notification that has no [`notification::Notification`] type.
++    pub fn notify_raw(&self, method: String, params: Value) -> Result<()> {
++        let serializer = NotificationSerializer(Box::new(move || {
++            serde_json::to_string(&Notification {
++                jsonrpc: JSON_RPC_VERSION,
++                method: &method,
++                params,
++            })
++            .unwrap()
++        }));
++        self.notification_tx.send_blocking(serializer)?;
++        Ok(())
++    }
++
+     fn notify_internal<T: notification::Notification>(
+         outbound_tx: &async_channel::Sender<NotificationSerializer>,
+         params: T::Params,
+diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
+--- a/crates/project/src/lsp_store.rs
++++ b/crates/project/src/lsp_store.rs
+@@ -906,6 +906,7 @@
+         delegate: Arc<dyn LspAdapterDelegate>,
+         adapter: Arc<CachedLspAdapter>,
+     ) {
++        adapter.adapter.register_server_handlers(language_server);
+         let name = language_server.name();
+         let server_id = language_server.server_id();
+         language_server
+@@ -4790,6 +4791,8 @@
+         client.add_entity_message_handler(Self::handle_lsp_query_response);
+         client.add_entity_request_handler(Self::handle_restart_language_servers);
+         client.add_entity_request_handler(Self::handle_stop_language_servers);
++        client.add_entity_request_handler(Self::handle_notify_language_server);
++        client.add_entity_request_handler(Self::handle_get_language_server_exit_status);
+         client.add_entity_request_handler(Self::handle_cancel_language_server_work);
+         client.add_entity_message_handler(Self::handle_start_language_server);
+         client.add_entity_message_handler(Self::handle_update_language_server);
+@@ -11975,6 +11978,89 @@
+         self.as_local()?.language_server_for_id(id)
+     }
+ 
++    /// Sends a language server a notification that has no typed API, on this machine or on
++    /// the project's host, where [`Self::language_server_for_id`] doesn't reach.
++    pub fn notify_language_server(
++        &self,
++        id: LanguageServerId,
++        method: String,
++        params: serde_json::Value,
++        cx: &App,
++    ) -> Task<Result<()>> {
++        if let Some((client, project_id)) = self.upstream_client() {
++            let request = client.request(proto::NotifyLanguageServer {
++                project_id,
++                language_server_id: id.to_proto(),
++                method,
++                params: params.to_string(),
++            });
++            return cx.background_spawn(async move {
++                request.await?;
++                Ok(())
++            });
++        }
++        Task::ready(self.notify_local_language_server(id, method, params))
++    }
++
++    /// How a language server's process ended, if it has: on this machine or on the project's
++    /// host, where [`Self::language_server_for_id`] doesn't reach.
++    pub fn language_server_exit_status(
++        &self,
++        id: LanguageServerId,
++        cx: &App,
++    ) -> Task<Result<Option<String>>> {
++        if let Some((client, project_id)) = self.upstream_client() {
++            let request = client.request(proto::GetLanguageServerExitStatus {
++                project_id,
++                language_server_id: id.to_proto(),
++            });
++            return cx.background_spawn(async move { Ok(request.await?.status) });
++        }
++        Task::ready(Ok(self.local_language_server_exit_status(id)))
++    }
++
++    fn notify_local_language_server(
++        &self,
++        id: LanguageServerId,
++        method: String,
++        params: serde_json::Value,
++    ) -> Result<()> {
++        self.language_server_for_id(id)
++            .with_context(|| format!("no running language server {id}"))?
++            .notify_raw(method, params)
++    }
++
++    fn local_language_server_exit_status(&self, id: LanguageServerId) -> Option<String> {
++        let status = self.language_server_for_id(id)?.exit_status()?;
++        Some(status.to_string())
++    }
++
++    async fn handle_notify_language_server(
++        this: Entity<Self>,
++        envelope: TypedEnvelope<proto::NotifyLanguageServer>,
++        cx: AsyncApp,
++    ) -> Result<proto::Ack> {
++        let id = LanguageServerId::from_proto(envelope.payload.language_server_id);
++        let params = serde_json::from_str(&envelope.payload.params)
++            .context("reading the notification's parameters")?;
++        this.read_with(&cx, |lsp_store, _| {
++            lsp_store.notify_local_language_server(id, envelope.payload.method, params)
++        })?;
++        Ok(proto::Ack {})
++    }
++
++    async fn handle_get_language_server_exit_status(
++        this: Entity<Self>,
++        envelope: TypedEnvelope<proto::GetLanguageServerExitStatus>,
++        cx: AsyncApp,
++    ) -> Result<proto::GetLanguageServerExitStatusResponse> {
++        let id = LanguageServerId::from_proto(envelope.payload.language_server_id);
++        let status = this.read_with(&cx, |lsp_store, _| {
++            lsp_store.local_language_server_exit_status(id)
++        });
++        Ok(proto::GetLanguageServerExitStatusResponse { status })
++    }
++
+     fn on_lsp_progress(
+         &mut self,
+         progress_params: lsp::ProgressParams,
+diff --git a/crates/proto/proto/lsp.proto b/crates/proto/proto/lsp.proto
+--- a/crates/proto/proto/lsp.proto
++++ b/crates/proto/proto/lsp.proto
+@@ -1128,6 +1128,22 @@
+   bool all = 4;
+ }
+ 
++message NotifyLanguageServer {
++  uint64 project_id = 1;
++  uint64 language_server_id = 2;
++  string method = 3;
++  string params = 4;
++}
++
++message GetLanguageServerExitStatus {
++  uint64 project_id = 1;
++  uint64 language_server_id = 2;
++}
++
++message GetLanguageServerExitStatusResponse {
++  optional string status = 1;
++}
++
+ message LspExtRunnables {
+   uint64 project_id = 1;
+   uint64 buffer_id = 2;
+diff --git a/crates/proto/proto/zed.proto b/crates/proto/proto/zed.proto
+--- a/crates/proto/proto/zed.proto
++++ b/crates/proto/proto/zed.proto
+@@ -524,7 +524,10 @@
+     ExecuteLspCommandResponse execute_lsp_command_response = 492;
+     RefreshDocumentHighlights refresh_document_highlights = 493;
+     GetTerminalShell get_terminal_shell = 494;
+-    GetTerminalShellResponse get_terminal_shell_response = 495; // current max
++    GetTerminalShellResponse get_terminal_shell_response = 495;
++    NotifyLanguageServer notify_language_server = 496;
++    GetLanguageServerExitStatus get_language_server_exit_status = 497;
++    GetLanguageServerExitStatusResponse get_language_server_exit_status_response = 498; // current max
+   }
+ 
+   reserved 87 to 88;
+diff --git a/crates/proto/src/proto.rs b/crates/proto/src/proto.rs
+--- a/crates/proto/src/proto.rs
++++ b/crates/proto/src/proto.rs
+@@ -284,6 +284,9 @@
+     (RespondToContactRequest, Foreground),
+     (RestartLanguageServers, Foreground),
+     (StopLanguageServers, Background),
++    (NotifyLanguageServer, Background),
++    (GetLanguageServerExitStatus, Background),
++    (GetLanguageServerExitStatusResponse, Background),
+     (RoomUpdated, Foreground),
+     (SaveBuffer, Foreground),
+     (SendChannelMessage, Background),
+@@ -584,6 +587,8 @@
+     (LspQueryResponse, Ack),
+     (RestartLanguageServers, Ack),
+     (StopLanguageServers, Ack),
++    (NotifyLanguageServer, Ack),
++    (GetLanguageServerExitStatus, GetLanguageServerExitStatusResponse),
+     (LspExtSwitchSourceHeader, LspExtSwitchSourceHeaderResponse),
+     (LspExtGoToParentModule, LspExtGoToParentModuleResponse),
+     (ExecuteLspCommand, ExecuteLspCommandResponse),
+@@ -768,6 +773,8 @@
+     LspQueryResponse,
+     RestartLanguageServers,
+     StopLanguageServers,
++    NotifyLanguageServer,
++    GetLanguageServerExitStatus,
+     OnTypeFormatting,
+     OpenNewBuffer,
+     OpenBufferById,

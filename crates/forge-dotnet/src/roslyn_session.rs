@@ -3,22 +3,24 @@
 //! Roslyn loads nothing on its own: once it starts, the client says which solution
 //! (`solution/open`) or projects (`project/open`) to load. Forge opens the one the Solution
 //! Explorer shows. `solution/open` only adds to what is loaded, so another solution starts
-//! a new server, which then opens that one alone. When a project needs a restore before it
-//! can load (new or changed packages), Roslyn asks the client to run it
-//! (`workspace/_roslyn_projectNeedsRestore`) and reloads when the answer comes.
+//! a new server, which then opens that one alone.
 //!
 //! An exception while Roslyn handles a notification ends its process, and Zed doesn't notice:
 //! requests just fail from then on. So Forge watches the process and starts it again.
+//!
+//! In a remote project the server runs in Forge's server on the host, and all of this goes
+//! through the `LspStore`, which reaches it there. What the server asks of the client runs
+//! next to it (`RoslynLspAdapter::register_server_handlers`).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use dotnet_model::solution::{Solution, SolutionFormat};
-use gpui::{App, Entity};
+use gpui::{App, AppContext as _, Entity, Task};
 use language::{Buffer, LanguageServerName};
-use lsp::{IoKind, LanguageServer, LanguageServerId, LanguageServerSelector};
+use lsp::notification::Notification as _;
+use lsp::{LanguageServerId, LanguageServerSelector};
 use project::Project;
 use serde::{Deserialize, Serialize};
 
@@ -53,28 +55,6 @@ struct ProjectOpenParams {
     projects: Vec<lsp::Uri>,
 }
 
-enum ProjectInitializationComplete {}
-
-impl lsp::notification::Notification for ProjectInitializationComplete {
-    type Params = Option<serde_json::Value>;
-    const METHOD: &'static str = "workspace/projectInitializationComplete";
-}
-
-enum ProjectNeedsRestore {}
-
-impl lsp::request::Request for ProjectNeedsRestore {
-    type Params = RestoreParams;
-    type Result = ();
-    const METHOD: &'static str = "workspace/_roslyn_projectNeedsRestore";
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RestoreParams {
-    #[serde(default)]
-    project_file_paths: Vec<PathBuf>,
-}
-
 /// What the server should load.
 #[derive(Clone, Debug, PartialEq)]
 enum Target {
@@ -92,6 +72,31 @@ impl Target {
             }
         }
     }
+
+    /// The notification that loads it: its method and parameters.
+    fn notification(&self) -> Option<(&'static str, serde_json::Value)> {
+        match self {
+            Target::Solution(path) => {
+                let solution = file_uri(path)?;
+                Some((SolutionOpen::METHOD, serde_json::to_value(SolutionOpenParams { solution }).ok()?))
+            }
+            Target::Projects(paths) => {
+                let projects = paths.iter().filter_map(|path| file_uri(path)).collect();
+                Some((ProjectOpen::METHOD, serde_json::to_value(ProjectOpenParams { projects }).ok()?))
+            }
+        }
+    }
+}
+
+/// The `file:` URI of a path of the machine the server runs on, which may have other paths
+/// than this one: `from_file_path` refuses a Linux host's on Windows.
+fn file_uri(path: &Path) -> Option<lsp::Uri> {
+    lsp::Uri::from_file_path(path).ok().or_else(|| {
+        let path = path.to_str().filter(|path| path.starts_with('/'))?;
+        let mut url = url::Url::parse("file:///").ok()?;
+        url.set_path(path);
+        url.as_str().parse().ok()
+    })
 }
 
 /// How a server that has loaded `opened` gets to `target`.
@@ -138,8 +143,7 @@ pub(crate) struct RoslynSession {
 }
 
 impl RoslynSession {
-    /// Tells every running Roslyn server to load `solution`, unless it already did. Servers
-    /// seen for the first time get their requests answered from then on.
+    /// Tells every running Roslyn server to load `solution`, unless it already did.
     pub(crate) fn open(&mut self, project: &Entity<Project>, solution: Option<&Solution>, cx: &mut App) {
         self.sync_servers(project, cx);
         let Some(target) = solution.and_then(Target::of) else { return };
@@ -152,23 +156,19 @@ impl RoslynSession {
                 Step::Nothing => {}
                 Step::Restart => restart = true,
                 Step::Send => {
-                    let Some(server) = server(project, *id, cx) else { continue };
-                    let sent = match &target {
-                        Target::Solution(path) => {
-                            log::info!("Roslyn: opening {}", path.display());
-                            lsp::Uri::from_file_path(path).ok().map(|solution| server.notify::<SolutionOpen>(SolutionOpenParams { solution }))
-                        }
-                        Target::Projects(paths) => {
-                            log::info!("Roslyn: opening {} project(s)", paths.len());
-                            let projects = paths.iter().filter_map(|p| lsp::Uri::from_file_path(p).ok()).collect();
-                            Some(server.notify::<ProjectOpen>(ProjectOpenParams { projects }))
-                        }
+                    let Some((method, params)) = target.notification() else {
+                        log::warn!("Roslyn: {target:?} is not a file path");
+                        continue;
                     };
-                    match sent {
-                        Some(Ok(())) => running.opened = Some(target.clone()),
-                        Some(Err(error)) => log::warn!("Roslyn: {error:#}"),
-                        None => log::warn!("Roslyn: {target:?} is not a file path"),
-                    }
+                    log::info!("Roslyn: opening {target:?}");
+                    running.opened = Some(target.clone());
+                    let sent = project.read(cx).lsp_store().read(cx).notify_language_server(*id, method.to_string(), params, cx);
+                    cx.background_spawn(async move {
+                        if let Err(error) = sent.await {
+                            log::warn!("Roslyn: {error:#}");
+                        }
+                    })
+                    .detach();
                 }
             }
         }
@@ -178,15 +178,31 @@ impl RoslynSession {
         }
     }
 
-    /// Starts the servers again if one of them has died.
-    pub(crate) fn watch(&mut self, project: &Entity<Project>, cx: &mut App) {
+    /// The servers that have died, with how they ended, for [`Self::servers_exited`].
+    pub(crate) fn exited_servers(&mut self, project: &Entity<Project>, cx: &App) -> Task<Vec<(LanguageServerId, String)>> {
         self.sync_servers(project, cx);
-        let mut died = false;
-        for (id, running) in &mut self.servers {
-            if running.finished {
-                continue;
+        let lsp_store = project.read(cx).lsp_store().read(cx);
+        let checks: Vec<_> = self.servers.iter().filter(|(_, running)| !running.finished).map(|(id, _)| (*id, lsp_store.language_server_exit_status(*id, cx))).collect();
+        cx.background_spawn(async move {
+            let mut exited = Vec::new();
+            for (id, check) in checks {
+                match check.await {
+                    Ok(Some(status)) => exited.push((id, status)),
+                    Ok(None) => {}
+                    // The connection is down, and it says so itself: look again next time.
+                    Err(error) => log::debug!("Roslyn: {error:#}"),
+                }
             }
-            if let Some(status) = server(project, *id, cx).and_then(|server| server.exit_status()) {
+            exited
+        })
+    }
+
+    /// Starts the servers again after some of them have died.
+    pub(crate) fn servers_exited(&mut self, project: &Entity<Project>, exited: Vec<(LanguageServerId, String)>, cx: &mut App) {
+        let mut died = false;
+        for (id, status) in exited {
+            // It may have been replaced while the answer came.
+            if let Some(running) = self.servers.get_mut(&id).filter(|running| !running.finished) {
                 log::error!("Roslyn: the language server exited ({status})");
                 running.finished = true;
                 died = true;
@@ -211,15 +227,14 @@ impl RoslynSession {
 
     /// Follows the servers that came and went.
     fn sync_servers(&mut self, project: &Entity<Project>, cx: &App) {
+        // A guest's servers are its host's to look after, and collab wouldn't forward this.
+        if project.read(cx).is_via_collab() {
+            return;
+        }
         let running: Vec<LanguageServerId> = project.read(cx).language_server_statuses(cx).filter(|(_, status)| status.name.0.as_ref() == ROSLYN).map(|(id, _)| id).collect();
         self.servers.retain(|id, _| running.contains(id));
         for id in running {
-            if !self.servers.contains_key(&id)
-                && let Some(server) = server(project, id, cx)
-            {
-                handle_requests(&server);
-                self.servers.insert(id, RunningServer::default());
-            }
+            self.servers.entry(id).or_default();
         }
     }
 
@@ -254,35 +269,10 @@ fn project_buffers(project: &Entity<Project>, cx: &App) -> Vec<Entity<Buffer>> {
         .collect()
 }
 
-fn server(project: &Entity<Project>, id: LanguageServerId, cx: &App) -> Option<Arc<LanguageServer>> {
-    project.read(cx).lsp_store().read(cx).language_server_for_id(id)
-}
-
-fn handle_requests(server: &LanguageServer) {
-    server
-        .on_notification::<ProjectInitializationComplete, _>(|_, _| log::info!("Roslyn: projects loaded"))
-        .detach();
-    server
-        .on_request::<ProjectNeedsRestore, _, _>(|params, _| async move {
-            for project in &params.project_file_paths {
-                log::info!("Roslyn: restoring {}", project.display());
-                crate::restore::restore(project).await;
-            }
-            Ok(())
-        })
-        .detach();
-    // Roslyn only writes to stderr when it fails: this is the stack trace of what ended it.
-    server
-        .on_io(|kind, message| {
-            if matches!(kind, IoKind::StdErr) {
-                log::error!("Roslyn: {}", message.trim_end());
-            }
-        })
-        .detach();
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -292,9 +282,14 @@ mod tests {
         std::fs::write(root.join("App.sln"), include_str!("../../dotnet-model/tests/fixtures/sample.sln")).unwrap();
         let solution = Solution::load(&root.join("App.sln")).unwrap();
         assert_eq!(Target::of(&solution), Some(Target::Solution(root.join("App.sln"))));
+    }
 
-        let params: RestoreParams = serde_json::from_str(r#"{ "projectFilePaths": ["/src/App/App.csproj"] }"#).unwrap();
-        assert_eq!(params.project_file_paths, vec![PathBuf::from("/src/App/App.csproj")]);
+    #[test]
+    fn a_hosts_paths_become_uris() {
+        assert_eq!(file_uri(Path::new("/home/me/My App/App.sln")).unwrap().as_str(), "file:///home/me/My%20App/App.sln");
+        let (method, params) = Target::Solution(PathBuf::from("/src/App.sln")).notification().unwrap();
+        assert_eq!(method, "solution/open");
+        assert_eq!(params, serde_json::json!({ "solution": "file:///src/App.sln" }));
     }
 
     #[test]
@@ -365,5 +360,288 @@ mod tests {
         cx.update(|cx| session.open(&project, Some(&beta), cx));
         assert_eq!(second.receive_notification::<SolutionOpen>().await.solution, beta_uri);
         assert_eq!(session.servers.len(), 1, "the old server is gone");
+    }
+
+    /// The whole session against a server on the host, through a fake SSH connection: there
+    /// `LspStore::language_server_for_id` is `None`, and the store has to reach it another way.
+    #[gpui::test]
+    async fn a_remote_server_opens_restarts_and_is_watched(cx: &mut gpui::TestAppContext, server_cx: &mut gpui::TestAppContext) {
+        use futures::StreamExt as _;
+        use gpui::AppContext as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let load = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, include_str!("../../dotnet-model/tests/fixtures/sample.sln")).unwrap();
+            (Solution::load(&path).unwrap(), lsp::Uri::from_file_path(&path).unwrap())
+        };
+        let ((alpha, alpha_uri), (beta, beta_uri)) = (load("Alpha.sln"), load("Beta.sln"));
+
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        let server_fs = fs::FakeFs::new(server_cx.executor());
+        server_fs.insert_tree("/code/app", serde_json::json!({ "App.cs": "class App { }" })).await;
+        let (options, session_client, _) = remote::RemoteClient::fake_server(cx, server_cx);
+        server_cx.update(remote_server::HeadlessProject::init);
+        let host_languages = Arc::new(language::LanguageRegistry::new(cx.executor()));
+        let headless = server_cx.new(|cx| {
+            remote_server::HeadlessProject::new(
+                remote_server::HeadlessAppState {
+                    session: session_client,
+                    fs: server_fs.clone(),
+                    http_client: Arc::new(http_client::BlockedHttpClient),
+                    node_runtime: node_runtime::NodeRuntime::unavailable(),
+                    languages: host_languages.clone(),
+                    extension_host_proxy: Arc::new(extension::ExtensionHostProxy::new()),
+                    startup_time: Instant::now(),
+                },
+                false,
+                cx,
+            )
+        });
+        let connection = remote::RemoteClient::connect_mock(options, cx).await;
+        cx.update(|cx| {
+            let settings = settings::SettingsStore::test(cx);
+            cx.set_global(settings);
+        });
+        let client = cx.update(|cx| client::Client::new(Arc::new(clock::FakeSystemClock::new()), http_client::FakeHttpClient::with_404_response(), cx));
+        cx.update(|cx| Project::init(&client, cx));
+        let user_store = cx.new(|cx| client::UserStore::new(client.clone(), cx));
+        let languages = Arc::new(language::LanguageRegistry::test(cx.executor()));
+        let local_fs = fs::FakeFs::new(cx.executor());
+        let project = cx.update(|cx| Project::remote(connection, client, node_runtime::NodeRuntime::unavailable(), user_store, languages.clone(), local_fs, false, cx));
+
+        let csharp = || language::LanguageConfig {
+            name: "C#".into(),
+            matcher: language::LanguageMatcher { path_suffixes: vec!["cs".into()], ..Default::default() }.into(),
+            ..Default::default()
+        };
+        languages.register_test_language(csharp());
+        languages.register_fake_lsp_adapter("C#", language::FakeLspAdapter { name: ROSLYN, ..Default::default() });
+        host_languages.register_test_language(csharp());
+        host_languages.register_fake_lsp_adapter("C#", language::FakeLspAdapter { name: ROSLYN, ..Default::default() });
+        let mut fake_servers = host_languages.register_fake_lsp_server(LanguageServerName::new_static(ROSLYN), lsp::ServerCapabilities::default(), None);
+        cx.run_until_parked();
+
+        let worktree_id = project.update(cx, |project, cx| project.find_or_create_worktree("/code/app", true, cx)).await.unwrap().0.read_with(cx, |worktree, _| worktree.id());
+        cx.run_until_parked();
+        let (_buffer, _registration) = project.update(cx, |project, cx| project.open_buffer_with_lsp((worktree_id, util::rel_path::rel_path("App.cs")), cx)).await.unwrap();
+        cx.run_until_parked();
+        let mut first = fake_servers.next().await.unwrap();
+        server_cx.run_until_parked();
+        cx.run_until_parked();
+        let first_id = project.read_with(cx, |project, cx| {
+            let lsp_store = project.lsp_store();
+            let (id, _) = project.language_server_statuses(cx).next().expect("the client knows the host's server");
+            assert!(lsp_store.read(cx).language_server_for_id(id).is_none(), "and has no handle on it");
+            id
+        });
+
+        let mut session = RoslynSession::default();
+        cx.update(|cx| session.open(&project, Some(&alpha), cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        assert_eq!(first.receive_notification::<SolutionOpen>().await.solution, alpha_uri, "`solution/open` reaches the host");
+
+        // It's alive, and the answer comes from the host.
+        let exited = cx.update(|cx| session.exited_servers(&project, cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        cx.run_until_parked();
+        assert_eq!(exited.await, Vec::new());
+
+        // Another solution replaces the server, which then loads that one alone.
+        cx.update(|cx| session.open(&project, Some(&beta), cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        let mut second = fake_servers.next().await.unwrap();
+        server_cx.run_until_parked();
+        cx.run_until_parked();
+        cx.update(|cx| session.open(&project, Some(&beta), cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        assert_eq!(second.receive_notification::<SolutionOpen>().await.solution, beta_uri);
+        assert_eq!(session.servers.len(), 1, "the old server is gone");
+        assert!(!session.servers.contains_key(&first_id));
+
+        // A server that died is replaced, and its successor is told what to load.
+        let second_id = *session.servers.keys().next().unwrap();
+        cx.update(|cx| session.servers_exited(&project, vec![(second_id, "exit status: 134".to_string())], cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        let mut third = fake_servers.next().await.unwrap();
+        server_cx.run_until_parked();
+        cx.run_until_parked();
+        cx.update(|cx| session.open(&project, Some(&beta), cx));
+        cx.run_until_parked();
+        server_cx.run_until_parked();
+        assert_eq!(third.receive_notification::<SolutionOpen>().await.solution, beta_uri);
+        drop(headless);
+    }
+
+    /// The name of the file a definition is in.
+    #[cfg(unix)]
+    fn definition_file(project: &Entity<Project>, buffer: &Entity<Buffer>, name: &str, cx: &mut gpui::TestAppContext) -> Option<String> {
+        let offset = buffer.read_with(cx, |buffer, _| buffer.text().rfind(name).unwrap());
+        let definitions = project.update(cx, |project, cx| project.definitions(buffer, offset, cx));
+        let definitions = cx.foreground_executor().block_test(definitions).ok()??;
+        cx.read(|cx| definitions.first().and_then(|link| Some(link.target.buffer.read(cx).file()?.path().file_name()?.to_string())))
+    }
+
+    #[cfg(unix)]
+    fn wait_for_definition(project: &Entity<Project>, buffer: &Entity<Buffer>, name: &str, file: &str, cx: &mut gpui::TestAppContext) {
+        let deadline = Instant::now() + Duration::from_secs(240);
+        loop {
+            let found = definition_file(project, buffer, name, cx);
+            if found.as_deref() == Some(file) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{name} never led to {file}: last {found:?}");
+            std::thread::sleep(Duration::from_secs(1));
+            cx.run_until_parked();
+        }
+    }
+
+    /// The real Roslyn behind the fake connection: go to definition between the solution's
+    /// projects, another solution loading alone, and a killed server coming back. Needs the
+    /// .NET SDK and Roslyn: `FORGE_TEST_ROSLYN_DLL=<its dll> cargo test -p forge-dotnet real_roslyn -- --ignored`.
+    #[cfg(unix)]
+    #[gpui::test]
+    #[ignore = "needs the .NET SDK and FORGE_TEST_ROSLYN_DLL"]
+    async fn real_roslyn_on_the_host(cx: &mut gpui::TestAppContext, server_cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.executor().allow_parking();
+        server_cx.executor().allow_parking();
+        let dll = std::env::var("FORGE_TEST_ROSLYN_DLL").expect("FORGE_TEST_ROSLYN_DLL");
+        let dotnet = std::env::var("FORGE_TEST_DOTNET").unwrap_or_else(|_| "/usr/bin/dotnet".into());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |path: &str, text: String| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let csproj = |reference: &str| format!(r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup>{reference}</ItemGroup></Project>"#);
+        write("Lib/Lib.csproj", csproj(""));
+        write("Lib/Greeter.cs", "namespace Lib; public class Greeter { }\n".into());
+        write("Lib/User.cs", "namespace Lib; public class User { Greeter greeter; }\n".into());
+        write("App/App.csproj", csproj(r#"<ProjectReference Include="../Lib/Lib.csproj" />"#));
+        write("App/Program.cs", "class Program { static void Main() { var greeter = new Lib.Greeter(); } }\n".into());
+        write("All.slnx", r#"<Solution><Project Path="App/App.csproj" /><Project Path="Lib/Lib.csproj" /></Solution>"#.into());
+        write("Only.slnx", r#"<Solution><Project Path="Lib/Lib.csproj" /></Solution>"#.into());
+        write(
+            ".forge/settings.json",
+            serde_json::json!({ "lsp": { "roslyn": { "binary": { "path": dotnet, "arguments": [dll, "--stdio", "--logLevel", "Information"] } } } }).to_string(),
+        );
+        let all = Solution::load(&root.join("All.slnx")).unwrap();
+        let only = Solution::load(&root.join("Only.slnx")).unwrap();
+
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        let server_fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, server_cx.executor());
+        let (options, session_client, _) = remote::RemoteClient::fake_server(cx, server_cx);
+        server_cx.update(remote_server::HeadlessProject::init);
+        let host_languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
+        let headless = server_cx.new(|cx| {
+            remote_server::HeadlessProject::new(
+                remote_server::HeadlessAppState {
+                    session: session_client,
+                    fs: server_fs,
+                    http_client: Arc::new(http_client::BlockedHttpClient),
+                    node_runtime: node_runtime::NodeRuntime::unavailable(),
+                    languages: host_languages.clone(),
+                    extension_host_proxy: Arc::new(extension::ExtensionHostProxy::new()),
+                    startup_time: Instant::now(),
+                },
+                false,
+                cx,
+            )
+        });
+        server_cx.update(|cx| forge_languages::register_languages(host_languages.clone(), cx));
+        let connection = remote::RemoteClient::connect_mock(options, cx).await;
+        cx.update(|cx| {
+            let settings = settings::SettingsStore::test(cx);
+            cx.set_global(settings);
+        });
+        let client = cx.update(|cx| client::Client::new(Arc::new(clock::FakeSystemClock::new()), http_client::FakeHttpClient::with_404_response(), cx));
+        cx.update(|cx| Project::init(&client, cx));
+        let user_store = cx.new(|cx| client::UserStore::new(client.clone(), cx));
+        let languages = Arc::new(language::LanguageRegistry::test(cx.executor()));
+        cx.update(|cx| forge_languages::register_languages(languages.clone(), cx));
+        let project = cx.update(|cx| Project::remote(connection, client, node_runtime::NodeRuntime::unavailable(), user_store, languages, fs::FakeFs::new(cx.background_executor().clone()), false, cx));
+
+        let worktree_id = project.update(cx, |project, cx| project.find_or_create_worktree(&root, true, cx)).await.unwrap().0.read_with(cx, |worktree, _| worktree.id());
+        let settle = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..20 {
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        settle(cx);
+        let (program, _program_lsp) = project.update(cx, |project, cx| project.open_buffer_with_lsp((worktree_id, util::rel_path::rel_path("App/Program.cs")), cx)).await.unwrap();
+        let (user, _user_lsp) = project.update(cx, |project, cx| project.open_buffer_with_lsp((worktree_id, util::rel_path::rel_path("Lib/User.cs")), cx)).await.unwrap();
+
+        let roslyn_ids = |project: &Entity<Project>, cx: &mut gpui::TestAppContext| -> Vec<LanguageServerId> {
+            project.read_with(cx, |project, cx| project.language_server_statuses(cx).filter(|(_, status)| status.name.0.as_ref() == ROSLYN).map(|(id, _)| id).collect())
+        };
+        let wait_for_new_server = |seen: &[LanguageServerId], cx: &mut gpui::TestAppContext| -> LanguageServerId {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                cx.run_until_parked();
+                if let Some(id) = roslyn_ids(&project, cx).into_iter().find(|id| !seen.contains(id)) {
+                    return id;
+                }
+                assert!(Instant::now() < deadline, "no new Roslyn server");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+
+        let mut session = RoslynSession::default();
+        let first = wait_for_new_server(&[], cx);
+        cx.update(|cx| session.open(&project, Some(&all), cx));
+        wait_for_definition(&project, &program, "Greeter", "Greeter.cs", cx);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !root.join("App/obj/project.assets.json").exists() {
+            assert!(Instant::now() < deadline, "the restore Roslyn asked for ran on the host");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // Another solution: a new server with that one alone, so App is no project of it.
+        cx.update(|cx| session.open(&project, Some(&only), cx));
+        let second = wait_for_new_server(&[first], cx);
+        settle(cx);
+        cx.update(|cx| session.open(&project, Some(&only), cx));
+        wait_for_definition(&project, &user, "Greeter", "Greeter.cs", cx);
+        assert_eq!(definition_file(&project, &program, "Greeter", cx), None, "App isn't loaded");
+
+        // Killed: noticed through the host, started again, and told what to load.
+        let pid = server_cx.read(|cx| headless.read(cx).lsp_store.read(cx).language_server_for_id(second).and_then(|server| server.process_id())).expect("its process");
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let exited = loop {
+            cx.run_until_parked();
+            let exited = cx.update(|cx| session.exited_servers(&project, cx));
+            let exited = cx.foreground_executor().block_test(exited);
+            if !exited.is_empty() {
+                break exited;
+            }
+            assert!(Instant::now() < deadline, "the death went unnoticed");
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert_eq!(exited[0].0, second);
+        cx.update(|cx| session.servers_exited(&project, exited, cx));
+        wait_for_new_server(&[first, second], cx);
+        settle(cx);
+        cx.update(|cx| session.open(&project, Some(&only), cx));
+        wait_for_definition(&project, &user, "Greeter", "Greeter.cs", cx);
+
+        let last = roslyn_ids(&project, cx);
+        for id in last {
+            if let Some(pid) = server_cx.read(|cx| headless.read(cx).lsp_store.read(cx).language_server_for_id(id).and_then(|server| server.process_id())) {
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }
     }
 }

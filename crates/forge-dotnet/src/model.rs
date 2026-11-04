@@ -125,11 +125,21 @@ impl DotnetModel {
         let roslyn_watch = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(WATCH_INTERVAL).await;
-                let watched = this.update(cx, |this, cx| {
+                let Ok(exited) = this.update(cx, |this, cx| {
                     let project = this.project.clone();
-                    this.roslyn.watch(&project, cx);
-                });
-                if watched.is_err() {
+                    this.roslyn.exited_servers(&project, cx)
+                }) else {
+                    break;
+                };
+                let exited = exited.await;
+                if !exited.is_empty()
+                    && this
+                        .update(cx, |this, cx| {
+                            let project = this.project.clone();
+                            this.roslyn.servers_exited(&project, exited, cx);
+                        })
+                        .is_err()
+                {
                     break;
                 }
             }

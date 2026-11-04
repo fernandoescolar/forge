@@ -42,6 +42,7 @@ Keep each patch small and generic (a hook, not Forge logic), one concern per fil
 | `0016-optional-zed-extensions.patch` | An `extensions` feature (on by default) on `recent_projects` (installing the extensions a dev container asks for) and on `remote_server` (syncing and installing the client's extensions on the host). Forge turns both off: it has no Zed extension store (`ExtensionStore::global` would panic), and without them neither Forge nor its remote server links `extension_host` and its WASI runtime. |
 | `0017-project-explicit-range-line-ending-resync.patch` | When a buffer's line endings change, servers with incremental sync get the whole document as an edit with an explicit range. Without a range, Roslyn fails on a null reference and its process ends. |
 | `0018-lsp-exit-status.patch` | `LanguageServer::exit_status`: how the server's process ended. Zed doesn't notice a server that dies, so `forge-dotnet` polls this to start Roslyn again. |
+| `0019-lsp-reach-servers-on-host.patch` | `LspStore::notify_language_server` and `LspStore::language_server_exit_status`, which reach a server on this machine or, through two new proto messages, on a remote project's host, where `language_server_for_id` returns nothing; `LanguageServer::notify_raw`, for notifications without a type; and `LspAdapter::register_server_handlers`, for a server's own requests, which run where it does. `solution/open`, Roslyn's restores and its restarts use them, here and on a host. |
 
 Things Forge does without patches, so they don't come back as patches:
 

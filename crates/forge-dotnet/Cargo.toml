@@ -39,10 +39,21 @@ task = { path = "../../vendor/zed/crates/task" }
 text = { path = "../../vendor/zed/crates/text" }
 theme = { path = "../../vendor/zed/crates/theme" }
 ui = { path = "../../vendor/zed/crates/ui" }
+url.workspace = true
 util = { path = "../../vendor/zed/crates/util" }
 workspace = { path = "../../vendor/zed/crates/workspace" }
 
 [dev-dependencies]
+client = { path = "../../vendor/zed/crates/client", features = ["test-support"] }
+clock = { path = "../../vendor/zed/crates/clock", features = ["test-support"] }
+extension = { path = "../../vendor/zed/crates/extension" }
+http_client = { path = "../../vendor/zed/crates/http_client", features = ["test-support"] }
+libc = "0.2"
+node_runtime = { path = "../../vendor/zed/crates/node_runtime", features = ["test-support"] }
+release_channel = { path = "../../vendor/zed/crates/release_channel" }
+remote = { path = "../../vendor/zed/crates/remote", features = ["test-support"] }
+remote_server = { path = "../../vendor/zed/crates/remote_server", default-features = false }
+semver = "1"
 editor = { path = "../../vendor/zed/crates/editor", features = ["test-support"] }
 fs = { path = "../../vendor/zed/crates/fs", features = ["test-support"] }
 gpui = { path = "../../vendor/zed/crates/gpui", features = ["test-support"] }
