@@ -742,6 +742,7 @@ mod tests {
             forge_toolchain::init(cx);
             // The app runs it from `forge_languages::init`, which needs the language registry.
             forge_languages::type_hierarchy::init(cx);
+            forge_languages::language_servers::init(cx);
             init(cx);
             crate::open_editors::init(cx);
             crate::docks::init(cx);
@@ -804,6 +805,7 @@ mod tests {
         let zed_branded: Vec<&String> = visible.iter().filter(|n| n.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| w == "zed")).collect();
         assert!(zed_branded.is_empty(), "Zed-branded commands in the palette: {zed_branded:?}");
         assert!(visible.iter().any(|n| n == "forge: increase font size"), "Forge equivalents are offered");
+        assert!(visible.iter().any(|n| n == "forge languages: restart language servers"), "language servers can be restarted");
         for hidden in ["client: sign in", "multi workspace: next thread"] {
             assert!(!visible.iter().any(|n| n == hidden), "{hidden} should be hidden");
         }

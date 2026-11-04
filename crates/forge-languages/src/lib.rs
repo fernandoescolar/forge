@@ -16,6 +16,8 @@ pub mod csharp_discovery;
 #[cfg(feature = "ui")]
 mod csharp_metadata;
 pub mod csharp_tasks;
+#[cfg(feature = "ui")]
+pub mod language_servers;
 pub mod launch_settings;
 mod netcoredbg;
 mod omnisharp;
@@ -52,6 +54,7 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut gpui::App) {
     csharp_metadata::init(cx);
     csharp_fix_all::init(cx);
     type_hierarchy::init(cx);
+    language_servers::init(cx);
     if roslyn::use_roslyn() {
         roslyn_code_actions::init(cx);
     }

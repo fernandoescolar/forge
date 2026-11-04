@@ -252,21 +252,11 @@ impl RoslynSession {
     }
 }
 
-/// The C# files of the workspace's folders. Decompiled sources sit in hidden worktrees of
-/// their own, and each of those would start another server loading the whole solution.
+/// The C# files of the workspace's folders.
 fn project_buffers(project: &Entity<Project>, cx: &App) -> Vec<Entity<Buffer>> {
-    let project = project.read(cx);
-    project
-        .buffer_store()
-        .read(cx)
-        .buffers()
-        .filter(|buffer| {
-            let buffer = buffer.read(cx);
-            let is_csharp = buffer.language().is_some_and(|language| language.name().as_ref() == "C#");
-            let in_workspace = buffer.file().and_then(|file| project.worktree_for_id(file.worktree_id(cx), cx)).is_some_and(|worktree| worktree.read(cx).is_visible());
-            is_csharp && in_workspace
-        })
-        .collect()
+    let mut buffers = forge_languages::language_servers::workspace_buffers(project, cx);
+    buffers.retain(|buffer| buffer.read(cx).language().is_some_and(|language| language.name().as_ref() == "C#"));
+    buffers
 }
 
 #[cfg(test)]
@@ -360,6 +350,66 @@ mod tests {
         cx.update(|cx| session.open(&project, Some(&beta), cx));
         assert_eq!(second.receive_notification::<SolutionOpen>().await.solution, beta_uri);
         assert_eq!(session.servers.len(), 1, "the old server is gone");
+    }
+
+    /// The command replaces a running server, starts one the user stopped, and in both cases
+    /// the session tells the new server what to load. A file outside the workspace's folders
+    /// doesn't get a server of its own out of it.
+    #[gpui::test]
+    async fn the_restart_command_replaces_running_and_stopped_servers(cx: &mut gpui::TestAppContext) {
+        use futures::StreamExt as _;
+
+        cx.update(workspace::AppState::test);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("App.sln");
+        std::fs::write(&path, include_str!("../../dotnet-model/tests/fixtures/sample.sln")).unwrap();
+        let solution = Solution::load(&path).unwrap();
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/dir", serde_json::json!({ "App.cs": "class App { }" })).await;
+        fs.insert_tree("/decompiled", serde_json::json!({ "Lib.cs": "class Lib { }" })).await;
+        let project = Project::test(fs, ["/dir".as_ref()], cx).await;
+        let languages = project.read_with(cx, |project, _| project.languages().clone());
+        languages.add(Arc::new(language::Language::new(
+            language::LanguageConfig {
+                name: "C#".into(),
+                matcher: language::LanguageMatcher { path_suffixes: vec!["cs".into()], ..Default::default() }.into(),
+                ..Default::default()
+            },
+            None,
+        )));
+        let mut fake_servers = languages.register_fake_lsp("C#", language::FakeLspAdapter { name: ROSLYN, ..Default::default() });
+        let (buffer, _registration) = project.update(cx, |project, cx| project.open_local_buffer_with_lsp("/dir/App.cs", cx)).await.unwrap();
+        let mut first = fake_servers.next().await.unwrap();
+        cx.run_until_parked();
+
+        let mut session = RoslynSession::default();
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        first.receive_notification::<SolutionOpen>().await;
+
+        let (worktree, _) = project.update(cx, |project, cx| project.find_or_create_worktree("/decompiled/Lib.cs", false, cx)).await.unwrap();
+        let hidden = worktree.read_with(cx, |worktree, _| worktree.id());
+        let decompiled = project.update(cx, |project, cx| project.open_buffer((hidden, util::rel_path::rel_path("Lib.cs")), cx)).await.unwrap();
+        cx.run_until_parked();
+        let visible = cx.update(|cx| forge_languages::language_servers::workspace_buffers(&project, cx));
+        assert!(visible.contains(&buffer) && !visible.contains(&decompiled));
+
+        cx.update(|cx| forge_languages::language_servers::restart(&project, cx));
+        let mut second = fake_servers.next().await.unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        second.receive_notification::<SolutionOpen>().await;
+        assert_eq!(session.servers.len(), 1, "the old server is gone");
+
+        project.update(cx, |project, cx| project.stop_language_servers_for_buffers(vec![buffer.clone()], Default::default(), cx));
+        cx.run_until_parked();
+        assert_eq!(project.read_with(cx, |project, cx| project.language_server_statuses(cx).count()), 0, "stopped");
+
+        cx.update(|cx| forge_languages::language_servers::restart(&project, cx));
+        let mut third = fake_servers.next().await.unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        third.receive_notification::<SolutionOpen>().await;
     }
 
     /// The whole session against a server on the host, through a fake SSH connection: there

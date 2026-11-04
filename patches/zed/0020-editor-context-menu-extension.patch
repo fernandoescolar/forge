@@ -1,0 +1,84 @@
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -127,6 +127,7 @@
+ pub use linked_editing_ranges::LinkedEdits;
+ pub use lsp::CompletionContext;
+ pub use lsp_ext::lsp_tasks;
++pub use mouse_context_menu::EditorContextMenuExtension;
+ pub use multi_buffer::{
+     Anchor, AnchorRangeExt, BufferOffset, ExcerptRange, MBTextSummary, MultiBuffer,
+     MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
+--- a/crates/editor/src/mouse_context_menu.rs
++++ b/crates/editor/src/mouse_context_menu.rs
+@@ -30,6 +30,15 @@
+     },
+ }
+ 
++/// Entries an application adds to the end of the editor's context menu: called with the
++/// menu, it returns the menu.
++#[derive(Clone)]
++pub struct EditorContextMenuExtension(
++    pub std::sync::Arc<dyn Fn(ui::ContextMenu, &mut Window, &mut gpui::App) -> ui::ContextMenu>,
++);
++
++impl gpui::Global for EditorContextMenuExtension {}
++
+ pub struct MouseContextMenu {
+     pub(crate) position: MenuPosition,
+     pub(crate) context_menu: Entity<ui::ContextMenu>,
+@@ -243,7 +252,9 @@
+                     .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+             });
+ 
+-        ui::ContextMenu::build(window, cx, |menu, _window, _cx| {
++        let extension = cx.try_global::<EditorContextMenuExtension>().cloned();
++
++        ui::ContextMenu::build(window, cx, |menu, window, cx| {
+             let builder = menu
+                 .on_blur_subscription(Subscription::new(|| {}))
+                 .when(run_to_cursor, |builder| {
+@@ -325,7 +336,11 @@
+                     !has_git_repo,
+                     "View File History",
+                     Box::new(git::FileHistory),
+-                );
++                )
++                .map(|menu| match &extension {
++                    Some(extension) => (extension.0)(menu, window, cx),
++                    None => menu,
++                });
+             match focus {
+                 Some(focus) => builder.context(focus),
+                 None => builder,
+@@ -418,6 +433,31 @@
+     }
+ 
+     #[gpui::test]
++    async fn test_mouse_context_menu_extension_adds_entries(cx: &mut gpui::TestAppContext) {
++        init_test(cx, |_| {});
++
++        let mut cx = EditorLspTestContext::new_rust(Default::default(), cx).await;
++        cx.set_state("ˇfn test() {}");
++        let point = cx.display_point("fn teˇst() {}");
++
++        let extended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++        cx.update(|_, cx| {
++            let extended = extended.clone();
++            cx.set_global(EditorContextMenuExtension(std::sync::Arc::new(
++                move |menu, _, _| {
++                    extended.store(true, std::sync::atomic::Ordering::SeqCst);
++                    menu
++                },
++            )));
++        });
++        cx.update_editor(|editor, window, cx| {
++            deploy_context_menu(editor, Some(Default::default()), point, window, cx);
++        });
++
++        assert!(extended.load(std::sync::atomic::Ordering::SeqCst));
++    }
++
++    #[gpui::test]
+     async fn test_mouse_context_menu_at_pixel_snapped_scroll_position(
+         cx: &mut gpui::TestAppContext,
+     ) {
