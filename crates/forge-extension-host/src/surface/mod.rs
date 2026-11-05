@@ -43,7 +43,7 @@ mod sync;
 
 pub(crate) use style::*;
 
-actions!(forge_extensions, [
+actions!(extensions, [
     /// Copies the selected rows of a data grid as tab-separated text.
     GridCopy,
     /// Asks the extension to delete the selected rows of a data grid.

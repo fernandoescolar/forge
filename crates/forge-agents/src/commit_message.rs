@@ -11,7 +11,7 @@ use workspace::{Toast, Workspace, notifications::NotificationId};
 use crate::thread::{Status, Thread};
 use crate::threads::{register_thread, store_for};
 
-gpui::actions!(forge_agent, [
+gpui::actions!(agents, [
     /// Asks the default agent for a commit message for the staged changes.
     WriteCommitMessage
 ]);

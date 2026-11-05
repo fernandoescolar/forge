@@ -14,7 +14,7 @@ use workspace::{
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
-actions!(forge_git, [InitRepository]);
+actions!(git, [InitRepository]);
 
 /// Used when the user's git config has no `init.defaultBranch`.
 pub const DEFAULT_BRANCH: &str = "main";

@@ -29,7 +29,7 @@ use workspace::{
 
 use crate::conflicts::{self, Choice, Conflict, Side};
 
-actions!(forge_git, [
+actions!(git, [
     /// Moves to the next conflict in the merge editor.
     NextConflict,
     /// Moves to the previous conflict in the merge editor.

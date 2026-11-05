@@ -34,6 +34,17 @@ pub fn is_remote(project: &project::Project) -> bool {
     project.is_via_remote_server()
 }
 
+/// What showing a file in the system's file browser is called here.
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Reveal in File Explorer"
+    } else {
+        "Show in File Manager"
+    }
+}
+
 /// Where a buffer's `file` is, on the machine its project's files are: this one's path for a
 /// local project, the host's for a remote one (where `as_local` has none).
 pub fn abs_path(file: &std::sync::Arc<dyn language::File>, cx: &gpui::App) -> Option<std::path::PathBuf> {
@@ -54,7 +65,7 @@ pub fn show_not_on_remote(workspace: &mut Workspace, feature: &str, cx: &mut gpu
 /// Sends `prompt` to the agent panel, connecting the default agent first if needed.
 /// Lives here so any Forge crate can ask the agent without depending on forge-agents.
 #[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
-#[action(namespace = forge_agent)]
+#[action(namespace = agents)]
 #[serde(deny_unknown_fields)]
 pub struct AskAgent {
     pub prompt: String,
@@ -63,7 +74,7 @@ pub struct AskAgent {
 /// Opens the three-pane merge editor (forge-git) on `path`, or on the active file, or lets
 /// the user pick a conflicted file. Lives here so any Forge crate can open it.
 #[derive(Clone, Default, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
-#[action(namespace = forge_git)]
+#[action(namespace = git)]
 #[serde(deny_unknown_fields)]
 pub struct OpenMergeEditor {
     #[serde(default)]

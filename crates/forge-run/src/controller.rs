@@ -34,7 +34,7 @@ const STOP_GRACE: Duration = Duration::from_secs(30);
 /// How long a project Aspire asked for may take to reach the debugger (it builds first).
 const ASPIRE_START_TIMEOUT: Duration = Duration::from_secs(180);
 
-actions!(forge_run, [
+actions!(run, [
     Run,
     Debug,
     Stop,

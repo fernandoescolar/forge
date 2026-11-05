@@ -26,7 +26,7 @@ use workspace::{
 };
 
 actions!(
-    forge_git,
+    git,
     [
         /// Turns signing off commits on or off for the project.
         ToggleSignOff

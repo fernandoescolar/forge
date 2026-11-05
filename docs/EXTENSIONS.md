@@ -83,7 +83,7 @@ npm run build    # forge-ext build . — or `npm run watch` to rebuild on every 
 
 This bundles your code into `hello/dist/extension.js`. React and `@forge-ide/api` are not bundled: Forge provides them, so every extension shares the same React. (Extensions built when the API was called `@forge/api` keep working: Forge provides it under both names.)
 
-**4. Run it.** In Forge, use **Extensions › Install from Folder…** and pick the folder (a debug build of Forge, `cargo run -p forge-native`, also loads everything in this repository's `extensions/` at startup). After a rebuild, *Reload* in the extension's ⋯ menu (Extensions panel) loads it again, without restarting Forge.
+**4. Run it.** In Forge, use **Tools › Extensions › Install from Folder…** and pick the folder (a debug build of Forge, `cargo run -p forge-native`, also loads everything in this repository's `extensions/` at startup). After a rebuild, *Reload* in the extension's ⋯ menu (Extensions panel) loads it again, without restarting Forge.
 
 Your panel shows under View › Panels and in the dock, and *Hello: Say Hello* is in the command palette.
 
@@ -261,7 +261,7 @@ forge.commands.register('hello.greet', 'Say Hello', () => forge.window.showMessa
 ```
 
 ```json
-{ "bindings": { "cmd-alt-h": ["forge_extensions::RunCommand", { "id": "hello.greet" }] } }
+{ "bindings": { "cmd-alt-h": ["extensions::RunCommand", { "id": "hello.greet" }] } }
 ```
 
 During development, `FORGE_EXTENSIONS_PANEL=<panel id>` opens the Extensions panel on that tab at startup.
@@ -447,7 +447,7 @@ npx forge-ext pack .          # → hello-0.1.0.forgeext
 
 *Export as Package…* in an extension's ⋯ menu (Extensions panel) does the same from Forge.
 
-To install a package, use **Extensions › Install from Package…** (or *Install* in the Extensions panel). Forge checks it is a built extension with its sidecars for this computer, unpacks it into `~/Library/Application Support/Forge/extensions/<name>` (on Linux, `~/.local/share/forge/extensions/<name>`), keeping Unix permissions so sidecars stay executable, and loads it, replacing an installed copy.
+To install a package, use **Tools › Extensions › Install from Package…** (or *Install* in the Extensions panel). Forge checks it is a built extension with its sidecars for this computer, unpacks it into `~/Library/Application Support/Forge/extensions/<name>` (on Linux, `~/.local/share/forge/extensions/<name>`), keeping Unix permissions so sidecars stay executable, and loads it, replacing an installed copy.
 
 Extensions run with the user's rights: they can read files and run programs. Say what yours does in its description.
 

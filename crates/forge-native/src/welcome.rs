@@ -124,15 +124,26 @@ impl ForgeWelcome {
     }
 }
 
+/// When the recent projects were last cleared: nothing opened before then is listed.
+const RECENT_CLEARED_KEY: &str = "forge_recent_projects_cleared_at";
+
+/// Empties the recent projects lists. Their windows' state stays, in case they open again.
+pub fn clear_recent(cx: &mut App) {
+    let kvp = db::kvp::KeyValueStore::global(cx);
+    let now = chrono::Utc::now().timestamp().to_string();
+    cx.background_spawn(async move { kvp.write_kvp(RECENT_CLEARED_KEY.into(), now).await }).detach_and_log_err(cx);
+}
+
 /// Recently opened local projects, newest first.
-fn load_recent(workspace: &Workspace, cx: &App) -> gpui::Task<Vec<Recent>> {
+pub(crate) fn load_recent(workspace: &Workspace, cx: &App) -> gpui::Task<Vec<Recent>> {
+    let cleared_at = db::kvp::KeyValueStore::global(cx).read_kvp(RECENT_CLEARED_KEY).ok().flatten().and_then(|at| at.parse::<i64>().ok()).unwrap_or(0);
     let fs = workspace.app_state().fs.clone();
     let db = workspace::WorkspaceDb::global(cx);
     cx.background_spawn(async move {
         let workspaces = db.recent_project_workspaces(fs.as_ref()).await.unwrap_or_default();
         workspaces
             .into_iter()
-            .filter(|w| matches!(w.location, workspace::SerializedWorkspaceLocation::Local) && !w.paths.paths().is_empty())
+            .filter(|w| matches!(w.location, workspace::SerializedWorkspaceLocation::Local) && !w.paths.paths().is_empty() && w.timestamp.timestamp() > cleared_at)
             .map(|w| Recent { paths: w.paths.paths().to_vec(), opened_at: w.timestamp.timestamp() })
             .collect()
     })

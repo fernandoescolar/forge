@@ -17,7 +17,7 @@ use lsp::{LanguageServer, TypeHierarchyItem};
 use project::Project;
 use workspace::Workspace;
 
-actions!(forge_languages, [
+actions!(languages, [
     /// Shows the base types and the derived types of the type at the cursor.
     ShowTypeHierarchy
 ]);

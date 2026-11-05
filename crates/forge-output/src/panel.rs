@@ -24,7 +24,7 @@ use workspace::{
 
 use crate::app_log;
 
-actions!(forge_output, [ToggleFocus, ClearOutput]);
+actions!(output, [ToggleFocus, ClearOutput]);
 
 /// Lines kept per language server.
 const SERVER_CAPACITY: usize = 5_000;

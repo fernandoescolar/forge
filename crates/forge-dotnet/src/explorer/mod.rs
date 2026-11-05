@@ -37,7 +37,7 @@ use crate::config;
 use crate::model::{DotnetModel, ModelEvent};
 
 actions!(
-    solution_explorer,
+    dotnet,
     [
         /// Shows or hides the Solution Explorer.
         ToggleFocus,
@@ -64,7 +64,7 @@ actions!(
         Duplicate,
         CopyPath,
         CopyRelativePath,
-        RevealInFinder,
+        RevealInFileManager,
         OpenInTerminal,
         Open,
         Build,
@@ -149,6 +149,18 @@ pub fn init(cx: &mut App) {
                 crate::nuget_view::open(workspace, model, None, window, cx);
             }
         });
+        // From the menus: the whole solution. The panel handles them for its selection.
+        fn run_on_solution(workspace: &mut Workspace, command: &str, window: &mut Window, cx: &mut Context<Workspace>) {
+            if let Some(panel) = workspace.panel::<SolutionExplorer>(cx) {
+                panel.update(cx, |panel, cx| panel.run_dotnet_on_solution(command, window, cx));
+            }
+        }
+        workspace.register_action(|workspace, _: &Build, window, cx| run_on_solution(workspace, "build", window, cx));
+        workspace.register_action(|workspace, _: &Rebuild, window, cx| run_on_solution(workspace, "rebuild", window, cx));
+        workspace.register_action(|workspace, _: &Clean, window, cx| run_on_solution(workspace, "clean", window, cx));
+        workspace.register_action(|workspace, _: &Restore, window, cx| run_on_solution(workspace, "restore", window, cx));
+        workspace.register_action(|workspace, _: &Pack, window, cx| run_on_solution(workspace, "pack", window, cx));
+        workspace.register_action(|workspace, _: &Publish, window, cx| run_on_solution(workspace, "publish", window, cx));
         workspace.register_action(|workspace, _: &CentralizePackageVersions, window, cx| {
             if let Some(panel) = workspace.panel::<SolutionExplorer>(cx) {
                 panel.update(cx, |panel, cx| panel.centralize_packages(&CentralizePackageVersions, window, cx));
@@ -1010,7 +1022,7 @@ impl Render for SolutionExplorer {
             .on_action(cx.listener(Self::duplicate))
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::copy_relative_path))
-            .on_action(cx.listener(Self::reveal_in_finder))
+            .on_action(cx.listener(Self::reveal_in_file_manager))
             .on_action(cx.listener(Self::open_in_terminal))
             .on_action(cx.listener(Self::build))
             .on_action(cx.listener(Self::rebuild_project))

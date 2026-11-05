@@ -20,7 +20,7 @@ use workspace::{ItemHandle, StatusItemView, Workspace, notifications::Notificati
 
 use crate::gh::{PullRequest, ReviewComment};
 
-actions!(forge_github, [
+actions!(github, [
     /// Lists the repository's open pull requests.
     PullRequests,
     /// Asks an agent to review the checked-out branch's pull request.

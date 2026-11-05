@@ -29,7 +29,7 @@ use workspace::{
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
-actions!(forge_toolchain, [
+actions!(toolchain, [
     /// Lists the tools the project needs, installed or not, and installs the missing ones.
     CheckTools
 ]);

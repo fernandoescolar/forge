@@ -27,7 +27,7 @@ use ui::{
 use ui::{InteractiveElement as _, StatefulInteractiveElement as _};
 use workspace::{Item, Workspace, item::ItemEvent};
 
-actions!(forge_dotnet, [
+actions!(dotnet, [
     /// Opens Code Analysis: the solution's diagnostics grouped by rule.
     OpenCodeAnalysis
 ]);

@@ -12,7 +12,7 @@ use gpui::{App, Entity, actions};
 use language::{Buffer, DiagnosticSeverity, Point};
 use workspace::Workspace;
 
-actions!(forge_agent, [
+actions!(agents, [
     FixProblemAtCursor,
     /// Asks an agent to fix every error and warning in the active file.
     FixProblemsInFile,

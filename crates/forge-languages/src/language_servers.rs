@@ -9,7 +9,7 @@ use language::Buffer;
 use project::Project;
 use workspace::Workspace;
 
-actions!(forge_languages, [
+actions!(languages, [
     /// Restarts the language servers of the open files, and starts the ones that have stopped.
     RestartLanguageServers
 ]);

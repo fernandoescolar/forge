@@ -59,7 +59,7 @@ pub fn terminal_output(workspace: &Workspace, cx: &App) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-gpui::actions!(forge_agent, [
+gpui::actions!(agents, [
     /// Asks the agent about the terminal's output (the selection, or the last lines).
     AskAboutTerminal
 ]);

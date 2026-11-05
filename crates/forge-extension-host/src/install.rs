@@ -11,7 +11,7 @@ use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::host::{ExtensionHost, read_manifest};
 
-actions!(forge_extensions, [
+actions!(extensions, [
     /// Installs a built extension from a folder.
     InstallFromFolder,
     /// Installs an extension from a package (`.forgeext`).

@@ -17,7 +17,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-actions!(forge_debug_console, [ToggleFocus]);
+actions!(debug_console, [ToggleFocus]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

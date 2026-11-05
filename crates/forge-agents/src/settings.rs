@@ -111,7 +111,7 @@ fn settings_page(config: &AgentsConfig) -> forge_ui::settings_registry::Settings
         keys: None,
         defaults,
         order: 10,
-        actions: vec![("Manage Agents…".into(), "forge_agent::OpenAgentSettings".into())],
+        actions: vec![("Manage Agents…".into(), "agents::OpenAgentSettings".into())],
         project_keys: None,
     }
 }

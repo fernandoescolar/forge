@@ -23,7 +23,7 @@ use workspace::{Workspace, notifications::NotificationId};
 
 use crate::parse::{Body, RequestSpec, Resolver};
 
-actions!(forge_http, [
+actions!(http, [
     /// Chooses the environment (`http-client.env.json`) `.http` requests use.
     SelectEnvironment,
     /// Stops the request the active `.http` file (or its response tab) is waiting on.
@@ -34,7 +34,7 @@ actions!(forge_http, [
 
 /// Sends the HTTP request at the cursor in a `.http` file (or on `row`, for the run button).
 #[derive(PartialEq, Clone, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
-#[action(namespace = forge_http)]
+#[action(namespace = http)]
 #[serde(deny_unknown_fields)]
 pub struct SendRequest {
     #[serde(default)]

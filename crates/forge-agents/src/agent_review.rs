@@ -24,7 +24,7 @@ use ui::{Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Col
 
 use crate::thread::Thread;
 
-gpui::actions!(forge_agent, [
+gpui::actions!(agents, [
     /// Keeps the agent's change at the cursor.
     KeepAgentChange,
     /// Undoes the agent's change at the cursor.

@@ -8,6 +8,7 @@
 // Release builds on Windows are GUI programs: no console window opens with them.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod app_menu_bar;
 mod branding;
 mod config_files;
 mod docks;
@@ -52,6 +53,10 @@ use util::ResultExt as _;
 use workspace::{AppState, OpenOptions, Workspace, WorkspaceStore};
 
 actions!(forge, [Quit]);
+
+/// Asks a Forge for a new window, as `forge --new-window` and among the paths passed on to
+/// the Forge that runs (which it can't be mistaken for: a path has no leading `--` here).
+const NEW_WINDOW_ARG: &str = "--new-window";
 
 /// Adds the usual install folders Forge's `PATH` lacks (and `DOTNET_ROOT`), see
 /// [`forge_toolchain::catalog::startup_env`].
@@ -232,7 +237,6 @@ fn main() {
         settings_view::init(cx);
         external_changes::init(cx);
         titlebar::init(cx);
-        cx.set_menus(menus::app_menus(cx));
         // Extension panels and commands appear in the menus: set them again when they change.
         if let Some(host) = forge_extension_host::ExtensionHost::global(cx) {
             let mut signature = menus::extension_menus_signature(cx);
@@ -240,13 +244,16 @@ fn main() {
                 let now = menus::extension_menus_signature(cx);
                 if now != signature {
                     signature = now;
-                    cx.set_menus(menus::app_menus(cx));
+                    menus::refresh(cx);
                 }
             })
             .detach();
         }
 
         load_keymap(cx);
+        // After the key bindings: macOS writes the shortcuts into its menu items.
+        cx.set_menus(menus::app_menus(cx));
+        menus::track_state(cx);
         user_keymap::init(fs.clone(), cx);
         cx.set_quit_mode(QuitMode::LastWindowClosed);
         add_panels_to_new_workspaces(cx);
@@ -259,6 +266,8 @@ fn main() {
             let app_state = app_state.clone();
             cx.spawn(async move |cx| {
                 let restored = restore_last_session(&app_state, cx).await;
+                // Nothing runs yet: a new window asked for is just Forge starting.
+                let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.as_os_str() != NEW_WINDOW_ARG).collect();
                 if !paths.is_empty() {
                     open_startup_paths(paths, app_state.clone(), cx).await.context("failed to open the initial window").log_err();
                 } else if !restored {
@@ -276,6 +285,14 @@ fn main() {
                 // Another `forge` without paths: just come to the front.
                 if paths.is_empty() {
                     cx.update(|cx| cx.activate(true));
+                    continue;
+                }
+                // `forge --new-window`: the desktop's and the Jump List's New Window.
+                if paths.iter().any(|p| p.as_os_str() == NEW_WINDOW_ARG) {
+                    cx.update(|cx| cx.dispatch_action(&workspace::NewWindow));
+                }
+                let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.as_os_str() != NEW_WINDOW_ARG).collect();
+                if paths.is_empty() {
                     continue;
                 }
                 open_startup_paths(paths.clone(), app_state.clone(), cx).await.with_context(|| format!("failed to open {paths:?}")).log_err();
@@ -308,7 +325,7 @@ async fn open_startup_paths(paths: Vec<PathBuf>, app_state: Arc<AppState>, cx: &
 
 /// Opening folders or files from outside (the command line, the Dock, Open With): in a window
 /// of their own, or the one that already shows them; never added to another window's sidebar.
-fn own_window() -> OpenOptions {
+pub(crate) fn own_window() -> OpenOptions {
     OpenOptions { add_dirs_to_sidebar: false, ..OpenOptions::default() }
 }
 
@@ -363,7 +380,21 @@ async fn restore_last_session(app_state: &Arc<AppState>, cx: &mut gpui::AsyncApp
 /// of the last session; `forge .` opens the current directory. macOS may add a `-psn_…`
 /// argument to GUI launches; it is ignored.
 fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
-    args.filter(|a| !a.starts_with("-psn_")).map(PathBuf::from).map(|p| if remote::ssh_target(&p).is_some() { p } else { p.canonicalize().unwrap_or(p) }).collect()
+    let mut paths = Vec::new();
+    let mut args = args.filter(|a| !a.starts_with("-psn_"));
+    while let Some(arg) = args.next() {
+        // The Jump List's only task, New Window, which Windows starts with this.
+        if arg == "--dock-action" {
+            args.next();
+            paths.push(PathBuf::from(NEW_WINDOW_ARG));
+        } else if arg == NEW_WINDOW_ARG {
+            paths.push(PathBuf::from(arg));
+        } else {
+            let path = PathBuf::from(arg);
+            paths.push(if remote::ssh_target(&path).is_some() { path } else { path.canonicalize().unwrap_or(path) });
+        }
+    }
+    paths
 }
 
 fn semver(v: &str) -> semver::Version {
@@ -406,8 +437,32 @@ fn watch_settings(fs: Arc<dyn Fs>, cx: &mut App) {
     });
 }
 
+/// Zed's keymap names window commands of its `zed` crate, which Forge doesn't have (the ones
+/// that couldn't load would leave ⌘H, ⌘M or F11 doing nothing): Forge's own, in their place.
+fn default_keymap() -> String {
+    const OWN_ACTIONS: &[(&str, &str)] = &[
+        ("\"zed::Hide\"", "\"forge::Hide\""),
+        ("\"zed::HideOthers\"", "\"forge::HideOthers\""),
+        ("\"zed::Minimize\"", "\"forge::Minimize\""),
+        ("\"zed::ToggleFullScreen\"", "\"forge::ToggleFullScreen\""),
+        ("\"zed::OpenSettingsFile\"", "\"forge::OpenSettingsFile\""),
+        ("\"zed::OpenKeymap\"", "\"forge::OpenKeymapFile\""),
+    ];
+    OWN_ACTIONS.iter().fold(settings::default_keymap().into_owned(), |keymap, (zed, forge)| keymap.replace(zed, forge))
+}
+
 fn load_keymap(cx: &mut App) {
-    let default = KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx).unwrap_or_default();
+    let default = match KeymapFile::load(&default_keymap(), cx) {
+        settings::KeymapFileLoadResult::Success { key_bindings } => key_bindings,
+        settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, error_message } => {
+            log::debug!("bindings of commands Forge doesn't have: {error_message}");
+            key_bindings
+        }
+        settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+            log::error!("the default keymap doesn't parse: {error:#}");
+            Vec::new()
+        }
+    };
     let mut bindings = default;
     for b in &mut bindings {
         b.set_meta(KeybindSource::Default.meta());
@@ -419,6 +474,11 @@ fn load_keymap(cx: &mut App) {
 /// Forge's bindings, over Zed's defaults (of two bindings for the same place, the later wins).
 fn bind_forge_keys(cx: &mut App) {
     cx.bind_keys([gpui::KeyBinding::new("secondary-q", Quit, None), gpui::KeyBinding::new("secondary-,", settings_view::OpenSettings, None)]);
+    // Build the solution from anywhere (the Solution Explorer's binds its selection).
+    cx.bind_keys([gpui::KeyBinding::new("secondary-shift-b", forge_dotnet::explorer::Build, Some("Workspace"))]);
+    if cfg!(not(target_os = "macos")) {
+        app_menu_bar::bind_keys(cx);
+    }
     // ⌘↩ shows the code actions (Zed: ⌘., kept too), instead of Zed's "new line below".
     cx.bind_keys([gpui::KeyBinding::new("secondary-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"))]);
     forge_agents::bind_keys(cx);
@@ -454,6 +514,7 @@ pub(crate) fn add_panels_to_new_workspaces(cx: &mut App) {
                 workspace.add_panel(debug_console.clone(), window, cx);
                 let solution_explorer = cx.new(|cx| forge_dotnet::SolutionExplorer::new(workspace, window, cx));
                 workspace.add_panel(solution_explorer.clone(), window, cx);
+                menus::track_solution(&solution_explorer.read(cx).model().clone(), window, cx);
                 let threads_panel = cx.new(|cx| forge_agents::ThreadsPanel::new(workspace, window, cx));
                 workspace.add_panel(threads_panel.clone(), window, cx);
                 let test_panel = cx.new(|cx| forge_tests::TestPanel::new(workspace, window, cx));
@@ -543,6 +604,40 @@ mod tests {
 
     /// ⌘↩: code actions in editors, but sending the request in .http files and changing
     /// the package version in project files; ⌘. still shows code actions.
+    /// Zed's keymap binds window commands of a crate Forge doesn't have: they must still work.
+    #[gpui::test]
+    fn window_shortcuts_reach_forges_commands(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            load_keymap(cx);
+        });
+        let action_for = |keys: &str, context: &str, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let context: Vec<gpui::KeyContext> = context.split('/').map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &context);
+                bindings.first().map(|b| b.action().name().to_string())
+            })
+        };
+        assert_eq!(action_for("secondary-q", "", cx).as_deref(), Some("forge::Quit"));
+        assert_eq!(action_for("secondary-shift-b", "Workspace", cx).as_deref(), Some("dotnet::Build"));
+        if cfg!(target_os = "macos") {
+            assert_eq!(action_for("cmd-h", "", cx).as_deref(), Some("forge::Hide"));
+            assert_eq!(action_for("alt-cmd-h", "", cx).as_deref(), Some("forge::HideOthers"));
+            assert_eq!(action_for("cmd-m", "", cx).as_deref(), Some("forge::Minimize"));
+            assert_eq!(action_for("ctrl-cmd-f", "Workspace", cx).as_deref(), Some("forge::ToggleFullScreen"));
+        } else {
+            assert_eq!(action_for("f11", "Workspace", cx).as_deref(), Some("forge::ToggleFullScreen"));
+            assert_eq!(action_for("f10", "Workspace", cx).as_deref(), Some("app_menu::OpenApplicationMenu"));
+            assert_eq!(action_for("alt-e", "Workspace/Pane/Editor", cx).as_deref(), Some("app_menu::OpenApplicationMenu"));
+            assert_eq!(action_for("alt-a", "Workspace", cx).as_deref(), Some("app_menu::OpenApplicationMenu"));
+            // A terminal's programs keep Alt+letter, and the search bars theirs.
+            assert_ne!(action_for("alt-e", "Workspace/Pane/Terminal", cx).as_deref(), Some("app_menu::OpenApplicationMenu"));
+            assert_eq!(action_for("alt-r", "Workspace/Pane", cx).as_deref(), Some("search::ToggleRegex"));
+        }
+    }
+
     #[gpui::test]
     fn cmd_enter_opens_the_code_actions(cx: &mut gpui::TestAppContext) {
         let action_for = |keys: &str, context: &str, cx: &mut gpui::TestAppContext| {
@@ -566,9 +661,16 @@ mod tests {
         });
         assert_eq!(action_for("secondary-enter", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
         assert_eq!(action_for("secondary-.", "Editor mode=full extension=cs", cx).as_deref(), Some("editor::ToggleCodeActions"));
-        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=http", cx).as_deref(), Some("forge_http::SendRequest"));
-        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=csproj", cx).as_deref(), Some("forge_dotnet::ChangePackageVersion"));
+        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=http", cx).as_deref(), Some("http::SendRequest"));
+        assert_eq!(action_for("secondary-enter", "Editor mode=full extension=csproj", cx).as_deref(), Some("dotnet::ChangePackageVersion"));
         assert_ne!(action_for("secondary-enter", "Editor mode=single_line", cx).as_deref(), Some("editor::ToggleCodeActions"), "not in single-line inputs");
+    }
+
+    #[test]
+    fn new_window_is_asked_with_an_argument_or_from_the_jump_list() {
+        let asked = |args: &[&str]| startup_paths(args.iter().map(|a| a.to_string()));
+        assert_eq!(asked(&["--new-window"]), [PathBuf::from(NEW_WINDOW_ARG)]);
+        assert_eq!(asked(&["--dock-action", "0"]), [PathBuf::from(NEW_WINDOW_ARG)]);
     }
 
     #[test]

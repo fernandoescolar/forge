@@ -30,7 +30,7 @@ use crate::{
     threads::{self, NewThread, ThreadStore, ThreadView},
 };
 
-actions!(forge_agent, [ToggleThreadsPanel, OpenAgentSettings]);
+actions!(agents, [ToggleThreadsPanel, OpenAgentSettings]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

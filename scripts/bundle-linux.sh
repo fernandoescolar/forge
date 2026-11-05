@@ -82,6 +82,11 @@ Categories=Development;IDE;TextEditor;
 MimeType=inode/directory;text/plain;
 StartupWMClass=dev.forge.ide
 Keywords=editor;ide;code;agents;
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=forge --new-window
 DESKTOP
 
 # Named like Rust's std::env::consts::ARCH, which forge-update looks for.

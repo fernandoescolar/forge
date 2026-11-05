@@ -10,7 +10,7 @@ use gpui::{App, actions};
 use serde_json::Value;
 use forge_ui::settings_registry::{SettingKind, SettingRow, SettingsFile, SettingsPage, rows, value_at};
 
-actions!(forge_agent, [
+actions!(agents, [
     /// Opens a thread with an agent that helps you set Forge up.
     ConfigureForge,
 ]);

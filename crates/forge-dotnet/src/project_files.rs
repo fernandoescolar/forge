@@ -159,7 +159,7 @@ impl CompletionProvider for PackageCompletions {
     }
 }
 
-gpui::actions!(forge_dotnet, [ChangePackageVersion]);
+gpui::actions!(dotnet, [ChangePackageVersion]);
 
 /// Lists the other versions of the package reference under the cursor and puts the
 /// chosen one in the file.

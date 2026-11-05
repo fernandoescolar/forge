@@ -172,7 +172,7 @@ impl ExtensionsPanel {
         card.into_any_element()
     }
 
-    /// ⋯: Reload, Settings, Export, Reveal in Finder, Uninstall.
+    /// ⋯: Reload, Settings, Export, Reveal, Uninstall.
     fn actions_menu(&self, index: usize, extension: &LoadedExtension, origin: Origin) -> AnyElement {
         let (host, id, name, path, has_settings) = (self.host.clone(), extension.id.clone(), extension.name.clone(), extension.path.clone(), extension.has_settings);
         PopoverMenu::new(("forge-ext-actions", index))
@@ -195,7 +195,7 @@ impl ExtensionsPanel {
                     let export_id = id.clone();
                     menu = menu.entry("Export as Package…", None, move |_, cx| crate::install::export(&export_id, cx));
                     let reveal = path.clone();
-                    menu = menu.entry("Reveal in Finder", None, move |_, cx| cx.reveal_path(&reveal));
+                    menu = menu.entry(forge_ui::reveal_label(), None, move |_, cx| cx.reveal_path(&reveal));
                     if origin == Origin::Installed {
                         let (host, id, name) = (host.clone(), id.clone(), name.clone());
                         menu = menu.separator().entry("Uninstall…", None, move |window, cx| {

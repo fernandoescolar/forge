@@ -8,6 +8,7 @@
 //! controls: next to the menus they read as one more menu. A remote project's window shows
 //! the host it is on first, filled with the accent color.
 
+use crate::app_menu_bar::{AppMenuBar, OpenApplicationMenu};
 use forge_languages::active_build::ActiveBuild;
 use forge_run::{RunController, State};
 use forge_tests::TestPanel;
@@ -33,12 +34,21 @@ pub fn init(cx: &mut gpui::App) {
         let workspace_entity = cx.entity();
         let bar = cx.new(|cx| ForgeTitleBar::new(workspace, &workspace_entity, cx));
         workspace.set_titlebar_item(bar.into(), window, cx);
+        // F10 and Alt+letter, from anywhere in the window.
+        if cfg!(not(target_os = "macos")) {
+            workspace.register_action(|workspace, action: &OpenApplicationMenu, _, cx| {
+                let Some(bar) = workspace.titlebar_item().and_then(|item| item.downcast::<ForgeTitleBar>().ok()) else { return };
+                let menu_bar = bar.read(cx).menu_bar.clone();
+                menu_bar.update(cx, |menu_bar, cx| menu_bar.open(action, cx));
+            });
+        }
     })
     .detach();
 }
 
 pub struct ForgeTitleBar {
     platform: Entity<PlatformTitleBar>,
+    menu_bar: Entity<AppMenuBar>,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     /// Set up lazily: the run controller and Tests panel appear after the title bar.
@@ -71,7 +81,7 @@ impl ForgeTitleBar {
         ];
         // The connection to a remote project's host: connected, reconnecting, lost.
         let subscriptions = subscriptions.into_iter().chain(project.read(cx).remote_client().map(|client| cx.observe(&client, |_, _, cx| cx.notify()))).collect();
-        Self { platform, workspace: workspace.weak_handle(), project, watched_run: false, watched_tests: false, watched_solution: false, _subscriptions: subscriptions }
+        Self { platform, menu_bar: cx.new(|_| AppMenuBar::new()), workspace: workspace.weak_handle(), project, watched_run: false, watched_tests: false, watched_solution: false, _subscriptions: subscriptions }
     }
 
     fn project_name(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -485,7 +495,7 @@ impl Render for ForgeTitleBar {
             .pl_4()
             .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
             .children(self.remote_host(cx).map(clickable))
-            .when(!global_menu_bar, |row| row.children(app_menu_bar(cx)))
+            .when(!global_menu_bar, |row| row.child(self.menu_bar.clone()))
             .children(project_left);
 
         let (solution, build, run) = (self.solution_picker(cx), self.build_picker(cx), self.run_controls(cx));
@@ -528,58 +538,6 @@ fn remote_label(options: &RemoteConnectionOptions) -> String {
 /// button starts moving the window instead, and the button never gets it.
 fn clickable(element: impl IntoElement) -> gpui::Div {
     div().occlude().child(element)
-}
-
-/// The app's menus (`cx.set_menus`) as a row of buttons, each opening its menu: on
-/// platforms without a global menu bar, the window has to show them itself.
-fn app_menu_bar(cx: &gpui::App) -> Option<AnyElement> {
-    let menus = cx.get_menus()?;
-    Some(
-        h_flex()
-            .occlude()
-            .children(menus.into_iter().map(|menu| {
-                let name: SharedString = menu.name.to_string().into();
-                let items = std::rc::Rc::new(menu.items);
-                PopoverMenu::new(SharedString::from(format!("app-menu-{name}")))
-                    .trigger(ButtonLike::new(SharedString::from(format!("app-menu-button-{name}"))).style(ButtonStyle::Subtle).child(Label::new(name).size(LabelSize::Small)))
-                    .menu(move |window, cx| {
-                        let items = items.clone();
-                        Some(ContextMenu::build(window, cx, move |menu, window, cx| {
-                            // Actions apply to what had focus before the menu opened.
-                            let menu = menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
-                            fill_menu(menu, &items)
-                        }))
-                    })
-                    .into_any_element()
-            }))
-            .into_any_element(),
-    )
-}
-
-fn fill_menu(menu: ContextMenu, items: &[gpui::OwnedMenuItem]) -> ContextMenu {
-    let mut menu = menu;
-    let mut last_was_separator = true;
-    for item in items {
-        match item {
-            gpui::OwnedMenuItem::Separator => {
-                if !last_was_separator {
-                    menu = menu.separator();
-                    last_was_separator = true;
-                }
-            }
-            gpui::OwnedMenuItem::Action { name, action, checked, disabled, .. } => {
-                menu = menu.action_checked_with_disabled(name.clone(), action.boxed_clone(), *checked, *disabled);
-                last_was_separator = false;
-            }
-            gpui::OwnedMenuItem::Submenu(submenu) if !submenu.items.is_empty() => {
-                let items = std::rc::Rc::new(submenu.items.clone());
-                menu = menu.submenu(submenu.name.to_string(), move |menu, _, _| fill_menu(menu, &items));
-                last_was_separator = false;
-            }
-            gpui::OwnedMenuItem::Submenu(_) | gpui::OwnedMenuItem::SystemMenu(_) => {}
-        }
-    }
-    menu
 }
 
 #[cfg(test)]

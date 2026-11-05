@@ -1,7 +1,7 @@
 //! Extension commands in Zed's command palette, and as a bindable action:
 //!
 //! ```json
-//! { "bindings": { "cmd-alt-h": ["forge_extensions::RunCommand", { "id": "workspace-notes.hello" }] } }
+//! { "bindings": { "cmd-alt-h": ["extensions::RunCommand", { "id": "workspace-notes.hello" }] } }
 //! ```
 
 use crate::host::ExtensionHost;
@@ -14,7 +14,7 @@ use workspace::Workspace;
 
 /// Runs a command registered by an extension with `forge.commands.register`.
 #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = forge_extensions)]
+#[action(namespace = extensions)]
 #[serde(deny_unknown_fields)]
 pub struct RunCommand {
     pub id: String,

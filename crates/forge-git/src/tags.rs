@@ -22,7 +22,7 @@ use ui::{
 };
 use workspace::{ModalView, Toast, Workspace, notifications::NotificationId};
 
-actions!(forge_git, [CreateTag]);
+actions!(git, [CreateTag]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

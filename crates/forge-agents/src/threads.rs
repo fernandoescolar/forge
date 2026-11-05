@@ -35,7 +35,7 @@ use crate::{
 use editor::RowHighlightOptions;
 use language::Point;
 
-actions!(forge_agent, [
+actions!(agents, [
     NewThread,
     OpenThreads,
     Send,
@@ -3228,7 +3228,7 @@ mod tests {
         let found = call(cx, "forge_settings", json!({ "query": "terminal font" })).await.unwrap().unwrap();
         assert!(found.contains("`font_size` on page Terminal") && found.contains("Default: 13"), "{found}");
         let keys = call(cx, "forge_keybindings", json!({ "keys": "ctrl-alt-shift-t" })).await.unwrap().unwrap();
-        assert!(keys.contains("forge_agent::NewThread"), "{keys}");
+        assert!(keys.contains("agents::NewThread"), "{keys}");
 
         // A proposal waits on a card; discarded, the agent hears so.
         let answer = call(cx, "change_settings", json!({ "changes": [{ "key": "font_size", "value": 16 }] }));
@@ -3245,7 +3245,7 @@ mod tests {
         assert_eq!(thread.read_with(cx, |t, _| t.entries.iter().filter(|e| matches!(e, Entry::Config { .. })).count()), 1);
 
         // A key binding proposal says what the keys did before.
-        let _answer = call(cx, "change_keybinding", json!({ "keys": "ctrl-alt-shift-t", "action": "forge_agent::OpenThreads" }));
+        let _answer = call(cx, "change_keybinding", json!({ "keys": "ctrl-alt-shift-t", "action": "agents::OpenThreads" }));
         let before = thread.read_with(cx, |t, _| match t.entries.last() {
             Some(Entry::Config { changes, .. }) => match &changes[0] {
                 crate::configure::ConfigChange::Binding(b) => b.before.clone(),
@@ -3253,7 +3253,7 @@ mod tests {
             },
             _ => None,
         });
-        assert!(before.is_some_and(|b| b.contains("forge_agent::NewThread")));
+        assert!(before.is_some_and(|b| b.contains("agents::NewThread")));
     }
 
     /// The language-server tools answer from the server: a file's outline, the

@@ -21,7 +21,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-actions!(forge_open_editors, [ToggleFocus]);
+actions!(open_editors, [ToggleFocus]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

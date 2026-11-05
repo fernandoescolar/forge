@@ -52,7 +52,7 @@ impl SolutionExplorer {
             };
             let location_entries = |menu: ContextMenu| {
                 menu.separator()
-                    .action("Reveal in Finder", Box::new(RevealInFinder))
+                    .action(forge_ui::reveal_label(), Box::new(RevealInFileManager))
                     .action("Open in Terminal", Box::new(OpenInTerminal))
                     .action("Copy Path", Box::new(CopyPath))
                     .action("Copy Relative Path", Box::new(CopyRelativePath))

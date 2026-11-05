@@ -13,14 +13,42 @@ pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
     cx.spawn(async move |cx| {
         let _watcher = watcher;
         while let Some(text) = contents.next().await {
-            cx.update(|cx| apply(&text, cx));
+            cx.update(|cx| {
+                apply(&text, cx);
+                // macOS writes the shortcuts into its menu items.
+                crate::menus::refresh(cx);
+            });
         }
     })
     .detach();
 }
 
+/// Commands that were renamed: keymaps written with the old names keep working.
+const RENAMED: &[(&str, &str)] = &[
+    ("forge_agent::", "agents::"),
+    ("forge_debug_console::", "debug_console::"),
+    ("forge_dotnet::", "dotnet::"),
+    ("solution_explorer::RevealInFinder", "dotnet::RevealInFileManager"),
+    ("solution_explorer::", "dotnet::"),
+    ("forge_extensions::", "extensions::"),
+    ("forge_github::", "github::"),
+    ("forge_git::", "git::"),
+    ("forge_http::", "http::"),
+    ("forge_languages::", "languages::"),
+    ("forge_open_editors::", "open_editors::"),
+    ("forge_output::", "output::"),
+    ("forge_run::", "run::"),
+    ("forge_tests::", "tests::"),
+    ("forge_toolchain::", "toolchain::"),
+];
+
+fn with_current_names(text: &str) -> String {
+    RENAMED.iter().fold(text.to_string(), |text, (old, new)| text.replace(&format!("\"{old}"), &format!("\"{new}")))
+}
+
 /// Replaces the user's bindings with those in `text`; every other binding stays.
 pub fn apply(text: &str, cx: &mut App) {
+    let text = &with_current_names(text);
     let user = KeybindSource::User.meta();
     let kept: Vec<gpui::KeyBinding> = cx.key_bindings().borrow().bindings().filter(|b| b.meta() != Some(user)).cloned().collect();
     let mut bindings = match KeymapFile::load(text, cx) {
@@ -56,6 +84,14 @@ mod tests {
         let keymap = keymap.borrow();
         let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &[]);
         bindings.first().map(|b| b.action().name().to_string())
+    }
+
+    /// Keymaps written before commands were renamed keep working.
+    #[test]
+    fn old_command_names_still_work() {
+        let old = r#"{ "ctrl-b": "forge_git::NextConflict", "ctrl-o": ["forge_extensions::RunCommand", { "id": "a" }], "ctrl-r": "solution_explorer::RevealInFinder", "ctrl-g": "git::Commit" }"#;
+        let new = r#"{ "ctrl-b": "git::NextConflict", "ctrl-o": ["extensions::RunCommand", { "id": "a" }], "ctrl-r": "dotnet::RevealInFileManager", "ctrl-g": "git::Commit" }"#;
+        assert_eq!(with_current_names(old), new);
     }
 
     /// The file's bindings win over the others, and editing it replaces them (not adds).

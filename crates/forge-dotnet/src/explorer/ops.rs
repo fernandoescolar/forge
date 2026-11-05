@@ -519,7 +519,7 @@ impl SolutionExplorer {
         cx.write_to_clipboard(ClipboardItem::new_string(relative.to_string_lossy().into_owned()));
     }
 
-    pub(super) fn reveal_in_finder(&mut self, _: &RevealInFinder, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reveal_in_file_manager(&mut self, _: &RevealInFileManager, _: &mut Window, cx: &mut Context<Self>) {
         if self.not_on_remote(cx) {
             return;
         }
@@ -537,18 +537,32 @@ impl SolutionExplorer {
     /// What `dotnet build` and friends act on: the selected project, else the solution.
     fn command_target(&self, cx: &App) -> Option<PathBuf> {
         match self.selected_kind() {
-            Some(NodeKind::Solution | NodeKind::SolutionFolder { .. }) | None => match self.solution_path(cx)? {
-                (path, SolutionFormat::Sln | SolutionFormat::Slnx) => Some(path),
-                // Without a solution, `dotnet` needs a project.
-                (_, SolutionFormat::Folder) => self.model.read(cx).solution.as_ref()?.all_projects().first().map(|p| p.path.clone()),
-            },
+            Some(NodeKind::Solution | NodeKind::SolutionFolder { .. }) | None => self.solution_target(cx),
             Some(kind) => kind.project().map(Path::to_path_buf),
         }
     }
 
-    /// Runs a `dotnet` command in a terminal.
+    /// The solution, or without one the project `dotnet` needs instead.
+    fn solution_target(&self, cx: &App) -> Option<PathBuf> {
+        match self.solution_path(cx)? {
+            (path, SolutionFormat::Sln | SolutionFormat::Slnx) => Some(path),
+            (_, SolutionFormat::Folder) => self.model.read(cx).solution.as_ref()?.all_projects().first().map(|p| p.path.clone()),
+        }
+    }
+
+    /// Runs a `dotnet` command on what is selected, in a terminal.
     pub(crate) fn run_dotnet(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.command_target(cx) else { return };
+        self.run_dotnet_on(target, command, window, cx);
+    }
+
+    /// Runs a `dotnet` command on the whole solution, whatever is selected (the app menus).
+    pub(crate) fn run_dotnet_on_solution(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.solution_target(cx) else { return };
+        self.run_dotnet_on(target, command, window, cx);
+    }
+
+    fn run_dotnet_on(&mut self, target: PathBuf, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.config(cx);
         // The configuration and framework chosen in the title bar.
         let build = ActiveBuild::get(cx);

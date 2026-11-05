@@ -18,7 +18,7 @@ use workspace::{
 
 use crate::init::{DEFAULT_BRANCH, InitRepository, uninitialized_root};
 
-actions!(forge_git, [ToggleHistory]);
+actions!(git, [ToggleHistory]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

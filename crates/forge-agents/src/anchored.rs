@@ -32,7 +32,7 @@ use crate::{
     threads::{self, Send},
 };
 
-actions!(forge_agent, [AskHere, DismissAsk]);
+actions!(agents, [AskHere, DismissAsk]);
 
 /// Block heights, in lines.
 const COMPOSING_LINES: u32 = 3;

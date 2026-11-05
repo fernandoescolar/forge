@@ -38,7 +38,7 @@ use crate::discovery::{self, TestProject};
 use crate::runner::{self, Scope};
 use crate::trx::{CaseResult, Outcome};
 
-actions!(forge_tests, [ToggleFocus, RunAllTests, RunAllTestsWithCoverage, ClearCoverage, RunFailedTests, RefreshTests]);
+actions!(tests, [ToggleFocus, RunAllTests, RunAllTestsWithCoverage, ClearCoverage, RunFailedTests, RefreshTests]);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

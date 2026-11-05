@@ -31,11 +31,11 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent, PanelHandle},
 };
 
-actions!(forge_extensions, [ToggleFocus]);
+actions!(extensions, [ToggleFocus]);
 
 /// Toggles extension slot `slot` (a dock panel holding extension panels).
 #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = forge_extensions)]
+#[action(namespace = extensions)]
 #[serde(deny_unknown_fields)]
 pub struct ToggleSlot {
     pub slot: usize,
@@ -43,7 +43,7 @@ pub struct ToggleSlot {
 
 /// Shows extension panel `id`: its slot opens, with it as the visible tab.
 #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = forge_extensions)]
+#[action(namespace = extensions)]
 #[serde(deny_unknown_fields)]
 pub struct ShowPanel {
     pub id: String,
