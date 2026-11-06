@@ -5,20 +5,17 @@
 
 pub mod condition;
 pub mod edit;
+mod expr;
 pub mod glob;
 pub mod items;
 pub mod text;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result};
-use regex::Regex;
 
 use crate::paths;
-
-static PROPERTY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_\-]*)\)").unwrap());
 
 /// MSBuild properties: case-insensitive names, last write wins.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -43,12 +40,10 @@ impl Properties {
         self.get(name).is_some_and(|v| v.trim().eq_ignore_ascii_case("false"))
     }
 
-    /// Replaces `$(Name)`; undefined properties expand to nothing, as in MSBuild.
+    /// Replaces `$(Name)` and property functions like `$(Name.Replace('a', 'b'))`; undefined
+    /// properties expand to nothing, as in MSBuild. Expressions it cannot read stay as `$(…)`.
     pub fn expand(&self, text: &str) -> String {
-        if !text.contains("$(") {
-            return text.to_string();
-        }
-        PROPERTY.replace_all(text, |caps: &regex::Captures| self.get(&caps[1]).unwrap_or("").to_string()).into_owned()
+        expr::expand(self, text)
     }
 
     /// Name/value pairs with their original spelling, sorted by name.
@@ -220,7 +215,7 @@ impl Project {
         let root = self
             .properties
             .get("RootNamespace")
-            .filter(|v| !v.trim().is_empty())
+            .filter(|v| !v.trim().is_empty() && !v.contains("$("))
             .map(str::to_string)
             .unwrap_or_else(|| self.name());
         let relative = paths::relative(self.dir(), dir).unwrap_or_default();
@@ -234,6 +229,7 @@ impl Project {
             .map(|c| if c.is_alphanumeric() || c == '.' || c == '_' { c } else { '_' })
             .collect::<String>()
             .split('.')
+            .filter(|part| !part.is_empty())
             .map(|part| if part.starts_with(|c: char| c.is_ascii_digit()) { format!("_{part}") } else { part.to_string() })
             .collect::<Vec<_>>()
             .join(".")
@@ -719,6 +715,35 @@ mod tests {
         let release = EvalOptions { configuration: "Release".into(), ..Default::default() };
         assert_eq!(evaluate(&project, &release).unwrap().properties.get("Optimize"), Some("true"));
         assert_eq!(p.namespace_for(&root.join("src/App/Controllers/V1")), "App.Controllers.V1");
+    }
+
+    #[test]
+    fn root_namespace_with_property_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write(
+            &root,
+            "Directory.Build.props",
+            "<Project><PropertyGroup><RootNamespace>Acme.Shop.$(MSBuildProjectName.Replace('Abstractions', '').Replace('.Tests', '').Replace('.IntegrationTests', ''))</RootNamespace></PropertyGroup></Project>",
+        );
+        let namespace = |name: &str, folder: &str| {
+            let project = write(&root, &format!("{name}/{name}.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+            evaluate(&project, &EvalOptions::default()).unwrap().namespace_for(&root.join(name).join(folder))
+        };
+        assert_eq!(namespace("Orders", ""), "Acme.Shop.Orders");
+        assert_eq!(namespace("Orders.Tests", "Unit"), "Acme.Shop.Orders.Unit");
+        assert_eq!(namespace("Orders.IntegrationTests", ""), "Acme.Shop.Orders");
+        // The replacement leaves `Acme.Shop.Orders.`, whose trailing dot is not a namespace.
+        assert_eq!(namespace("Orders.Abstractions", "Models"), "Acme.Shop.Orders.Models");
+    }
+
+    #[test]
+    fn root_namespace_it_cannot_evaluate_falls_back_to_the_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = write(&root, "App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><RootNamespace>$(MSBuildProjectName.Split('.'))</RootNamespace></PropertyGroup></Project>");
+        let p = evaluate(&project, &EvalOptions::default()).unwrap();
+        assert_eq!(p.namespace_for(&root), "App");
     }
 
     #[test]

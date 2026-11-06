@@ -227,7 +227,10 @@ mod tests {
         assert!(!evaluate("Exists('does-not-exist.props')", &p, dir));
         assert!(evaluate("HasTrailingSlash('a/')", &p, dir));
         assert!(!evaluate("false", &p, dir));
+        assert!(evaluate("$(TargetFramework.StartsWith('net8'))", &p, dir));
+        assert!(!evaluate("$(TargetFramework.StartsWith('net4'))", &p, dir));
+        assert!(evaluate("!$(TargetFramework.StartsWith('net4')) And '$(TargetFramework.Replace('.0', ''))' == 'net8'", &p, dir));
         // Unknown syntax fails open.
-        assert!(evaluate("$(TargetFramework.StartsWith('net4'))", &p, dir));
+        assert!(evaluate("$(TargetFramework.Split('.'))", &p, dir));
     }
 }
