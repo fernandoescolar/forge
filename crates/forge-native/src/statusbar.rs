@@ -1,5 +1,6 @@
 //! Forge's status bar: diagnostics, what the language servers are doing, the debug
-//! session and the cursor position, next to the dock buttons (see `docks.rs`).
+//! session and the cursor position, next to the dock buttons (see `docks.rs`); in a remote
+//! project, the host at the far right.
 
 use gpui::{AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window};
 use project::Project;
@@ -17,6 +18,7 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     let pull_request = cx.new(|cx| forge_github::PullRequestStatus::new(workspace, cx));
     // Size and dimensions of the open image.
     let image_info = cx.new(|_| image_viewer::ImageInfo::new(workspace));
+    let remote = cx.new(|cx| RemoteHost::new(workspace, cx));
     workspace.status_bar().update(cx, |bar, cx| {
         bar.add_left_item(diagnostics, window, cx);
         bar.add_left_item(servers, window, cx);
@@ -24,6 +26,8 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         bar.add_left_item(agents, window, cx);
         bar.add_left_item(conflicts, window, cx);
         bar.add_left_item(pull_request, window, cx);
+        // Right items are drawn from the edge in: the first one added is the rightmost.
+        bar.add_right_item(remote, window, cx);
         bar.add_right_item(image_info, window, cx);
         bar.add_right_item(cursor, window, cx);
     });
@@ -75,6 +79,33 @@ impl Render for DebugStatus {
 impl StatusItemView for DebugStatus {
     fn set_active_pane_item(&mut self, _: Option<&dyn ItemHandle>, _: &mut Window, _: &mut Context<Self>) {}
     /// Always shown: no "Hide Button" entry.
+    fn hide_setting(&self, _: &gpui::App) -> Option<workspace::HideStatusItem> {
+        None
+    }
+}
+
+/// The host a remote project is on, as in the title bar (`titlebar::remote_host`).
+pub struct RemoteHost {
+    project: Entity<Project>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl RemoteHost {
+    fn new(workspace: &Workspace, cx: &mut Context<Self>) -> Self {
+        let project = workspace.project().clone();
+        let subscriptions = project.read(cx).remote_client().map(|client| cx.observe(&client, |_, _, cx| cx.notify())).into_iter().collect();
+        Self { project, _subscriptions: subscriptions }
+    }
+}
+
+impl Render for RemoteHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::titlebar::remote_host(self.project.read(cx), "sb-remote-host", cx).unwrap_or_else(|| h_flex().into_any_element())
+    }
+}
+
+impl StatusItemView for RemoteHost {
+    fn set_active_pane_item(&mut self, _: Option<&dyn ItemHandle>, _: &mut Window, _: &mut Context<Self>) {}
     fn hide_setting(&self, _: &gpui::App) -> Option<workspace::HideStatusItem> {
         None
     }

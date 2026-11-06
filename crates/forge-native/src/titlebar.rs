@@ -89,42 +89,6 @@ impl ForgeTitleBar {
         (!names.is_empty()).then(|| names.join(", ").into())
     }
 
-    /// "SSH user@host" for a remote project, in the accent color while connected and in the
-    /// warning or error color while it reconnects or after it lost the host.
-    fn remote_host(&self, cx: &gpui::App) -> Option<AnyElement> {
-        let project = self.project.read(cx);
-        let options = project.remote_connection_options(cx)?;
-        let state = project.remote_connection_state(cx)?;
-        let (theme, host) = (cx.theme(), remote_label(&options));
-        let (fill, status) = match state {
-            ConnectionState::Connected => (theme.colors().text_accent, None),
-            ConnectionState::Connecting => (theme.status().warning, Some("connecting…")),
-            ConnectionState::HeartbeatMissed | ConnectionState::Reconnecting => (theme.status().warning, Some("reconnecting…")),
-            ConnectionState::Disconnected => (theme.status().error, Some("disconnected")),
-        };
-        let text = Color::Custom(theme.colors().editor_background);
-        let tooltip: SharedString = match status {
-            None => format!("Connected to {host} over {}: files, terminals, language servers and agents run there", options.connection_type().to_uppercase()),
-            Some(status) => format!("{host}: {status}"),
-        }
-        .into();
-        Some(
-            h_flex()
-                .id("tb-remote-host")
-                .gap_1()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .bg(fill)
-                .child(Icon::new(IconName::Server).size(IconSize::XSmall).color(text))
-                .child(Label::new(options.connection_type().to_uppercase()).size(LabelSize::XSmall).weight(FontWeight::BOLD).color(text))
-                .child(Label::new(host).size(LabelSize::Small).weight(FontWeight::SEMIBOLD).color(text))
-                .children(status.map(|status| Label::new(status).size(LabelSize::XSmall).color(text)))
-                .tooltip(Tooltip::text(tooltip))
-                .into_any_element(),
-        )
-    }
-
     fn branch(&self, cx: &gpui::App) -> Option<SharedString> {
         let repo = self.project.read(cx).active_repository(cx)?;
         let repo = repo.read(cx);
@@ -494,7 +458,7 @@ impl Render for ForgeTitleBar {
             // Breathing room after the traffic lights.
             .pl_4()
             .child(Icon::from_path("icons/forge_mark.svg").size(IconSize::Small).color(Color::Accent))
-            .children(self.remote_host(cx).map(clickable))
+            .children(remote_host(self.project.read(cx), "tb-remote-host", cx).map(clickable))
             .when(!global_menu_bar, |row| row.child(self.menu_bar.clone()))
             .children(project_left);
 
@@ -520,6 +484,42 @@ impl Render for ForgeTitleBar {
         self.platform.update(cx, |bar, _| bar.set_children(children));
         self.platform.clone()
     }
+}
+
+/// "SSH user@host" for a remote project, in the accent color while connected and in the
+/// warning or error color while it reconnects or after it lost the host. The title bar and
+/// the status bar both show it.
+pub(crate) fn remote_host(project: &Project, id: &'static str, cx: &gpui::App) -> Option<AnyElement> {
+    let options = project.remote_connection_options(cx)?;
+    let state = project.remote_connection_state(cx)?;
+    let (theme, host) = (cx.theme(), remote_label(&options));
+    let (fill, status) = match state {
+        ConnectionState::Connected => (theme.colors().text_accent, None),
+        ConnectionState::Connecting => (theme.status().warning, Some("connecting…")),
+        ConnectionState::HeartbeatMissed | ConnectionState::Reconnecting => (theme.status().warning, Some("reconnecting…")),
+        ConnectionState::Disconnected => (theme.status().error, Some("disconnected")),
+    };
+    let text = Color::Custom(theme.colors().editor_background);
+    let tooltip: SharedString = match status {
+        None => format!("Connected to {host} over {}: files, terminals, language servers and agents run there", options.connection_type().to_uppercase()),
+        Some(status) => format!("{host}: {status}"),
+    }
+    .into();
+    Some(
+        h_flex()
+            .id(id)
+            .gap_1()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .bg(fill)
+            .child(Icon::new(IconName::Server).size(IconSize::XSmall).color(text))
+            .child(Label::new(options.connection_type().to_uppercase()).size(LabelSize::XSmall).weight(FontWeight::BOLD).color(text))
+            .child(Label::new(host).size(LabelSize::Small).weight(FontWeight::SEMIBOLD).color(text))
+            .children(status.map(|status| Label::new(status).size(LabelSize::XSmall).color(text)))
+            .tooltip(Tooltip::text(tooltip))
+            .into_any_element(),
+    )
 }
 
 /// The host as you would type it after `ssh` (its nickname in Zed's settings, when it has one).
