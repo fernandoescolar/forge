@@ -147,15 +147,18 @@ pub fn usual_places(home: &Path) -> Vec<PathBuf> {
 /// What Forge adds to its own environment when it starts, so everything it runs (and the
 /// login shell it takes its environment from) finds tools where their installers put them
 /// before the user logs in again: the `places` ([`usual_places`]) that exist and `path`
-/// lacks, at the end. `~/.dotnet` goes first when it holds an SDK: the runtimes a program needs are
-/// looked for beside the `dotnet` that runs, and a user who installed the SDK there means
-/// to use it (`DOTNET_ROOT` goes with it, unless set). A place already on the PATH stays
-/// where the user put it.
+/// lacks, at the end. `~/.dotnet` goes first when its SDK is of a newer major version than
+/// the one of the `dotnet` on the `path`, or that has none: the runtimes a program needs are
+/// looked for beside the `dotnet` that runs (`DOTNET_ROOT` goes with it, unless set). Otherwise
+/// the `dotnet` the user's terminals run stays, with all its SDKs. A place already on the PATH
+/// stays where the user put it.
 pub fn startup_env(path: Option<&std::ffi::OsStr>, dotnet_root: Option<&std::ffi::OsStr>, home: &Path, places: &[PathBuf]) -> Vec<(&'static str, std::ffi::OsString)> {
     let current: Vec<PathBuf> = path.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
     let on_path = |place: &Path| current.iter().any(|entry| entry == place);
     let dotnet = home.join(".dotnet");
-    let dotnet_sdk = dotnet.join(if cfg!(windows) { "dotnet.exe" } else { "dotnet" }).is_file() && std::fs::read_dir(dotnet.join("sdk")).is_ok_and(|mut entries| entries.next().is_some());
+    let program = if cfg!(windows) { "dotnet.exe" } else { "dotnet" };
+    let path_sdk = current.iter().map(|dir| dir.join(program)).find(|p| p.is_file()).and_then(|p| p.canonicalize().ok()).and_then(|p| newest_sdk_major(p.parent()?));
+    let dotnet_sdk = dotnet.join(program).is_file() && newest_sdk_major(&dotnet).is_some_and(|major| path_sdk.is_none_or(|other| major > other));
     let mut first = vec![];
     let mut last = vec![];
     for place in places.iter().cloned() {
@@ -178,6 +181,11 @@ pub fn startup_env(path: Option<&std::ffi::OsStr>, dotnet_root: Option<&std::ffi
         env.push(("DOTNET_ROOT", dotnet.into_os_string()));
     }
     env
+}
+
+/// The major version of the newest SDK in a .NET install.
+fn newest_sdk_major(root: &Path) -> Option<u32> {
+    std::fs::read_dir(root.join("sdk")).ok()?.flatten().filter_map(|entry| entry.file_name().to_string_lossy().split('.').next()?.parse().ok()).max()
 }
 
 /// Whether `tool` is installed, looking on `path` (a `PATH` value) and in `places`.
@@ -462,6 +470,46 @@ mod tests {
         let env = startup_env(Some(&path), None, home, &places);
         let expected = std::env::join_paths([usr.clone(), dotnet.clone(), home.join(".cargo/bin")]).unwrap();
         assert_eq!(env, [("PATH", expected)], "runtimes only: last, and no DOTNET_ROOT");
+    }
+
+    /// `dir/bin/dotnet` as a package installs it: a link into the folder holding the SDKs.
+    #[cfg(unix)]
+    fn system_dotnet(dir: &Path, sdks: &[&str]) -> PathBuf {
+        let (bin, root) = (dir.join("bin"), dir.join("share/dotnet"));
+        std::fs::create_dir_all(&bin).unwrap();
+        for sdk in sdks {
+            std::fs::create_dir_all(root.join("sdk").join(sdk)).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dotnet"), "").unwrap();
+        std::os::unix::fs::symlink(root.join("dotnet"), bin.join("dotnet")).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_dotnet_on_the_path_stays_unless_home_has_a_newer_major() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dotnet = home.join(".dotnet");
+        std::fs::create_dir_all(dotnet.join("sdk/10.0.402")).unwrap();
+        std::fs::write(dotnet.join("dotnet"), "").unwrap();
+        let places = [dotnet.clone()];
+
+        let same = system_dotnet(&home.join("same"), &["8.0.133", "9.0.123", "10.0.114"]);
+        let path = std::env::join_paths([&same]).unwrap();
+        let expected = std::env::join_paths([same.clone(), dotnet.clone()]).unwrap();
+        assert_eq!(startup_env(Some(&path), None, home, &places), [("PATH", expected)], "same major: the user's dotnet and all its SDKs");
+
+        let older = system_dotnet(&home.join("older"), &["8.0.133"]);
+        let path = std::env::join_paths([&older]).unwrap();
+        let expected = std::env::join_paths([dotnet.clone(), older.clone()]).unwrap();
+        assert_eq!(startup_env(Some(&path), None, home, &places), [("PATH", expected), ("DOTNET_ROOT", dotnet.clone().into_os_string())], "a newer major wins");
+
+        let runtimes_only = system_dotnet(&home.join("runtimes"), &[]);
+        let path = std::env::join_paths([&runtimes_only]).unwrap();
+        let expected = std::env::join_paths([dotnet.clone(), runtimes_only.clone()]).unwrap();
+        assert_eq!(startup_env(Some(&path), None, home, &places), [("PATH", expected), ("DOTNET_ROOT", dotnet.clone().into_os_string())], "no SDK on the PATH");
     }
 
 }
