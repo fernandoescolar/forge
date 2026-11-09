@@ -1,3 +1,4 @@
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
 --- a/crates/editor/src/editor.rs
 +++ b/crates/editor/src/editor.rs
 @@ -127,6 +127,7 @@
@@ -8,6 +9,7 @@
  pub use multi_buffer::{
      Anchor, AnchorRangeExt, BufferOffset, ExcerptRange, MBTextSummary, MultiBuffer,
      MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
+diff --git a/crates/editor/src/mouse_context_menu.rs b/crates/editor/src/mouse_context_menu.rs
 --- a/crates/editor/src/mouse_context_menu.rs
 +++ b/crates/editor/src/mouse_context_menu.rs
 @@ -30,6 +30,15 @@
