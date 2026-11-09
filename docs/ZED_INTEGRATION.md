@@ -44,6 +44,7 @@ Keep each patch small and generic (a hook, not Forge logic), one concern per fil
 | `0018-lsp-exit-status.patch` | `LanguageServer::exit_status`: how the server's process ended. Zed doesn't notice a server that dies, so `forge-dotnet` polls this to start Roslyn again. |
 | `0019-lsp-reach-servers-on-host.patch` | `LspStore::notify_language_server` and `LspStore::language_server_exit_status`, which reach a server on this machine or, through two new proto messages, on a remote project's host, where `language_server_for_id` returns nothing; `LanguageServer::notify_raw`, for notifications without a type; and `LspAdapter::register_server_handlers`, for a server's own requests, which run where it does. `solution/open`, Roslyn's restores and its restarts use them, here and on a host. |
 | `0020-editor-context-menu-extension.patch` | `editor::EditorContextMenuExtension`: a global hook that adds entries to the end of the editor's context menu; Forge adds *Restart Language Servers*. |
+| `0021-editor-block-height-fractional-scale.patch` | Rounding a block's height to whole lines ignores up to one device pixel of excess, so with a fractional scale factor (1.25 on Linux) a one-line block such as the "N references" lens doesn't grow to two lines. |
 
 Things Forge does without patches, so they don't come back as patches:
 

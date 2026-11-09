@@ -1,0 +1,28 @@
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -3502,18 +3502,22 @@ impl EditorElement {
+         };
+ 
+         // Discover the element's content height, then round up to the nearest multiple of line height.
++        // Layout snaps to device pixels, so with a fractional scale factor a block exactly one line
++        // high can measure a fraction of a device pixel more: don't let that add a line.
++        let device_pixel = px(1.0) / window.scale_factor();
++        let lines_for = |height: Pixels| ((height - device_pixel) / line_height).ceil().max(0.0);
+         let preliminary_size = element.layout_as_root(
+             size(available_width, AvailableSpace::MinContent),
+             window,
+             cx,
+         );
+-        let quantized_height = (preliminary_size.height / line_height).ceil() * line_height;
++        let quantized_height = lines_for(preliminary_size.height) * line_height;
+         let final_size = if preliminary_size.height == quantized_height {
+             preliminary_size
+         } else {
+             element.layout_as_root(size(available_width, quantized_height.into()), window, cx)
+         };
+-        let mut element_height_in_lines = ((final_size.height / line_height).ceil() as u32).max(1);
++        let mut element_height_in_lines = (lines_for(final_size.height) as u32).max(1);
+ 
+         let effective_row_start = block_row_start.0 as i32 + *block_resize_offset;
+         debug_assert!(effective_row_start >= 0);
