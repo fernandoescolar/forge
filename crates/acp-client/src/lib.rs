@@ -659,8 +659,13 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // Written here, then copied by `cp`: a file this process held open for
+            // writing can be inherited by a child another test forks at that moment,
+            // and running it then fails with ETXTBSY ("Text file busy").
+            let script = bin.path().join("forge-test-agent.sh");
+            std::fs::write(&script, format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", mock.display())).unwrap();
             let shim = bin.path().join("forge-test-agent");
-            std::fs::write(&shim, format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", mock.display())).unwrap();
+            assert!(std::process::Command::new("cp").arg(&script).arg(&shim).status().unwrap().success());
             std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         #[cfg(windows)]
