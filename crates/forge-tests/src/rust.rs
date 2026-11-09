@@ -219,7 +219,8 @@ fn code_lines(source: &str) -> Vec<String> {
             }
             State::Str => {
                 if c == '\\' {
-                    i += 2;
+                    // A line continuation is still a line break: the rows after it count.
+                    i += if next == Some('\n') { 1 } else { 2 };
                     continue;
                 } else if c == '"' {
                     line.push('"');
@@ -380,6 +381,13 @@ pub fn parse(package: &str, stdout: &str, stderr: &str) -> Vec<CaseResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_continuation_in_a_string_is_a_row() {
+        let lines = code_lines("const A: &str = \"one \\\n    two\";\nfn after() {}\n");
+        assert_eq!(lines.len(), 4);
+        assert!(lines[2].contains("fn after"));
+    }
 
     #[test]
     fn finds_tests_in_nested_modules() {

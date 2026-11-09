@@ -391,7 +391,7 @@ fn startup_paths(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
             paths.push(PathBuf::from(arg));
         } else {
             let path = PathBuf::from(arg);
-            paths.push(if remote::ssh_target(&path).is_some() { path } else { path.canonicalize().unwrap_or(path) });
+            paths.push(if remote::ssh_target(&path).is_some() { path } else { path.canonicalize().or_else(|_| std::path::absolute(&path)).unwrap_or(path) });
         }
     }
     paths

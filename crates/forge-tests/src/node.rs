@@ -115,7 +115,12 @@ fn code_lines(source: &str) -> Vec<String> {
                 i += 1;
             }
         } else if let Some(q) = quote {
-            if c == '\\' {
+            if c == '\\' && next == Some('\n') {
+                // A line continuation: the string goes on, on a row of its own.
+                lines.push(String::new());
+                i += 2;
+                continue;
+            } else if c == '\\' {
                 i += 1;
             } else if c == q {
                 quote = None;
@@ -294,6 +299,14 @@ describe('math', () => {
 
 it('stands alone', async () => {});
 "#;
+
+    #[test]
+    fn a_line_continuation_in_a_string_is_a_row() {
+        let lines = code_lines("const a = 'one \\\n  two { ';\nit('after', () => {});\n");
+        assert_eq!(lines.len(), 4);
+        assert!(!lines[1].contains('{'), "still inside the string");
+        assert!(lines[2].contains("it("));
+    }
 
     #[test]
     fn finds_nested_tests() {

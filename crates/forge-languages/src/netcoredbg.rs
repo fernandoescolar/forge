@@ -258,7 +258,7 @@ impl DapLocator for DotnetTestLocator {
         // (waiting for a debugger that never comes) is stopped with `dotnet test`.
         let env: Vec<(String, String)> = build_config.env.iter().filter(|(key, _)| *key != FILTER_ENV).map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut command = smol::process::Command::from(forge_process::command("dotnet", &env));
-        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        command.args(&args).env("VSTEST_HOST_DEBUG", "1").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
         if let Some(cwd) = &build_config.cwd {
             command.current_dir(cwd);
         }
@@ -373,6 +373,8 @@ impl DapLocator for DotnetRunLocator {
         let project = build_config.args.get(1).map(|arg| PathBuf::from(unquote(arg)));
         let file_based = project.as_deref().is_some_and(|p| p.extension().is_some_and(|e| e == "cs"));
         let mut command = new_command("dotnet");
+        // The build step's environment, so this is the same `dotnet` and SDK.
+        command.envs(&build_config.env);
         // `dotnet msbuild` can't load a `.cs`; `dotnet build` evaluates it into its own
         // project, built where the SDK keeps file-based apps, and reports that program.
         command.arg(if file_based { "build" } else { "msbuild" });
