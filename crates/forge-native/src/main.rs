@@ -473,21 +473,21 @@ fn load_keymap(cx: &mut App) {
 
 /// Forge's bindings, over Zed's defaults (of two bindings for the same place, the later wins).
 fn bind_forge_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new("secondary-q", Quit, None), gpui::KeyBinding::new("secondary-,", settings_view::OpenSettings, None)]);
+    cx.bind_keys([forge_ui::key_binding("secondary-q", Quit, None, cx), forge_ui::key_binding("secondary-,", settings_view::OpenSettings, None, cx)]);
     // Build the solution from anywhere (the Solution Explorer's binds its selection).
-    cx.bind_keys([gpui::KeyBinding::new("secondary-shift-b", forge_dotnet::explorer::Build, Some("Workspace"))]);
+    cx.bind_keys([forge_ui::key_binding("secondary-shift-b", forge_dotnet::explorer::Build, Some("Workspace"), cx)]);
     if cfg!(not(target_os = "macos")) {
         app_menu_bar::bind_keys(cx);
     }
     // ⌘↩ shows the code actions (Zed: ⌘., kept too), instead of Zed's "new line below".
-    cx.bind_keys([gpui::KeyBinding::new("secondary-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"))]);
+    cx.bind_keys([forge_ui::key_binding("secondary-enter", editor::actions::ToggleCodeActions::default(), Some("Editor && mode == full"), cx)]);
     forge_agents::bind_keys(cx);
     // ⌘. / ⌘↩ in a project file (no language server there): the package's other versions.
     for extension in ["csproj", "fsproj", "vbproj", "props", "targets", "proj"] {
         let context = format!("Editor && extension == {extension}");
         cx.bind_keys([
-            gpui::KeyBinding::new("secondary-.", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
-            gpui::KeyBinding::new("secondary-enter", forge_dotnet::project_files::ChangePackageVersion, Some(&context)),
+            forge_ui::key_binding("secondary-.", forge_dotnet::project_files::ChangePackageVersion, Some(&context), cx),
+            forge_ui::key_binding("secondary-enter", forge_dotnet::project_files::ChangePackageVersion, Some(&context), cx),
         ]);
     }
     // After the code actions: in a .http file ⌘↩ sends the request.
@@ -616,7 +616,7 @@ mod tests {
                 let context: Vec<gpui::KeyContext> = context.split('/').map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
                 let keymap = cx.key_bindings();
                 let keymap = keymap.borrow();
-                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &context);
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse_with_os(keys, cx.platform_info().os).unwrap()], &context);
                 bindings.first().map(|b| b.action().name().to_string())
             })
         };
@@ -645,7 +645,7 @@ mod tests {
                 let keymap = cx.key_bindings();
                 let keymap = keymap.borrow();
                 let stack = [gpui::KeyContext::parse("Workspace").unwrap(), gpui::KeyContext::parse(context).unwrap()];
-                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &stack);
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse_with_os(keys, cx.platform_info().os).unwrap()], &stack);
                 bindings.first().map(|b| b.action().name().to_string())
             })
         };

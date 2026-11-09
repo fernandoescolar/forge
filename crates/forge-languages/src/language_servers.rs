@@ -26,7 +26,7 @@ pub fn init(cx: &mut App) {
 /// forgets which servers were stopped, so those start too, on the host in a remote project.
 pub fn restart(project: &Entity<Project>, cx: &mut App) {
     let buffers = workspace_buffers(project, cx);
-    project.update(cx, |project, cx| project.restart_language_servers_for_buffers(buffers, Default::default(), true, cx));
+    project.update(cx, |project, cx| project.restart_language_servers_for_buffers(buffers, Default::default(), cx));
 }
 
 /// The open files of the workspace's folders. Decompiled sources sit in hidden worktrees of

@@ -182,19 +182,19 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", ExpandSelected, context),
         KeyBinding::new("enter", Open, context),
         KeyBinding::new("f2", Rename, context),
-        KeyBinding::new("secondary-backspace", Delete, context),
+        forge_ui::key_binding("secondary-backspace", Delete, context, cx),
         KeyBinding::new("delete", Delete, context),
-        KeyBinding::new("secondary-c", Copy, context),
-        KeyBinding::new("secondary-x", Cut, context),
-        KeyBinding::new("secondary-v", Paste, context),
-        KeyBinding::new("secondary-d", Duplicate, context),
-        KeyBinding::new("secondary-alt-c", CopyPath, context),
-        KeyBinding::new("secondary-n", NewFile, context),
-        KeyBinding::new("secondary-shift-n", NewFolder, context),
-        KeyBinding::new("secondary-shift-b", Build, context),
+        forge_ui::key_binding("secondary-c", Copy, context, cx),
+        forge_ui::key_binding("secondary-x", Cut, context, cx),
+        forge_ui::key_binding("secondary-v", Paste, context, cx),
+        forge_ui::key_binding("secondary-d", Duplicate, context, cx),
+        forge_ui::key_binding("secondary-alt-c", CopyPath, context, cx),
+        forge_ui::key_binding("secondary-n", NewFile, context, cx),
+        forge_ui::key_binding("secondary-shift-n", NewFolder, context, cx),
+        forge_ui::key_binding("secondary-shift-b", Build, context, cx),
         KeyBinding::new("shift-up", ExtendSelectionUp, context),
         KeyBinding::new("shift-down", ExtendSelectionDown, context),
-        KeyBinding::new("secondary-a", SelectAllSiblings, context),
+        forge_ui::key_binding("secondary-a", SelectAllSiblings, context, cx),
         KeyBinding::new("alt-up", MoveUp, context),
         KeyBinding::new("alt-down", MoveDown, context),
     ]);
@@ -445,8 +445,8 @@ impl SolutionExplorer {
     }
 
     /// A click on a row: ⌘ toggles it in the selection, ⇧ extends to it.
-    fn click_select(&mut self, id: String, modifiers: gpui::Modifiers) {
-        if modifiers.secondary() {
+    fn click_select(&mut self, id: String, modifiers: gpui::Modifiers, cx: &App) {
+        if modifiers.secondary(cx) {
             if let Some(at) = self.marked.iter().position(|m| *m == id) {
                 self.marked.remove(at);
             } else {
@@ -790,8 +790,8 @@ impl SolutionExplorer {
                 cx.stop_propagation();
                 window.focus(&this.focus_handle, cx);
                 let modifiers = event.modifiers();
-                this.click_select(click_id.clone(), modifiers);
-                if !modifiers.secondary() && !modifiers.shift {
+                this.click_select(click_id.clone(), modifiers, cx);
+                if !modifiers.secondary(cx) && !modifiers.shift {
                     this.activate(&click_id, event.click_count(), window, cx);
                 }
                 cx.notify();
@@ -1284,12 +1284,12 @@ mod tests {
         panel.update(&mut cx, |p, cx| p.toggle(&format!("project:{}", app.display()), cx));
 
         let file_id = |name: &str| format!("file:{}:{name}", app.display());
-        panel.update(&mut cx, |p, _| {
-            p.click_select(file_id("A.cs"), gpui::Modifiers::default());
-            p.click_select(file_id("C.cs"), gpui::Modifiers::secondary_key());
+        panel.update(&mut cx, |p, cx| {
+            p.click_select(file_id("A.cs"), gpui::Modifiers::default(), cx);
+            p.click_select(file_id("C.cs"), gpui::Modifiers::secondary_key(cx), cx);
             assert_eq!(p.selected_kinds().len(), 2, "⌘-click adds to the selection");
-            p.click_select(file_id("A.cs"), gpui::Modifiers::default());
-            p.click_select(file_id("C.cs"), gpui::Modifiers::shift());
+            p.click_select(file_id("A.cs"), gpui::Modifiers::default(), cx);
+            p.click_select(file_id("C.cs"), gpui::Modifiers::shift(), cx);
             assert_eq!(p.selected_kinds().len(), 3, "⇧-click selects the range A..C");
             assert_eq!(p.selected_paths().len(), 3);
         });

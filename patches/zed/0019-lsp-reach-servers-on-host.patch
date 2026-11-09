@@ -1,7 +1,7 @@
 diff --git a/crates/language/src/language.rs b/crates/language/src/language.rs
 --- a/crates/language/src/language.rs
 +++ b/crates/language/src/language.rs
-@@ -520,6 +520,10 @@
+@@ -524,6 +524,10 @@ pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
  
      fn process_diagnostics(&self, _: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {}
  
@@ -15,13 +15,13 @@ diff --git a/crates/language/src/language.rs b/crates/language/src/language.rs
 diff --git a/crates/lsp/src/lsp.rs b/crates/lsp/src/lsp.rs
 --- a/crates/lsp/src/lsp.rs
 +++ b/crates/lsp/src/lsp.rs
-@@ -1691,6 +1691,20 @@
-         Self::notify_internal::<T>(&outbound, params)
+@@ -1694,6 +1694,20 @@ impl LanguageServer {
+         Self::notify_internal::<T>(&self.outbound_tx, params)
      }
  
 +    /// Sends a notification that has no [`notification::Notification`] type.
 +    pub fn notify_raw(&self, method: String, params: Value) -> Result<()> {
-+        let serializer = NotificationSerializer(Box::new(move || {
++        let message = OutboundMessage::PendingSerialization(Box::new(move || {
 +            serde_json::to_string(&Notification {
 +                jsonrpc: JSON_RPC_VERSION,
 +                method: &method,
@@ -29,17 +29,17 @@ diff --git a/crates/lsp/src/lsp.rs b/crates/lsp/src/lsp.rs
 +            })
 +            .unwrap()
 +        }));
-+        self.notification_tx.send_blocking(serializer)?;
++        self.outbound_tx.send_blocking(message)?;
 +        Ok(())
 +    }
 +
      fn notify_internal<T: notification::Notification>(
-         outbound_tx: &async_channel::Sender<NotificationSerializer>,
+         outbound_tx: &async_channel::Sender<OutboundMessage>,
          params: T::Params,
 diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
 --- a/crates/project/src/lsp_store.rs
 +++ b/crates/project/src/lsp_store.rs
-@@ -906,6 +906,7 @@
+@@ -967,6 +967,7 @@ impl LocalLspStore {
          delegate: Arc<dyn LspAdapterDelegate>,
          adapter: Arc<CachedLspAdapter>,
      ) {
@@ -47,7 +47,7 @@ diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
          let name = language_server.name();
          let server_id = language_server.server_id();
          language_server
-@@ -4790,6 +4791,8 @@
+@@ -4847,6 +4848,8 @@ impl LspStore {
          client.add_entity_message_handler(Self::handle_lsp_query_response);
          client.add_entity_request_handler(Self::handle_restart_language_servers);
          client.add_entity_request_handler(Self::handle_stop_language_servers);
@@ -56,7 +56,7 @@ diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
          client.add_entity_request_handler(Self::handle_cancel_language_server_work);
          client.add_entity_message_handler(Self::handle_start_language_server);
          client.add_entity_message_handler(Self::handle_update_language_server);
-@@ -11975,6 +11978,89 @@
+@@ -12064,6 +12067,89 @@ impl LspStore {
          self.as_local()?.language_server_for_id(id)
      }
  
@@ -149,7 +149,7 @@ diff --git a/crates/project/src/lsp_store.rs b/crates/project/src/lsp_store.rs
 diff --git a/crates/proto/proto/lsp.proto b/crates/proto/proto/lsp.proto
 --- a/crates/proto/proto/lsp.proto
 +++ b/crates/proto/proto/lsp.proto
-@@ -1128,6 +1128,22 @@
+@@ -1128,6 +1128,22 @@ message StopLanguageServers {
    bool all = 4;
  }
  
@@ -175,7 +175,7 @@ diff --git a/crates/proto/proto/lsp.proto b/crates/proto/proto/lsp.proto
 diff --git a/crates/proto/proto/zed.proto b/crates/proto/proto/zed.proto
 --- a/crates/proto/proto/zed.proto
 +++ b/crates/proto/proto/zed.proto
-@@ -524,7 +524,10 @@
+@@ -517,7 +517,10 @@ message Envelope {
      ExecuteLspCommandResponse execute_lsp_command_response = 492;
      RefreshDocumentHighlights refresh_document_highlights = 493;
      GetTerminalShell get_terminal_shell = 494;
@@ -190,7 +190,7 @@ diff --git a/crates/proto/proto/zed.proto b/crates/proto/proto/zed.proto
 diff --git a/crates/proto/src/proto.rs b/crates/proto/src/proto.rs
 --- a/crates/proto/src/proto.rs
 +++ b/crates/proto/src/proto.rs
-@@ -284,6 +284,9 @@
+@@ -284,6 +284,9 @@ messages!(
      (RespondToContactRequest, Foreground),
      (RestartLanguageServers, Foreground),
      (StopLanguageServers, Background),
@@ -200,7 +200,7 @@ diff --git a/crates/proto/src/proto.rs b/crates/proto/src/proto.rs
      (RoomUpdated, Foreground),
      (SaveBuffer, Foreground),
      (SendChannelMessage, Background),
-@@ -584,6 +587,8 @@
+@@ -577,6 +580,8 @@ request_messages!(
      (LspQueryResponse, Ack),
      (RestartLanguageServers, Ack),
      (StopLanguageServers, Ack),
@@ -209,7 +209,7 @@ diff --git a/crates/proto/src/proto.rs b/crates/proto/src/proto.rs
      (LspExtSwitchSourceHeader, LspExtSwitchSourceHeaderResponse),
      (LspExtGoToParentModule, LspExtGoToParentModuleResponse),
      (ExecuteLspCommand, ExecuteLspCommandResponse),
-@@ -768,6 +773,8 @@
+@@ -757,6 +762,8 @@ entity_messages!(
      LspQueryResponse,
      RestartLanguageServers,
      StopLanguageServers,

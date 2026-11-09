@@ -49,8 +49,8 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// every editor too, and of two bindings for the same editor the later one wins.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("secondary-enter", SendRequest::default(), Some("Editor && extension == http")),
-        gpui::KeyBinding::new("secondary-enter", SendRequest::default(), Some("Editor && extension == rest")),
+        forge_ui::key_binding("secondary-enter", SendRequest::default(), Some("Editor && extension == http"), cx),
+        forge_ui::key_binding("secondary-enter", SendRequest::default(), Some("Editor && extension == rest"), cx),
     ]);
 }
 

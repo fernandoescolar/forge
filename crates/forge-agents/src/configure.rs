@@ -182,10 +182,11 @@ pub fn plan_setting_changes(pages: &[SettingsPage], changes: &Value, current: &d
 }
 
 /// `keys` written the way the keymap writes them (`cmd-k cmd-s`), or why they aren't keys.
-pub fn normalize_keys(keys: &str) -> Result<String, String> {
+pub fn normalize_keys(keys: &str, cx: &App) -> Result<String, String> {
+    let os = cx.platform_info().os;
     let parts: Vec<String> = keys
         .split_whitespace()
-        .map(|part| gpui::Keystroke::parse(part).map(|k| k.unparse()).map_err(|e| format!("`{part}` isn't a key: {e}")))
+        .map(|part| gpui::Keystroke::parse_with_os(part, os).map(|k| k.unparse(os)).map_err(|e| format!("`{part}` isn't a key: {e}")))
         .collect::<Result<_, _>>()?;
     if parts.is_empty() {
         return Err("`keys` is empty.".into());
@@ -199,14 +200,14 @@ pub fn describe_bindings(keys: Option<&str>, action: Option<&str>, cx: &App) -> 
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
     let line = |b: &gpui::KeyBinding| {
-        let keys: Vec<String> = b.keystrokes().iter().map(|k| k.inner().unparse()).collect();
+        let keys: Vec<String> = b.keystrokes().iter().map(|k| k.inner().unparse(cx.platform_info().os)).collect();
         let context = b.predicate().map(|p| format!(" (when {p})")).unwrap_or_default();
         let input = b.action_input().map(|i| format!(" {i}")).unwrap_or_default();
         format!("- {} → {}{input}{context}", keys.join(" "), b.action().name())
     };
     if let Some(keys) = keys {
-        let keys = normalize_keys(keys)?;
-        let found: Vec<String> = keymap.bindings().rev().filter(|b| b.keystrokes().iter().map(|k| k.inner().unparse()).collect::<Vec<_>>().join(" ") == keys).take(MAX_BINDINGS).map(line).collect();
+        let keys = normalize_keys(keys, cx)?;
+        let found: Vec<String> = keymap.bindings().rev().filter(|b| b.keystrokes().iter().map(|k| k.inner().unparse(cx.platform_info().os)).collect::<Vec<_>>().join(" ") == keys).take(MAX_BINDINGS).map(line).collect();
         return Ok(if found.is_empty() { format!("{keys} does nothing in any context.") } else { format!("{keys} (the first one listed wins where several apply):\n{}", found.join("\n")) });
     }
     let wanted = action.unwrap_or_default().to_lowercase();
@@ -227,7 +228,7 @@ pub fn describe_bindings(keys: Option<&str>, action: Option<&str>, cx: &App) -> 
 /// The binding an agent asked for (`{ keys, action, args?, context? }`, `action: null` to
 /// make the keys do nothing there), checked: real keys, a known action.
 pub fn plan_binding_change(args: &Value, cx: &App) -> Result<BindingChange, String> {
-    let keys = normalize_keys(args.get("keys").and_then(Value::as_str).ok_or("`keys` is missing (`cmd-shift-t`, or `cmd-k cmd-t` for a sequence).")?)?;
+    let keys = normalize_keys(args.get("keys").and_then(Value::as_str).ok_or("`keys` is missing (`cmd-shift-t`, or `cmd-k cmd-t` for a sequence).")?, cx)?;
     let action = match args.get("action") {
         Some(Value::String(name)) => {
             if !cx.all_action_names().contains(&name.as_str()) {

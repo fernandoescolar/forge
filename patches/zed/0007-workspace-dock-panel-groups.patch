@@ -1,5 +1,4 @@
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
-index 918607c..c2633a1 100644
 --- a/crates/workspace/src/dock.rs
 +++ b/crates/workspace/src/dock.rs
 @@ -8,7 +8,7 @@ use client::proto;
@@ -38,9 +37,9 @@ index 918607c..c2633a1 100644
 +    /// How much of its group's space each grouped panel takes (relative; 1 by default).
 +    panel_weights: std::collections::HashMap<EntityId, f32>,
      focus_handle: FocusHandle,
-     focus_follows_mouse: FocusFollowsMouse,
      restoration: DockRestoreState,
-@@ -452,6 +468,8 @@ impl Dock {
+     zoom_layer_open: bool,
+@@ -451,6 +467,8 @@ impl Dock {
                  workspace: workspace.downgrade(),
                  panel_entries: Default::default(),
                  active_panel_index: None,
@@ -48,8 +47,8 @@ index 918607c..c2633a1 100644
 +                panel_weights: Default::default(),
                  is_open: false,
                  focus_handle: focus_handle.clone(),
-                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
-@@ -585,14 +603,111 @@ impl Dock {
+                 _subscriptions: [focus_subscription, zoom_subscription],
+@@ -583,14 +601,111 @@ impl Dock {
      fn set_open_internal(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
          if open != self.is_open {
              self.is_open = open;
@@ -163,7 +162,7 @@ index 918607c..c2633a1 100644
      pub fn set_panel_zoomed(
          &mut self,
          panel: &AnyView,
-@@ -949,13 +1064,27 @@ impl Dock {
+@@ -947,13 +1062,27 @@ impl Dock {
          cx: &mut Context<Self>,
      ) {
          if Some(panel_ix) != self.active_panel_index {
@@ -195,15 +194,15 @@ index 918607c..c2633a1 100644
              }
  
              cx.notify();
-@@ -1270,6 +1399,7 @@ impl Dock {
+@@ -1276,6 +1405,7 @@ impl Dock {
  impl Render for Dock {
      fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-         let dispatch_context = Self::dispatch_context();
+         let dispatch_context = Self::dispatch_context(cx);
 +        let shown: Vec<Arc<dyn PanelHandle>> = self.shown_panels();
          if let Some(entry) = self.visible_entry() {
              let position = self.position;
              let create_resize_handle = || {
-@@ -1351,19 +1481,89 @@ impl Render for Dock {
+@@ -1357,19 +1487,89 @@ impl Render for Dock {
                      DockPosition::Right => this.border_l_1(),
                      DockPosition::Bottom => this.border_t_1(),
                  })

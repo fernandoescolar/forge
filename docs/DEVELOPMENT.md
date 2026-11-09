@@ -17,7 +17,7 @@ sudo apt install libasound2-dev libfontconfig-dev libgit2-dev libssl-dev libva-d
 
 Windows is in preview: Forge builds and is packaged for `x86_64-pc-windows-msvc` (CI checks it on every push), but its tests don't run there yet. On Windows, `scripts/bundle-windows.ps1` makes `dist\forge` and `dist\Forge-<version>-windows-x86_64.zip` (`forge\bin\forge.exe`, with the icon from `crates/forge-native/forge.rc`, and the bundled extensions in `forge\share\forge\extensions`); it needs Git for Windows' bash for the Database Explorer's sidecar. From macOS or Linux, [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) checks it builds: `cargo xwin check --workspace --tests --target x86_64-pc-windows-msvc`. On Windows the one-Forge-per-user check uses a named pipe (`\\.\pipe\forge-<user>`), and updates swap files in one by one (a running `forge.exe` can be renamed, not replaced), leaving `*.forge-old` files that the next start removes.
 
-Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.25.3`) and cloned shallowly:
+Zed is a **git submodule** at `vendor/zed`, pinned to a release tag (currently `v1.27.0`) and cloned shallowly:
 
 ```bash
 git clone --recurse-submodules --shallow-submodules https://github.com/fernandoescolar/forge.git forge-ide

@@ -31,19 +31,28 @@ pub struct OpenApplicationMenu(String);
 
 /// Each menu's Alt+letter, underlined in its name. Taken where Zed's keymaps leave the letter
 /// free: `g` starts Editor chords (Alt+G B), `r` toggles regex search, `t` reruns the task.
-const MNEMONICS: &[(&str, char)] =
-    &[("File", 'f'), ("Edit", 'e'), ("View", 'v'), ("Go", 'o'), ("Run", 'u'), ("Git", 'i'), ("Agents", 'a'), ("Tools", 'l'), ("Help", 'h')];
+/// The keys are spelled out because key bindings take only static strings.
+const MNEMONICS: &[(&str, char, &str)] = &[
+    ("File", 'f', "alt-f"),
+    ("Edit", 'e', "alt-e"),
+    ("View", 'v', "alt-v"),
+    ("Go", 'o', "alt-o"),
+    ("Run", 'u', "alt-u"),
+    ("Git", 'i', "alt-i"),
+    ("Agents", 'a', "alt-a"),
+    ("Tools", 'l', "alt-l"),
+    ("Help", 'h', "alt-h"),
+];
 
 /// Below this the menus don't fit next to what the title bar's other side shows.
 const FOLD_BELOW: gpui::Pixels = px(1000.);
 
 pub fn bind_keys(cx: &mut App) {
-    for (name, letter) in MNEMONICS {
-        let keys = format!("alt-{letter}");
-        cx.bind_keys([KeyBinding::new(&keys, OpenApplicationMenu((*name).into()), Some("Workspace"))]);
+    for (name, letter, keys) in MNEMONICS {
+        cx.bind_keys([KeyBinding::new(keys, OpenApplicationMenu((*name).into()), Some("Workspace"))]);
         // A terminal's programs get Alt+letter (Alt+F already goes to them in Zed's keymap).
         if *letter != 'f' {
-            cx.bind_keys([KeyBinding::new(&keys, NoAction, Some("Terminal"))]);
+            cx.bind_keys([KeyBinding::new(keys, NoAction, Some("Terminal"))]);
         }
     }
     // Zed's Windows keymap gives these to the search bars from any pane: only in them, here.
@@ -178,7 +187,7 @@ impl Render for AppMenuBar {
 
 /// The menu's name with its Alt+letter underlined.
 fn title(name: &SharedString, cx: &App) -> impl IntoElement {
-    let letter = MNEMONICS.iter().find(|(menu, _)| *menu == name.as_ref()).map(|(_, letter)| *letter);
+    let letter = MNEMONICS.iter().find(|(menu, _, _)| *menu == name.as_ref()).map(|(_, letter, _)| *letter);
     let start = letter.and_then(|letter| name.char_indices().find(|(_, c)| c.to_ascii_lowercase() == letter).map(|(i, _)| i));
     let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
     let highlights: Vec<_> = start.map(|start| (start..start + 1, underline)).into_iter().collect();

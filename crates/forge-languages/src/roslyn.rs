@@ -292,7 +292,7 @@ impl LspAdapter for RoslynLspAdapter {
     }
 
     /// The "N references" lens asks the client to show the references at its position.
-    fn client_command(&self, command: &str, _: &[Value]) -> Option<language::ClientCommand> {
+    fn client_command(&self, command: &str, _: &[Value], _: util::paths::PathStyle) -> Option<language::ClientCommand> {
         (command == "roslyn.client.peekReferences").then_some(language::ClientCommand::ShowLocations)
     }
 

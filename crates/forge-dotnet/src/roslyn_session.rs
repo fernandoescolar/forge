@@ -247,7 +247,7 @@ impl RoslynSession {
         let buffers = project_buffers(project, cx);
         let name = LanguageServerName::new_static(ROSLYN);
         project.update(cx, |project, cx| {
-            project.restart_language_servers_for_buffers(buffers, HashSet::from_iter([LanguageServerSelector::Name(name)]), true, cx);
+            project.restart_language_servers_for_buffers(buffers, HashSet::from_iter([LanguageServerSelector::Name(name)]), cx);
         });
     }
 }

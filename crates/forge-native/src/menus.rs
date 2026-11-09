@@ -108,10 +108,10 @@ pub fn init(cx: &mut App) {
         filter.hide_action_types(&[std::any::TypeId::of::<OpenRecentProject>()]);
     });
     cx.bind_keys([
-        gpui::KeyBinding::new("secondary-=", IncreaseFontSize, None),
-        gpui::KeyBinding::new("secondary-+", IncreaseFontSize, None),
-        gpui::KeyBinding::new("secondary--", DecreaseFontSize, None),
-        gpui::KeyBinding::new("secondary-0", ResetFontSize, None),
+        forge_ui::key_binding("secondary-=", IncreaseFontSize, None, cx),
+        forge_ui::key_binding("secondary-+", IncreaseFontSize, None, cx),
+        forge_ui::key_binding("secondary--", DecreaseFontSize, None, cx),
+        forge_ui::key_binding("secondary-0", ResetFontSize, None, cx),
     ]);
     // Only where the system has them: elsewhere GPUI ignores them, or (Windows) panics, and
     // without a handler the command palette doesn't offer them.

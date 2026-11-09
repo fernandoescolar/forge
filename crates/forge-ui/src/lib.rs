@@ -235,3 +235,10 @@ pub fn dock_name(position: DockPosition) -> &'static str {
         DockPosition::Bottom => "bottom",
     }
 }
+
+/// A key binding whose keys may say `secondary-` (⌘ on macOS, Ctrl elsewhere): resolved for
+/// the platform Forge runs on. `gpui::KeyBinding::new` panics on `secondary-`.
+pub fn key_binding<A: gpui::Action>(keystrokes: &str, action: A, context: Option<&str>, cx: &App) -> gpui::KeyBinding {
+    let context = context.map(|context| gpui::KeyBindingContextPredicate::parse(context).expect("a valid key context").into());
+    gpui::KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx).expect("valid keystrokes")
+}

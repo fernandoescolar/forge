@@ -218,7 +218,7 @@ mod tests {
         let mut captured = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
         while let Some(m) = matches.next() {
-            for capture in m.captures.iter().filter(|c| c.node.start_position().row < 3) {
+            for capture in m.captures().iter().filter(|c| c.node.start_position().row < 3) {
                 captured.push((query.capture_names()[capture.index as usize].to_string(), source[capture.node.byte_range()].to_string()));
             }
         }
@@ -265,7 +265,7 @@ mod tests {
         let mut rows = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
         while let Some(m) = matches.next() {
-            rows.extend(m.captures.iter().map(|c| c.node.start_position().row));
+            rows.extend(m.captures().iter().map(|c| c.node.start_position().row));
         }
         assert_eq!(rows, [3, 9], "one run button per request line");
     }
@@ -292,7 +292,7 @@ mod tests {
         let mut captured = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
         while let Some(m) = matches.next() {
-            for capture in m.captures {
+            for capture in m.captures() {
                 captured.push((query.capture_names()[capture.index as usize].to_string(), text[capture.node.byte_range()].to_string()));
             }
         }
@@ -306,7 +306,7 @@ mod tests {
         let mut cursor = tree_sitter::QueryCursor::new();
         let mut matches = cursor.matches(&runnables.query, tree.root_node(), text.as_bytes());
         while let Some(m) = matches.next() {
-            targets.extend(m.captures.iter().filter(|c| c.index == run).map(|c| text[c.node.byte_range()].to_string()));
+            targets.extend(m.captures().iter().filter(|c| c.index == run).map(|c| text[c.node.byte_range()].to_string()));
         }
         assert_eq!(targets, ["all", "app", "clean"]);
     }
@@ -333,7 +333,7 @@ mod tests {
         let mut captured = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
         while let Some(m) = matches.next() {
-            for capture in m.captures {
+            for capture in m.captures() {
                 captured.push((query.capture_names()[capture.index as usize].to_string(), text[capture.node.byte_range()].to_string()));
             }
         }
@@ -347,7 +347,7 @@ mod tests {
         let mut yaml = String::new();
         let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
         while let Some(m) = matches.next() {
-            for capture in m.captures {
+            for capture in m.captures() {
                 yaml.push_str(&text[capture.node.byte_range()]);
             }
         }
@@ -412,7 +412,7 @@ public class NotATestClass
         let mut matches = cursor.matches(&config.query, tree.root_node(), source.as_bytes());
         while let Some(m) = matches.next() {
             let tag = config.query.property_settings(m.pattern_index)[0].value.clone().unwrap();
-            for capture in m.captures.iter().filter(|c| c.index == run_index) {
+            for capture in m.captures().iter().filter(|c| c.index == run_index) {
                 found.insert(format!("{tag}:{}", &source[capture.node.byte_range()]));
             }
         }

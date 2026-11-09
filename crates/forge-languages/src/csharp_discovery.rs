@@ -98,7 +98,7 @@ pub fn csharp_tests(source: &str) -> Vec<DiscoveredTest> {
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&QUERY, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
-        let node = |ix| m.captures.iter().find(|c| c.index == ix).map(|c| c.node);
+        let node = |ix| m.captures().iter().find(|c| c.index == ix).map(|c| c.node);
         let (Some(class), Some(method)) = (node(class_ix), node(method_ix)) else {
             continue; // the class-level pattern
         };

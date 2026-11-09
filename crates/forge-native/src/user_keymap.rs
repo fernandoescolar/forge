@@ -82,7 +82,7 @@ mod tests {
     fn action_for(keys: &str, cx: &mut App) -> Option<String> {
         let keymap = cx.key_bindings();
         let keymap = keymap.borrow();
-        let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(keys).unwrap()], &[]);
+        let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse_with_os(keys, cx.platform_info().os).unwrap()], &[]);
         bindings.first().map(|b| b.action().name().to_string())
     }
 
