@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const ROSLYN: &str = "roslyn";
 /// How often to check that the servers are still running.
 pub(crate) const WATCH_INTERVAL: Duration = Duration::from_secs(3);
-/// A server that keeps dying is left alone: restarts within this window count together.
+/// A server that keeps dying is left alone for a while: restarts within this window count
+/// together, and it gets another chance when one of them is older than that.
 const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
 const MAX_RESTARTS: usize = 3;
 
@@ -140,6 +141,8 @@ struct RunningServer {
 pub(crate) struct RoslynSession {
     servers: HashMap<LanguageServerId, RunningServer>,
     restarts: Vec<Instant>,
+    /// The servers died too often and were left dead: [`Self::retry`] starts them again.
+    gave_up: bool,
 }
 
 impl RoslynSession {
@@ -214,14 +217,25 @@ impl RoslynSession {
         if allow_restart(&mut self.restarts, Instant::now()) {
             self.restart(project, cx);
         } else {
-            log::error!("Roslyn: not restarting, it exited {MAX_RESTARTS} times in {} minutes", RESTART_WINDOW.as_secs() / 60);
+            log::error!("Roslyn: not restarting for now, it exited {MAX_RESTARTS} times in {} minutes", RESTART_WINDOW.as_secs() / 60);
+            self.gave_up = true;
             project.update(cx, |_, cx| {
                 cx.emit(project::Event::Toast {
                     notification_id: "roslyn-keeps-exiting".into(),
-                    message: "The C# language server keeps exiting, so Forge stopped restarting it. See the Forge log for its errors.".into(),
+                    message: "The C# language server keeps exiting. Forge will start it again in a few minutes; its errors are in the Forge log.".into(),
                     link: None,
                 });
             });
+        }
+    }
+
+    /// Starts the servers that were left dead, once enough time has passed since they kept
+    /// dying. Zed still counts a dead server as running, so until then C# has no server.
+    pub(crate) fn retry(&mut self, project: &Entity<Project>, now: Instant, cx: &mut App) {
+        if self.gave_up && allow_restart(&mut self.restarts, now) {
+            log::info!("Roslyn: starting the language server again");
+            self.gave_up = false;
+            self.restart(project, cx);
         }
     }
 
@@ -234,7 +248,11 @@ impl RoslynSession {
         let running: Vec<LanguageServerId> = project.read(cx).language_server_statuses(cx).filter(|(_, status)| status.name.0.as_ref() == ROSLYN).map(|(id, _)| id).collect();
         self.servers.retain(|id, _| running.contains(id));
         for id in running {
-            self.servers.entry(id).or_default();
+            // A server that just started, by `retry` or by the user: nothing to start again.
+            if !self.servers.contains_key(&id) {
+                self.gave_up = false;
+                self.servers.insert(id, RunningServer::default());
+            }
         }
     }
 
@@ -350,6 +368,66 @@ mod tests {
         cx.update(|cx| session.open(&project, Some(&beta), cx));
         assert_eq!(second.receive_notification::<SolutionOpen>().await.solution, beta_uri);
         assert_eq!(session.servers.len(), 1, "the old server is gone");
+    }
+
+    /// A server that keeps dying is left dead, and started again when the restarts are old.
+    #[gpui::test]
+    async fn a_server_that_kept_dying_gets_another_chance(cx: &mut gpui::TestAppContext) {
+        use futures::StreamExt as _;
+
+        cx.update(workspace::AppState::test);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("App.sln");
+        std::fs::write(&path, include_str!("../../dotnet-model/tests/fixtures/sample.sln")).unwrap();
+        let solution = Solution::load(&path).unwrap();
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/dir", serde_json::json!({ "App.cs": "class App { }" })).await;
+        let project = Project::test(fs, ["/dir".as_ref()], cx).await;
+        let languages = project.read_with(cx, |project, _| project.languages().clone());
+        languages.add(Arc::new(language::Language::new(
+            language::LanguageConfig {
+                name: "C#".into(),
+                matcher: language::LanguageMatcher { path_suffixes: vec!["cs".into()], ..Default::default() }.into(),
+                ..Default::default()
+            },
+            None,
+        )));
+        let mut fake_servers = languages.register_fake_lsp("C#", language::FakeLspAdapter { name: ROSLYN, ..Default::default() });
+        let (_buffer, _registration) = project.update(cx, |project, cx| project.open_local_buffer_with_lsp("/dir/App.cs", cx)).await.unwrap();
+        let mut servers = vec![fake_servers.next().await.unwrap()];
+        cx.run_until_parked();
+
+        let mut session = RoslynSession::default();
+        let die = |session: &mut RoslynSession, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| session.open(&project, Some(&solution), cx));
+            let id = *session.servers.iter().find(|(_, running)| !running.finished).expect("a running server").0;
+            cx.update(|cx| session.servers_exited(&project, vec![(id, "exit status: 134".to_string())], cx));
+            cx.run_until_parked();
+        };
+        for _ in 0..MAX_RESTARTS {
+            die(&mut session, cx);
+            servers.push(fake_servers.next().await.unwrap());
+            cx.run_until_parked();
+        }
+        die(&mut session, cx);
+        assert!(session.gave_up);
+        assert!(fake_servers.try_recv().is_err(), "left dead");
+
+        let now = Instant::now();
+        cx.update(|cx| session.retry(&project, now, cx));
+        cx.run_until_parked();
+        assert!(session.gave_up && fake_servers.try_recv().is_err(), "the restarts are too recent");
+
+        cx.update(|cx| session.retry(&project, now + RESTART_WINDOW, cx));
+        let mut last = fake_servers.next().await.unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        last.receive_notification::<SolutionOpen>().await;
+        assert!(!session.gave_up);
+        cx.update(|cx| session.retry(&project, now + RESTART_WINDOW * 2, cx));
+        cx.run_until_parked();
+        assert!(fake_servers.try_recv().is_err(), "a running server is left alone");
     }
 
     /// The command replaces a running server, starts one the user stopped, and in both cases
@@ -693,5 +771,210 @@ mod tests {
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
             }
         }
+    }
+
+    /// The real Roslyn through what happens to files in a working day: edits, saves, other
+    /// line endings, changes on disk, renames, deletions, another language, closing and
+    /// opening again. Roslyn ends its process when the documents it is told about don't add
+    /// up, so it has to be the same process at the end.
+    /// `FORGE_TEST_ROSLYN_DLL=<its dll> cargo test -p forge-dotnet real_roslyn_survives -- --ignored`.
+    #[cfg(unix)]
+    #[gpui::test]
+    #[ignore = "needs the .NET SDK and FORGE_TEST_ROSLYN_DLL"]
+    async fn real_roslyn_survives_file_churn(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let dll = std::env::var("FORGE_TEST_ROSLYN_DLL").expect("FORGE_TEST_ROSLYN_DLL");
+        let dotnet = std::env::var("FORGE_TEST_DOTNET").unwrap_or_else(|_| "/usr/bin/dotnet".into());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |path: &str, text: String| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        const USER: &str = "namespace Lib; public class User { Greeter greeter; }\n";
+        write("Lib/Lib.csproj", r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"#.into());
+        write("Lib/Greeter.cs", "namespace Lib; public class Greeter { }\n".into());
+        write("Lib/User.cs", USER.into());
+        write("Lib/Other.cs", "namespace Lib; public class Other { }\n".into());
+        write("All.slnx", r#"<Solution><Project Path="Lib/Lib.csproj" /></Solution>"#.into());
+        write(
+            ".forge/settings.json",
+            serde_json::json!({ "lsp": { "roslyn": { "binary": { "path": dotnet, "arguments": [dll, "--stdio", "--logLevel", "Information"] } } } }).to_string(),
+        );
+        let solution = Solution::load(&root.join("All.slnx")).unwrap();
+
+        cx.update(workspace::AppState::test);
+        let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let languages = project.read_with(cx, |project, _| project.languages().clone());
+        cx.update(|cx| forge_languages::register_languages(languages.clone(), cx));
+        let settle = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..15 {
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        settle(cx);
+        let open = |path: &str, cx: &mut gpui::TestAppContext| {
+            let opened = project.update(cx, |project, cx| project.open_local_buffer_with_lsp(root.join(path), cx));
+            cx.foreground_executor().block_test(opened).unwrap()
+        };
+        let (mut user, mut user_lsp) = open("Lib/User.cs", cx);
+
+        // The server and how its process ended, if it has.
+        let server = |cx: &mut gpui::TestAppContext| -> Option<(LanguageServerId, Option<String>)> {
+            project.read_with(cx, |project, cx| {
+                let lsp_store = project.lsp_store().read(cx);
+                let (id, _) = project.language_server_statuses(cx).find(|(_, status)| status.name.0.as_ref() == ROSLYN)?;
+                Some((id, lsp_store.language_server_for_id(id)?.exit_status().map(|status| status.to_string())))
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let first = loop {
+            cx.run_until_parked();
+            if let Some((id, _)) = server(cx) {
+                break id;
+            }
+            assert!(Instant::now() < deadline, "no Roslyn server");
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let mut session = RoslynSession::default();
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        wait_for_definition(&project, &user, "Greeter", "Greeter.cs", cx);
+
+        let mut died: Vec<&str> = Vec::new();
+        let mut current = first;
+        // Whether the server outlived `step`; a new one takes over when it didn't.
+        let mut check = |step: &'static str, session: &mut RoslynSession, cx: &mut gpui::TestAppContext| {
+            settle(cx);
+            match server(cx) {
+                Some((id, None)) if id == current => {}
+                state => {
+                    eprintln!("Roslyn died at {step:?}: {state:?}");
+                    died.push(step);
+                    cx.update(|cx| forge_languages::language_servers::restart(&project, cx));
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    loop {
+                        settle(cx);
+                        if let Some((id, None)) = server(cx)
+                            && id != current
+                        {
+                            current = id;
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "no new Roslyn server after {step:?}");
+                    }
+                    cx.update(|cx| session.open(&project, Some(&solution), cx));
+                    settle(cx);
+                }
+            }
+        };
+        let edit = |buffer: &Entity<Buffer>, cx: &mut gpui::TestAppContext| buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "// edited\n")], None, cx));
+        let save = |buffer: &Entity<Buffer>, cx: &mut gpui::TestAppContext| {
+            let saved = project.update(cx, |project, cx| project.save_buffer(buffer.clone(), cx));
+            cx.foreground_executor().block_test(saved).unwrap();
+        };
+
+        edit(&user, cx);
+        save(&user, cx);
+        check("edit and save", &mut session, cx);
+
+        for _ in 0..200 {
+            user.update(cx, |buffer, cx| {
+                let end = buffer.len();
+                buffer.edit([(end..end, "// more\n")], None, cx);
+                buffer.edit([(0..3, "")], None, cx);
+                buffer.edit([(0..0, "// ")], None, cx);
+            });
+            cx.run_until_parked();
+        }
+        check("many edits", &mut session, cx);
+
+        user.update(cx, |buffer, cx| buffer.set_line_ending(language::LineEnding::Windows, cx));
+        edit(&user, cx);
+        save(&user, cx);
+        user.update(cx, |buffer, cx| buffer.set_line_ending(language::LineEnding::Unix, cx));
+        save(&user, cx);
+        check("other line endings", &mut session, cx);
+
+        std::fs::write(root.join("Lib/User.cs"), "// from outside\r\nnamespace Lib; public class User { Greeter greeter; }\r\n").unwrap();
+        check("changed on disk", &mut session, cx);
+        edit(&user, cx);
+        check("edit after the change on disk", &mut session, cx);
+        save(&user, cx);
+
+        std::fs::rename(root.join("Lib/User.cs"), root.join("Lib/Member.cs")).unwrap();
+        check("renamed on disk", &mut session, cx);
+        edit(&user, cx);
+        save(&user, cx);
+        check("edit after the rename", &mut session, cx);
+        std::fs::rename(root.join("Lib/Member.cs"), root.join("Lib/User.cs")).unwrap();
+        check("renamed back", &mut session, cx);
+
+        std::fs::rename(root.join("Lib/User.cs"), root.join("Lib/User.txt")).unwrap();
+        check("renamed to another language", &mut session, cx);
+        edit(&user, cx);
+        save(&user, cx);
+        std::fs::rename(root.join("Lib/User.txt"), root.join("Lib/User.cs")).unwrap();
+        check("renamed back to C#", &mut session, cx);
+        edit(&user, cx);
+        check("edit after coming back to C#", &mut session, cx);
+        save(&user, cx);
+
+        std::fs::remove_file(root.join("Lib/User.cs")).unwrap();
+        check("deleted on disk", &mut session, cx);
+        edit(&user, cx);
+        check("edit after the deletion", &mut session, cx);
+        std::fs::write(root.join("Lib/User.cs"), USER).unwrap();
+        check("created again", &mut session, cx);
+        edit(&user, cx);
+        check("edit after it was created again", &mut session, cx);
+        save(&user, cx);
+
+        project.update(cx, |project, cx| project.set_language_for_buffer(&user, language::PLAIN_TEXT.clone(), cx));
+        check("set to plain text", &mut session, cx);
+        edit(&user, cx);
+        let csharp = cx.foreground_executor().block_test(languages.language_for_name("C#")).unwrap();
+        project.update(cx, |project, cx| project.set_language_for_buffer(&user, csharp, cx));
+        check("set to C# again", &mut session, cx);
+        edit(&user, cx);
+        save(&user, cx);
+        check("edit after the languages", &mut session, cx);
+
+        drop(user_lsp);
+        drop(user);
+        check("closed", &mut session, cx);
+        (user, user_lsp) = open("Lib/User.cs", cx);
+        check("opened again", &mut session, cx);
+        // A second handle on the same buffer, and one going away.
+        let (again, again_lsp) = open("Lib/User.cs", cx);
+        drop(again_lsp);
+        drop(again);
+        edit(&user, cx);
+        check("opened twice", &mut session, cx);
+
+        let (other, _other_lsp) = open("Lib/Other.cs", cx);
+        std::fs::remove_file(root.join("Lib/User.cs")).unwrap();
+        std::fs::rename(root.join("Lib/Other.cs"), root.join("Lib/User.cs")).unwrap();
+        check("renamed over an open file", &mut session, cx);
+        edit(&other, cx);
+        edit(&user, cx);
+        check("edits after the rename over an open file", &mut session, cx);
+
+        std::fs::write(root.join("Lib/User.cs"), USER).unwrap();
+        settle(cx);
+        let reloaded = project.update(cx, |project, cx| project.reload_buffers([user.clone(), other.clone()].into_iter().collect(), false, cx));
+        cx.foreground_executor().block_test(reloaded).ok();
+        check("reloaded", &mut session, cx);
+
+        cx.update(|cx| session.open(&project, Some(&solution), cx));
+        check("the same solution again", &mut session, cx);
+
+        drop(user_lsp);
+        if let Some(pid) = project.read_with(cx, |project, cx| project.lsp_store().read(cx).language_server_for_id(current).and_then(|server| server.process_id())) {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        assert!(died.is_empty(), "Roslyn died at: {died:?}");
     }
 }

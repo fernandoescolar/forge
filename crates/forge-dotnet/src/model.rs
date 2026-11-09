@@ -127,6 +127,7 @@ impl DotnetModel {
                 cx.background_executor().timer(WATCH_INTERVAL).await;
                 let Ok(exited) = this.update(cx, |this, cx| {
                     let project = this.project.clone();
+                    this.roslyn.retry(&project, std::time::Instant::now(), cx);
                     this.roslyn.exited_servers(&project, cx)
                 }) else {
                     break;
