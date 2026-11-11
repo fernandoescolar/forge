@@ -568,12 +568,14 @@ fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, comma
         .border_color(if waiting { cx.theme().status().info_border } else { colors.border })
         .when(waiting, |el| el.bg(cx.theme().status().info_background))
         .child(
+            // A long command wraps inside the card instead of running past its edge.
             h_flex()
                 .gap_1()
-                .child(Icon::new(icon).size(IconSize::Small).color(color))
-                .child(Label::new(if waiting { "The agent wants to run" } else { "Ran" }).size(LabelSize::Small).color(Color::Muted))
-                .child(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx))
-                .when(!place.is_empty(), |el| el.child(Label::new(place).size(LabelSize::Small).color(Color::Muted))),
+                .items_start()
+                .child(div().flex_none().child(Icon::new(icon).size(IconSize::Small).color(color)))
+                .child(div().flex_none().child(Label::new(if waiting { "The agent wants to run" } else { "Ran" }).size(LabelSize::Small).color(Color::Muted)))
+                .child(wrapping(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx)))
+                .when(!place.is_empty(), |el| el.child(div().flex_none().child(Label::new(place).size(LabelSize::Small).color(Color::Muted)))),
         )
         .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
         .when_some(exit.map(str::to_string), |el, exit| el.child(Label::new(exit).size(LabelSize::XSmall).color(Color::Muted)))
