@@ -81,6 +81,14 @@ impl ThreadStore {
 struct Stores(HashMap<EntityId, WeakEntity<ThreadStore>>);
 impl Global for Stores {}
 
+/// Over Zed's keymap: Ctrl+C copies what is selected in a thread's terminal (a command
+/// the agent ran, stopped with the thread's Stop) instead of sending it an interrupt.
+pub(crate) fn bind_keys(cx: &mut App) {
+    if cfg!(not(target_os = "macos")) {
+        cx.bind_keys([gpui::KeyBinding::new("ctrl-c", terminal::Copy, Some("ForgeThread > Terminal"))]);
+    }
+}
+
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         forge_ui::key_binding("secondary-alt-n", NewThread, None, cx),
@@ -308,10 +316,15 @@ pub struct ThreadView {
     follow_hidden: bool,
     /// The changed-files list under the conversation is open (it is, until folded).
     changes_open: bool,
+    /// The review tab this thread opened last: the next one takes its place.
+    review: Option<gpui::WeakEntity<Editor>>,
     /// Tool calls and thoughts the user folded or unfolded against their default.
     toggled: HashSet<String>,
     /// The user's messages as Markdown (by entry, with the text they were made from).
     user_markdown: HashMap<usize, (String, Entity<markdown::Markdown>)>,
+    /// Commands and tool output as code blocks, so they select and copy (by key, with the
+    /// text they were made from).
+    code_markdown: HashMap<String, (String, Entity<markdown::Markdown>)>,
     /// Repaints the working time while the agent works.
     _ticker: Option<Task<()>>,
     /// Tool calls rendered, for tests to see what a repaint costs.
@@ -349,6 +362,29 @@ impl ThreadView {
         Some(md)
     }
 
+    /// `text` as a code block that selects with the mouse and copies (kept under `key`
+    /// until the text changes).
+    pub(crate) fn code_markdown(&mut self, key: String, text: &str, cx: &mut Context<Self>) -> Entity<markdown::Markdown> {
+        if let Some((_, md)) = self.code_markdown.get(&key).filter(|(known, _)| known == text) {
+            return md.clone();
+        }
+        let source = code_block(text);
+        let md = match self.code_markdown.get(&key) {
+            // The same entity, so a selection in output that grows stays where it is.
+            Some((_, md)) => {
+                let md = md.clone();
+                md.update(cx, |md, cx| md.replace(source, cx));
+                md
+            }
+            None => {
+                let languages = self.thread.read(cx).languages().clone();
+                cx.new(|cx| markdown::Markdown::new(source.into(), Some(languages), None, cx))
+            }
+        };
+        self.code_markdown.insert(key, (text.to_string(), md.clone()));
+        md
+    }
+
     fn new(workspace: &Workspace, thread: Entity<Thread>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project = workspace.project().clone();
         let input = cx.new(|cx| {
@@ -376,6 +412,7 @@ impl ThreadView {
         let thread_subscription = Self::subscribe_thread(&thread, window, cx);
         Self {
             user_markdown: HashMap::new(),
+            code_markdown: HashMap::new(),
             thread,
             workspace: workspace.weak_handle(),
             input,
@@ -395,8 +432,11 @@ impl ThreadView {
             follow: None,
             follow_review: None,
             follow_paused: false,
-            follow_hidden: false,
+            // As the user left it last: closing the follow pane turns following off for
+            // the threads after, "Follow agent" back on.
+            follow_hidden: !follow_by_default(cx),
             changes_open: true,
+            review: None,
             toggled: HashSet::new(),
             _ticker: None,
             #[cfg(test)]
@@ -496,7 +536,7 @@ impl ThreadView {
         let languages = self.thread.read(cx).languages().clone();
         let project = workspace.read(cx).project().clone();
         let opens: Vec<_> = baselines.iter().map(|(path, _)| project.update(cx, |p, cx| p.open_local_buffer(path, cx))).collect();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let mut files = Vec::new();
             let mut focus_ix = None;
             for ((path, baseline), open) in baselines.into_iter().zip(opens) {
@@ -506,11 +546,27 @@ impl ThreadView {
                 }
                 files.push((buffer, baseline));
             }
+            let Some(view) = this.upgrade() else { return };
             workspace
                 .update_in(cx, |workspace, window, cx| {
                     let editor = crate::diff::review_editor(files, focus_ix, title, project, languages, window, cx);
-                    // Beside the thread, so the conversation and its lists stay in view.
-                    workspace.split_item(workspace::SplitDirection::Right, Box::new(editor), window, cx);
+                    // In the tab group the review tab is in (and in its place), or else the
+                    // thread's: a click never makes another group.
+                    let old = view.read(cx).review.as_ref().and_then(|r| r.upgrade());
+                    let old_place = old.as_ref().and_then(|old| {
+                        let pane = workspace.pane_for(old)?;
+                        let ix = pane.read(cx).index_for_item(old)?;
+                        Some((pane, ix, old.entity_id()))
+                    });
+                    let (pane, ix) = match &old_place {
+                        Some((pane, ix, _)) => (pane.clone(), Some(*ix)),
+                        None => (workspace.pane_for(&view).unwrap_or_else(|| workspace.active_pane().clone()), None),
+                    };
+                    workspace.add_item(pane.clone(), Box::new(editor.clone()), ix, true, true, window, cx);
+                    if let Some((_, _, old_id)) = old_place {
+                        pane.update(cx, |pane, cx| pane.remove_item(old_id, false, false, window, cx));
+                    }
+                    view.update(cx, |view, _| view.review = Some(editor.downgrade()));
                 })
                 .ok();
         })
@@ -697,7 +753,7 @@ impl ThreadView {
     }
 
     /// The review tab: every changed file against before the agent, at `focus` if given,
-    /// beside the thread.
+    /// in the thread's tab group (in place of the one it opened before).
     fn open_review(&mut self, focus: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let thread = self.thread.read(cx);
         let baselines = thread.changes.iter().map(|c| (c.path.clone(), c.original.clone().unwrap_or_default())).collect();
@@ -759,6 +815,9 @@ impl ThreadView {
     /// Back to where the agent is now.
     fn jump_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_paused = false;
+        if self.follow_hidden {
+            remember_follow(true, cx);
+        }
         self.follow_hidden = false;
         if let Some(location) = self.thread.read(cx).location().cloned() {
             self.follow_to(location, window, cx);
@@ -768,6 +827,7 @@ impl ThreadView {
 
     fn close_follow(&mut self, cx: &mut Context<Self>) {
         self.follow_hidden = true;
+        remember_follow(false, cx);
         cx.notify();
     }
 
@@ -1036,7 +1096,8 @@ impl ThreadView {
             .child(
                 h_flex()
                     .gap_1()
-                    .when(self.follow.is_some() && self.follow_hidden, |el| {
+                    // Once the agent is somewhere (it opens nothing until followed).
+                    .when(self.follow_hidden && (self.follow.is_some() || self.thread.read(cx).location().is_some()), |el| {
                         el.child(Button::new("follow-open", "Follow agent").style(ButtonStyle::Subtle).size(ButtonSize::Compact).on_click(cx.listener(|this, _, window, cx| this.jump_to_agent(window, cx))))
                     })
                     .child(agent)
@@ -1625,6 +1686,46 @@ impl Render for ThreadView {
     }
 }
 
+const FOLLOW_KEY: &str = "forge-agents-follow";
+
+#[cfg(test)]
+thread_local! {
+    /// Tests share one store; each keeps its own choice (a gpui test runs on its thread).
+    static FOLLOW: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether a new thread follows the agent: as the user left it last, off until then.
+fn follow_by_default(cx: &App) -> bool {
+    #[cfg(test)]
+    {
+        let _ = cx;
+        FOLLOW.with(|f| f.get()).unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        db::kvp::KeyValueStore::global(cx).read_kvp(FOLLOW_KEY).ok().flatten().as_deref() == Some("true")
+    }
+}
+
+fn remember_follow(on: bool, cx: &App) {
+    #[cfg(test)]
+    {
+        let _ = cx;
+        FOLLOW.with(|f| f.set(Some(on)));
+        return;
+    }
+    #[allow(unreachable_code)]
+    let kvp = db::kvp::KeyValueStore::global(cx);
+    cx.background_spawn(async move { if let Err(e) = kvp.write_kvp(FOLLOW_KEY.to_string(), on.to_string()).await { log::warn!("remembering whether to follow the agent: {e:#}") } }).detach();
+}
+
+/// `text` as a fenced code block, its fence longer than any run of backticks in it.
+fn code_block(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{}\n{fence}", text.trim_end_matches('\n'))
+}
+
 /// `element` in the conversation's column: as wide as the messages and the input, centered.
 fn centered(element: impl IntoElement) -> AnyElement {
     h_flex().w_full().justify_center().px_4().child(v_flex().w_full().min_w_0().max_w(px(880.)).child(element)).into_any_element()
@@ -1801,6 +1902,8 @@ mod tests {
             thread
         });
         let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        // Following is off until the user turns it on.
+        view.update(cx, |v, _| v.follow_hidden = false);
         draw(&view, cx);
         view.update_in(cx, |v, window, cx| {
             v.input.update(cx, |e, cx| e.set_text("edit a.txt new", window, cx));
@@ -1873,6 +1976,8 @@ mod tests {
             thread
         });
         let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        // Following is off until the user turns it on.
+        view.update(cx, |v, _| v.follow_hidden = false);
         draw(&view, cx);
         for message in ["read a.txt 0", "edit a.txt new"] {
             view.update_in(cx, |v, window, cx| {
@@ -1923,6 +2028,8 @@ mod tests {
             thread
         });
         let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).unwrap();
+        // Following is off until the user turns it on.
+        view.update(cx, |v, _| v.follow_hidden = false);
         let (before, after) = ("fn a() {}\nfn b() {}\n", "fn a() {}\nfn c() {}\n");
         let update = |u: serde_json::Value, cx: &mut VisualTestContext| {
             thread.update_in(cx, |t, window, cx| {
@@ -2188,6 +2295,8 @@ mod tests {
             thread
         });
         let view = workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).next()).expect("the thread opened in a tab");
+        // Following is off until the user turns it on.
+        view.update(cx, |v, _| v.follow_hidden = false);
         assert_eq!(view.read_with(cx, |v, _| v.thread().clone()), thread);
         draw(&view, cx);
 
@@ -2713,6 +2822,11 @@ mod tests {
         cx.run_until_parked();
         let review = workspace.read_with(cx, |ws, cx| ws.active_item(cx).and_then(|i| i.downcast::<editor::Editor>())).expect("a review tab");
         assert_eq!(review.read_with(cx, |e, cx| e.buffer().read(cx).title(cx).to_string()), "Changes · write a.txt brand new");
+        // Opened again: in the same tab group, in place of the first one.
+        view.update_in(cx, |v, window, cx| v.open_review(Some("/root/a.txt".into()), window, cx));
+        cx.run_until_parked();
+        let (panes, reviews) = workspace.read_with(cx, |ws, cx| (ws.panes().len(), ws.items_of_type::<editor::Editor>(cx).filter(|e| e.read(cx).buffer().read(cx).title(cx).starts_with("Changes")).count()));
+        assert_eq!((panes, reviews), (1, 1), "one tab group, one review tab");
         draw(&view, cx);
 
         thread.update(cx, |t, cx| t.undo_changes(None, cx));
@@ -3548,6 +3662,29 @@ mod tests {
         assert_eq!(active, first);
     }
 
+    /// A new thread doesn't follow the agent until the user turns it on; then the next ones
+    /// do, until they close the follow pane.
+    #[gpui::test]
+    async fn follows_the_agent_as_last_left(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::AgentsConfig { agent_ignore_files: crate::config::default_agent_ignore_files(), instructions_files: crate::config::default_instructions_files(), agents: vec![], review_writes: true, verify_changes: false, mcp_servers: vec![], tool_timeout_seconds: None, default_agent: None, permissions: Default::default() };
+        let (_, view, mut cx) = thread_tab(config, tmp.path().join("history"), cx).await;
+        let cx = &mut cx;
+        let workspace = view.read_with(cx, |v, _| v.workspace.upgrade().unwrap());
+        let newest = |cx: &mut VisualTestContext| workspace.read_with(cx, |ws, cx| ws.items_of_type::<ThreadView>(cx).last()).unwrap();
+        assert!(view.read_with(cx, |v, _| v.follow_hidden), "off by default");
+
+        view.update_in(cx, |v, window, cx| v.jump_to_agent(window, cx));
+        workspace.update_in(cx, |ws, window, cx| new_thread(ws, None, window, cx));
+        let second = newest(cx);
+        assert!(!second.read_with(cx, |v, _| v.follow_hidden), "on, as left");
+
+        second.update(cx, |v, cx| v.close_follow(cx));
+        workspace.update_in(cx, |ws, window, cx| new_thread(ws, None, window, cx));
+        assert!(newest(cx).read_with(cx, |v, _| v.follow_hidden), "off again");
+    }
+
     /// A conversation with a message, an answer with a code block and a thought, on screen.
     async fn chat_on_screen(cx: &mut TestAppContext) -> (Entity<ThreadView>, VisualTestContext) {
         cx.executor().allow_parking();
@@ -3624,5 +3761,33 @@ mod tests {
         cx.simulate_click(buttons.center(), gpui::Modifiers::none());
         let copied = cx.read_from_clipboard().and_then(|c| c.text());
         assert_eq!(copied.as_deref().map(str::trim_end), Some("let needle = 1;"));
+    }
+
+    /// A tool call's output (a test run's, say) selects with the mouse and copies too.
+    #[gpui::test]
+    async fn copies_selected_tool_output(cx: &mut TestAppContext) {
+        let (view, mut cx) = chat_on_screen(cx).await;
+        let cx = &mut cx;
+        let thread = view.read_with(cx, |v, _| v.thread.clone());
+        thread.update(cx, |t, cx| {
+            // Failed, so it is open.
+            t.entries.push(Entry::Tool { id: "t1".into(), title: "Run tests".into(), kind: "execute".into(), status: "failed".into(), detail: Some("FAIL needle_test\nexpected 1".into()), terminal: None, diffs: vec![], command: None });
+            t.changed(cx);
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("chat-markdown-4").expect("the tool's output on screen");
+        let y = bounds.top() + px(14.);
+        cx.simulate_mouse_down(point(bounds.left() + px(12.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_keystrokes("ctrl-c");
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert!(copied.as_deref().is_some_and(|c| c.contains("needle_test")), "{copied:?}");
+    }
+
+    #[test]
+    fn code_blocks_fence_longer_than_the_text_s_backticks() {
+        assert_eq!(code_block("a\n"), "```\na\n```");
+        assert_eq!(code_block("x ```` y"), "`````\nx ```` y\n`````");
     }
 }

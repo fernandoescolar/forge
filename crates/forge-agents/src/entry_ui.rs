@@ -59,7 +59,8 @@ fn wrapping(text: impl IntoElement) -> gpui::Div {
     div().flex_1().min_w_0().child(text)
 }
 
-/// `user_markdown`: the user's message as Markdown, for a user entry (plain text without).
+/// `user_markdown`: the user's message as Markdown, for a user entry (plain text without),
+/// or a command's line as a code block.
 pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, entry: &Entry, user_markdown: Option<&gpui::Entity<markdown::Markdown>>, window: &Window, cx: &App) -> AnyElement {
     let colors = cx.theme().colors().clone();
     match entry {
@@ -268,7 +269,7 @@ pub(crate) fn render_entry(thread: &Thread, handle: &WeakEntity<Thread>, ix: usi
         Entry::ForgeTool { name, args, state, .. } => render_tool_card(handle, ix, &crate::thread::forge_tool_title(name), None, args, state, Thread::answer_forge_tool, cx),
         Entry::Remember { note, file, state, .. } => render_remember(thread, handle, ix, note, file, state, cx),
         Entry::Config { changes, state, .. } => render_config(handle, ix, changes, state, cx),
-        Entry::Command { command, cwd, state, terminal, exit, .. } => render_command(thread, handle, ix, command, cwd, state, terminal.as_deref(), exit.as_deref(), cx),
+        Entry::Command { command, cwd, state, terminal, exit, .. } => render_command(thread, handle, ix, command, user_markdown, cwd, state, terminal.as_deref(), exit.as_deref(), window, cx),
         Entry::Question { question, options, input, answer, .. } => render_question(handle, ix, question, options, input, answer.as_deref(), cx),
         Entry::System(text, color) => h_flex()
             .gap_1p5()
@@ -547,7 +548,7 @@ fn render_remember(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, note
 /// A command the agent runs with `run_command`: what and where, *Run* / *Don't* while it
 /// waits for the user, then its terminal (live) and how it ended.
 #[allow(clippy::too_many_arguments)]
-fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, command: &str, cwd: &std::path::Path, state: &crate::forge_tools::EditState, terminal: Option<&str>, exit: Option<&str>, cx: &App) -> AnyElement {
+fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, command: &str, command_md: Option<&gpui::Entity<markdown::Markdown>>, cwd: &std::path::Path, state: &crate::forge_tools::EditState, terminal: Option<&str>, exit: Option<&str>, window: &Window, cx: &App) -> AnyElement {
     use crate::forge_tools::EditState;
     let colors = cx.theme().colors().clone();
     let waiting = *state == EditState::Waiting;
@@ -568,15 +569,17 @@ fn render_command(thread: &Thread, handle: &WeakEntity<Thread>, ix: usize, comma
         .border_color(if waiting { cx.theme().status().info_border } else { colors.border })
         .when(waiting, |el| el.bg(cx.theme().status().info_background))
         .child(
-            // A long command wraps inside the card instead of running past its edge.
             h_flex()
                 .gap_1()
-                .items_start()
                 .child(div().flex_none().child(Icon::new(icon).size(IconSize::Small).color(color)))
                 .child(div().flex_none().child(Label::new(if waiting { "The agent wants to run" } else { "Ran" }).size(LabelSize::Small).color(Color::Muted)))
-                .child(wrapping(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx)))
-                .when(!place.is_empty(), |el| el.child(div().flex_none().child(Label::new(place).size(LabelSize::Small).color(Color::Muted)))),
+                .when(!place.is_empty(), |el| el.child(wrapping(Label::new(place).size(LabelSize::Small).color(Color::Muted)))),
         )
+        // The command on its own, to select and copy; a long one stays inside the card.
+        .child(match command_md {
+            Some(md) => chat_markdown(md, ix, window, cx),
+            None => wrapping(Label::new(command.to_string()).size(LabelSize::Small).buffer_font(cx)).into_any_element(),
+        })
         .when_some(terminal_view, |el, view| el.child(div().mt_1().rounded_sm().overflow_hidden().child(view)))
         .when_some(exit.map(str::to_string), |el, exit| el.child(Label::new(exit).size(LabelSize::XSmall).color(Color::Muted)))
         .when(waiting, |el| {

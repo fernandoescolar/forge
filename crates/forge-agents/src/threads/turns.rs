@@ -109,15 +109,21 @@ impl ThreadView {
                 render_entry(thread, &self.thread.downgrade(), *entry, &thread.entries[*entry], md.as_ref(), window, cx)
             }
             Row::Agent { user, last } => self.render_agent_header(*user, *last, cx),
-            Row::Tool { ix, first, last } => self.render_tool(*ix, *first, *last, cx),
+            Row::Tool { ix, first, last } => self.render_tool(*ix, *first, *last, window, cx),
             Row::Thought { ix, latest } => {
                 let Some(Entry::Thought(md)) = self.thread.read(cx).entries.get(*ix) else { return div().into_any_element() };
                 let live = *latest && self.thread.read(cx).status() == Status::Busy;
                 self.render_thought(*ix, md.clone(), live, window, cx)
             }
             Row::Entry(entry) => {
+                // A command's line as a code block, to select and copy.
+                let command = match self.thread.read(cx).entries.get(*entry) {
+                    Some(Entry::Command { command, .. }) => Some(command.clone()),
+                    _ => None,
+                };
+                let md = command.map(|c| self.code_markdown(format!("command-{entry}"), &c, cx));
                 let thread = self.thread.read(cx);
-                render_entry(thread, &self.thread.downgrade(), *entry, &thread.entries[*entry], None, window, cx)
+                render_entry(thread, &self.thread.downgrade(), *entry, &thread.entries[*entry], md.as_ref(), window, cx)
             }
         };
         // Room between turns, so each message and its answer read as one; the agent's part
@@ -221,11 +227,17 @@ impl ThreadView {
 
     /// A tool call: a line, unfolding to its output, diffs and question. Consecutive ones
     /// read as one list in a box (`first` and `last` close it).
-    fn render_tool(&mut self, ix: usize, first: bool, last: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tool(&mut self, ix: usize, first: bool, last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(test)]
         {
             self.rendered_tools += 1;
         }
+        // Its output as a code block, to select and copy.
+        let detail_md = match self.thread.read(cx).entries.get(ix) {
+            Some(Entry::Tool { id, detail: Some(d), terminal: None, .. }) => Some((format!("tool-{id}"), d.clone())),
+            _ => None,
+        }
+        .map(|(key, d)| self.code_markdown(key, &d, cx));
         let follow_terminal = self.follow_terminal(cx);
         let thread = self.thread.read(cx);
         let handle = self.thread.downgrade();
@@ -285,7 +297,7 @@ impl ThreadView {
                 .pl(px(36.))
                 .pr_2()
                 .pb_2()
-                .when_some(detail.clone().filter(|_| terminal_view.is_none()), |el, d| el.child(Label::new(d).size(LabelSize::Small).color(Color::Muted).buffer_font(cx)))
+                .when_some(detail_md.filter(|_| terminal_view.is_none()), |el, md| el.child(chat_markdown(&md, ix, window, cx)))
                 .when_some(terminal_view.filter(|_| !in_follow), |el, view| el.child(div().rounded_sm().overflow_hidden().border_1().border_color(colors.border_variant).child(view)))
                 .children(diffs.iter().chain(permission_diffs.iter().copied()).map(|d| render_diff(thread, &handle, d, cx)))
                 .when_some(permission.clone(), |el, (request_id, options, resolved, _)| el.child(render_permission_answer(&handle, &request_id, &options, resolved.as_deref())))

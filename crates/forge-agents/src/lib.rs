@@ -56,6 +56,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
     agent_review::bind_keys(cx);
     commit_message::bind_keys(cx);
     context::bind_keys(cx);
+    threads::bind_keys(cx);
 }
 
 pub fn init(cx: &mut gpui::App) {
