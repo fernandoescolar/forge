@@ -42,6 +42,19 @@ impl SolutionExplorer {
         cx: &mut Context<Self>,
         job: impl Future<Output = Result<Option<PathBuf>>> + Send + 'static,
     ) {
+        self.run_job_then(label, touched, window, cx, job, |_, _, _| {});
+    }
+
+    /// [`Self::run_job`], then `done` once the job succeeded.
+    pub(crate) fn run_job_then(
+        &mut self,
+        label: &str,
+        touched: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        job: impl Future<Output = Result<Option<PathBuf>>> + Send + 'static,
+        done: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         self.busy = Some(label.to_string().into());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -50,8 +63,12 @@ impl SolutionExplorer {
                 this.busy = None;
                 this.model.update(cx, |model, cx| model.reload_paths(&touched, cx));
                 match result {
-                    Ok(Some(path)) if path.is_file() => this.open_file(path, true, window, cx),
-                    Ok(_) => {}
+                    Ok(path) => {
+                        if let Some(path) = path.filter(|p| p.is_file()) {
+                            this.open_file(path, true, window, cx);
+                        }
+                        done(this, window, cx);
+                    }
                     Err(error) => this.show_error(format!("{error:#}"), cx),
                 }
                 cx.notify();
@@ -906,9 +923,8 @@ impl SolutionExplorer {
                     pick::ask(workspace, "Solution name", &default_name, window, cx, move |name, window, cx| {
                         let path = root.join(format!("{name}.{extension}"));
                         this.update(cx, |this, cx| {
-                            let model = model.clone();
                             let job_path = path.clone();
-                            this.run_job("Creating solution…", Vec::new(), window, cx, async move {
+                            let job = async move {
                                 if job_path.exists() {
                                     bail!("{} already exists", paths::file_name(&job_path));
                                 }
@@ -922,8 +938,11 @@ impl SolutionExplorer {
                                     Ok(())
                                 })?;
                                 Ok(None)
+                            };
+                            // Shown once it exists: a load before that would not find it.
+                            this.run_job_then("Creating solution…", Vec::new(), window, cx, job, move |_, _, cx| {
+                                model.update(cx, |model, cx| model.select_solution(path, cx));
                             });
-                            model.update(cx, |model, cx| model.select_solution(path, cx));
                         })
                         .ok();
                     });

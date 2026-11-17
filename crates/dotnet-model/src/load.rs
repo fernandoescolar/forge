@@ -4,7 +4,7 @@
 //! one (`forge-dotnet`'s `host.rs`), which is why what it makes is serializable.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -90,11 +90,15 @@ fn evaluate_all(paths: Vec<PathBuf>, options: &LoadOptions, evaluate: bool, prev
 /// Finds the solutions under `roots`, loads the chosen one (else the one saved for the
 /// workspace, else the first; with none, the projects found) and evaluates its projects.
 pub fn load_everything(roots: Vec<PathBuf>, chosen: Option<PathBuf>, saved: Option<PathBuf>, options: &LoadOptions) -> Loaded {
-    let solutions: Vec<PathBuf> = roots.iter().flat_map(|root| solution::find_solutions(root, options.solution_search_depth)).collect();
-    let chosen = chosen
-        .filter(|p| p.is_file() && solutions.contains(p))
-        .or_else(|| saved.filter(|p| solutions.contains(p)))
-        .or_else(|| solutions.first().cloned());
+    let mut solutions: Vec<PathBuf> = roots.iter().flat_map(|root| solution::find_solutions(root, options.solution_search_depth)).collect();
+    // One opened by hand may be deeper than the search goes: it counts when it's in the workspace.
+    let usable = |p: &PathBuf| p.is_file() && (solutions.contains(p) || (is_solution_file(p) && roots.iter().any(|root| p.starts_with(root))));
+    let chosen = chosen.filter(usable).or_else(|| saved.filter(usable)).or_else(|| solutions.first().cloned());
+    if let Some(chosen) = &chosen
+        && !solutions.contains(chosen)
+    {
+        solutions.push(chosen.clone());
+    }
     let loaded = match &chosen {
         Some(path) => Solution::load(path).map_err(|e| format!("{e:#}")),
         None => {
@@ -121,6 +125,11 @@ pub fn load_everything(roots: Vec<PathBuf>, chosen: Option<PathBuf>, saved: Opti
         }
     }
     Loaded::new(Some(solutions), solution, projects, children, error)
+}
+
+/// A `.sln` or `.slnx` file, by its name.
+pub fn is_solution_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("sln" | "slnx"))
 }
 
 /// Evaluates again the projects in `evaluate` and lists again the files of those in
@@ -162,5 +171,44 @@ impl LoadParams {
     /// What the host answers.
     pub fn load(self) -> Loaded {
         load_everything(self.roots, self.chosen, self.saved, &self.options).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> LoadOptions {
+        LoadOptions { eval: Default::default(), tree: Default::default(), solution_search_depth: 1 }
+    }
+
+    /// A solution chosen by hand loads when it's anywhere in the workspace, even deeper
+    /// than solutions are looked for; one outside it doesn't.
+    #[test]
+    fn a_chosen_solution_loads_from_any_depth_in_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let top = root.join("Top.slnx");
+        let deep = root.join("a/b/c/Deep.slnx");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&top, crate::slnx::empty_solution()).unwrap();
+        std::fs::write(&deep, crate::slnx::empty_solution()).unwrap();
+
+        let loaded = load_everything(vec![root.clone()], None, None, &options());
+        assert_eq!(loaded.solutions, Some(vec![top.clone()]), "the deep one is past the search");
+        assert_eq!(loaded.solution.unwrap().path, top);
+
+        let loaded = load_everything(vec![root.clone()], Some(deep.clone()), None, &options());
+        assert_eq!(loaded.solution.unwrap().path, deep);
+        assert_eq!(loaded.solutions, Some(vec![top.clone(), deep.clone()]), "and it can be chosen again");
+
+        let loaded = load_everything(vec![root.clone()], None, Some(deep.clone()), &options());
+        assert_eq!(loaded.solution.unwrap().path, deep, "remembered for the workspace");
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().canonicalize().unwrap().join("Other.slnx");
+        std::fs::write(&outside, crate::slnx::empty_solution()).unwrap();
+        let loaded = load_everything(vec![root.clone()], Some(outside), None, &options());
+        assert_eq!(loaded.solution.unwrap().path, top);
     }
 }

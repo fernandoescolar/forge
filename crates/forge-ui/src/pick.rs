@@ -114,15 +114,17 @@ impl PickerDelegate for ChoiceDelegate {
                 self.on_input = Some(on_input);
                 return;
             }
-            on_input(value, window, cx);
+            // Closed before the callback runs, so a next step can open its own picker.
             cx.emit(DismissEvent);
+            on_input(value, window, cx);
             return;
         }
         let Some(m) = self.matches.get(self.selected) else { return };
-        if let Some(on_pick) = self.on_pick.take() {
-            on_pick(m.candidate_id, window, cx);
-        }
+        let ix = m.candidate_id;
         cx.emit(DismissEvent);
+        if let Some(on_pick) = self.on_pick.take() {
+            on_pick(ix, window, cx);
+        }
     }
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
@@ -162,6 +164,15 @@ pub fn defer_workspace(
     });
 }
 
+/// Closes a picker still showing, typically the step that led here: `toggle_modal` would
+/// otherwise take the new picker, of the same type, as a request to close it, and a flow
+/// of several steps (template, then name…) would stop after the first.
+fn close_choice_picker(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if workspace.active_modal::<Picker<ChoiceDelegate>>(cx).is_some() {
+        workspace.hide_modal(window, cx);
+    }
+}
+
 /// Shows `choices` and calls `on_pick` with the index of the chosen one.
 pub fn pick(
     workspace: &mut Workspace,
@@ -181,6 +192,7 @@ pub fn pick(
         on_input: None,
     };
     delegate.matches = delegate.all_matches();
+    close_choice_picker(workspace, window, cx);
     workspace.toggle_modal(window, cx, |window, cx| Picker::uniform_list(delegate, window, cx).initial_width(rems(34.)));
 }
 
@@ -203,6 +215,7 @@ pub fn ask(
         on_input: Some(Box::new(on_input)),
     };
     let initial = initial.to_string();
+    close_choice_picker(workspace, window, cx);
     workspace.toggle_modal(window, cx, |window, cx| {
         let picker = Picker::uniform_list(delegate, window, cx).initial_width(rems(34.));
         picker.set_query(&initial, window, cx);
