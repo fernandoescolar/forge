@@ -220,6 +220,9 @@ pub struct TestPanel {
     /// Where failure lines point (`source_location`), by project and line: details are
     /// drawn every frame while a test runs, and finding out means a `stat`.
     locations: RefCell<HashMap<(Option<PathBuf>, String), Option<(PathBuf, u32)>>>,
+    /// Each failure's message and stack, to select and copy: by case, with the text it was
+    /// made from and where its links go.
+    failure_markdown: HashMap<String, (String, Entity<markdown::Markdown>, Vec<(PathBuf, u32)>)>,
     /// Files this panel last colored in the gutter, so stale entries can be cleared.
     published_files: HashSet<PathBuf>,
     /// What the last run with coverage covered.
@@ -272,6 +275,7 @@ impl TestPanel {
             list_scroll: UniformListScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
             locations: Default::default(),
+            failure_markdown: HashMap::new(),
             published_files: HashSet::new(),
             coverage: None,
             settings_files: Vec::new(),
@@ -981,11 +985,12 @@ impl TestPanel {
             return Some(div().flex_shrink_0().h(px(260.)).border_t_1().border_color(border).pl_2().child(self.log_view.clone()).into_any_element());
         }
         let body: AnyElement = {
-            let (fqn, cases): (&String, Vec<&CaseResult>) = match &self.selected {
-                Some(NodeKey::Method(fqn)) => (fqn, self.results.get(fqn)?.iter().collect()),
-                Some(NodeKey::Case(fqn, label)) => (fqn, self.case_rows(fqn).into_iter().find(|row| &row.label == label)?.results),
+            let (fqn, cases): (String, Vec<CaseResult>) = match &self.selected {
+                Some(NodeKey::Method(fqn)) => (fqn.clone(), self.results.get(fqn)?.to_vec()),
+                Some(NodeKey::Case(fqn, label)) => (fqn.clone(), self.case_rows(fqn).into_iter().find(|row| &row.label == label)?.results.into_iter().cloned().collect()),
                 _ => return None,
             };
+            let fqn = &fqn;
             if cases.is_empty() {
                 return None;
             }
@@ -1002,7 +1007,7 @@ impl TestPanel {
                     ),
                 );
             }
-            for case in cases {
+            for (case_ix, case) in cases.into_iter().enumerate() {
                 let (icon, color) = match case.outcome {
                     Outcome::Passed => Status::Passed.icon(),
                     Outcome::Failed => Status::Failed.icon(),
@@ -1016,22 +1021,11 @@ impl TestPanel {
                     h_flex().gap_1().child(Icon::new(icon).size(IconSize::Small).color(color)).child(Label::new(title).size(LabelSize::Small)),
                 );
                 let root = self.project_of(&NodeKey::Method(fqn.clone())).map(|p| self.projects[p].dir().to_path_buf());
-                if let Some(message) = &case.message {
-                    let mut lines = Vec::new();
-                    for (i, line) in message.lines().enumerate() {
-                        lines.push(match self.location_of(line, root.as_deref()) {
-                            Some(_) => self.render_stack_line(10_000 + i, line, root.as_deref(), cx),
-                            None => Label::new(line.to_string()).size(LabelSize::XSmall).buffer_font(cx).color(color).into_any_element(),
-                        });
-                    }
-                    entry = entry.child(v_flex().pl_5().children(lines));
-                }
-                if let Some(stack) = &case.stack_trace {
-                    let mut frames = Vec::new();
-                    for (i, line) in stack.lines().enumerate() {
-                        frames.push(self.render_stack_line(i, line, root.as_deref(), cx));
-                    }
-                    entry = entry.child(v_flex().pl_5().children(frames));
+                let text = [&case.message, &case.stack_trace].into_iter().flatten().map(|t| t.trim_end()).collect::<Vec<_>>().join("\n");
+                if !text.is_empty() {
+                    let key = format!("{fqn}\u{0}{}\u{0}{case_ix}", case.display_name);
+                    let failure = self.render_failure(key, &text, root.as_deref(), window, cx);
+                    entry = entry.child(div().pl_5().debug_selector(move || format!("test-failure-{case_ix}")).child(failure));
                 }
                 column = column.child(entry);
             }
@@ -1090,20 +1084,46 @@ impl TestPanel {
         ))
     }
 
-    /// A line of a failure; one naming a source line links to it: `in /path/File.cs:line
-    /// 12` (.NET), `calc_test.go:12` (Go), `src/lib.rs:12:9` (Rust), `(/path/a.test.ts:4:7)`
-    /// (Node). Relative paths are resolved against the test's project.
-    fn render_stack_line(&self, index: usize, line: &str, root: Option<&std::path::Path>, cx: &mut Context<Self>) -> AnyElement {
-        let label = Label::new(line.trim_end().to_string()).size(LabelSize::XSmall).buffer_font(cx);
-        let Some((file, row)) = self.location_of(line, root) else {
-            return label.color(Color::Muted).into_any_element();
+    /// A failure's message and stack: it selects with the mouse and copies (Ctrl+C, ⌘C),
+    /// and a line naming a source line links to it: `in /path/File.cs:line 12` (.NET),
+    /// `calc_test.go:12` (Go), `src/lib.rs:12:9` (Rust), `(/path/a.test.ts:4:7)` (Node).
+    /// Relative paths are resolved against the test's project.
+    fn render_failure(&mut self, key: String, text: &str, root: Option<&std::path::Path>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let known = self.failure_markdown.get(&key).filter(|(source, _, _)| source == text).map(|(_, md, links)| (md.clone(), links.clone()));
+        let (md, links) = match known {
+            Some(found) => found,
+            None => {
+                let mut links = Vec::new();
+                let lines: Vec<String> = text
+                    .lines()
+                    .map(|line| {
+                        let shown = markdown_line(line);
+                        match self.location_of(line, root) {
+                            Some(at) => {
+                                links.push(at);
+                                format!("[{shown}](frame:{})", links.len() - 1)
+                            }
+                            None => shown,
+                        }
+                    })
+                    .collect();
+                // A hard break after each line, so they keep to their lines.
+                let source = lines.join("\\\n");
+                let md = cx.new(|cx| markdown::Markdown::new(source.into(), None, None, cx));
+                self.failure_markdown.insert(key, (text.to_string(), md.clone(), links.clone()));
+                (md, links)
+            }
         };
-        div()
-            .id(("frame", index))
-            .cursor_pointer()
-            .hover(|style| style.underline())
-            .child(label.color(Color::Accent))
-            .on_click(cx.listener(move |this, _, window, cx| this.open(file.clone(), row, window, cx)))
+        let mut style = markdown::MarkdownStyle::themed(markdown::MarkdownFont::Editor, window, cx);
+        style.base_text_style.font_family = theme::theme_settings(cx).buffer_font(cx).family.clone();
+        style.base_text_style.font_size = ui::TextSize::XSmall.rems(cx).into();
+        style.base_text_style.color = cx.theme().colors().text_muted;
+        let this = cx.weak_entity();
+        markdown::MarkdownElement::new(md, style)
+            .on_url_click(move |url, window, cx| {
+                let Some((file, row)) = url.strip_prefix("frame:").and_then(|i| i.parse::<usize>().ok()).and_then(|i| links.get(i).cloned()) else { return };
+                this.update(cx, |this, cx| this.open(file, row, window, cx)).ok();
+            })
             .into_any_element()
     }
 }
@@ -1123,6 +1143,24 @@ fn source_location(line: &str, root: Option<&std::path::Path>) -> Option<(PathBu
     let path = if path.is_absolute() { path } else { root?.join(path) };
     let row = row.parse::<u32>().ok()?.saturating_sub(1);
     path.is_file().then_some((path, row))
+}
+
+/// `line` as Markdown that shows it as it is: punctuation escaped, and its indent and an
+/// empty line kept (as no-break spaces).
+fn markdown_line(line: &str) -> String {
+    let line = line.trim_end();
+    let indent = line.len() - line.trim_start().len();
+    let mut out = "\u{a0}".repeat(indent);
+    for c in line.trim_start().chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        out.push('\u{a0}');
+    }
+    out
 }
 
 /// The status glyph; a running test spins.
@@ -1409,6 +1447,13 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn failure_lines_show_as_they_are_in_markdown() {
+        assert_eq!(markdown_line("   at Foo.Bar() in /a/B.cs:line 3"), "\u{a0}\u{a0}\u{a0}at Foo\\.Bar\\(\\) in \\/a\\/B\\.cs\\:line 3");
+        assert_eq!(markdown_line(""), "\u{a0}");
+        assert_eq!(markdown_line("*x* `y`"), "\\*x\\* \\`y\\`");
+    }
+
+    #[test]
     fn combines_statuses_like_a_test_runner() {
         use Status::*;
         assert_eq!(Status::combine([Passed, Passed]), Passed);
@@ -1555,6 +1600,26 @@ mod tests {
             p.selected = Some(NodeKey::Case("Demo.Tests.MathTests.Doubles".into(), "(2, 5)".into()));
         });
         draw(&panel, &mut cx);
+        // The failure selects with the mouse and copies.
+        let failure = panel.read_with(&cx, |p, _| p.failure_markdown.values().map(|(text, _, _)| text.clone()).collect::<Vec<_>>());
+        assert_eq!(failure.len(), 1, "{failure:?}");
+        let first_line = failure[0].lines().next().unwrap().trim().to_string();
+        cx.update(|_, cx| cx.bind_keys([gpui::KeyBinding::new("ctrl-c", markdown::Copy, Some("Markdown"))]));
+        let workspace = panel.read_with(&cx, |p, _| p.workspace.upgrade().unwrap());
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.add_panel(panel.clone(), window, cx);
+            ws.open_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("test-failure-0").expect("the failure on screen");
+        let y = bounds.top() + px(6.);
+        // Past the indent, on the text.
+        cx.simulate_mouse_down(point(bounds.left() + px(22.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(point(bounds.right() - px(1.), y), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_keystrokes("ctrl-c");
+        let copied = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        assert!(!copied.is_empty() && first_line.starts_with(copied.trim()), "copied {copied:?}, the line is {first_line:?}");
         panel.update(&mut cx, |p, cx| p.publish_gutter(cx));
         let file = tests_dir.join("MathTests.cs");
         assert_eq!(crate::gutter::status_at(&file, 5), Some(Status::Passed), "Adds");

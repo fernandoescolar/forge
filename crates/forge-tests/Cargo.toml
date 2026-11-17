@@ -10,7 +10,7 @@ description = "Test explorer panel for Forge (.NET via dotnet test)"
 default = ["ui"]
 # The Tests panel, the gutter and the agents' tools. The remote server runs discovery and
 # test runs (`host.rs`) without them.
-ui = ["dep:editor", "dep:language", "dep:settings", "dep:theme", "dep:ui", "dep:workspace", "dep:db", "dep:dap", "dep:util", "dep:project", "dep:forge-ui", "forge-languages/ui"]
+ui = ["dep:editor", "dep:markdown", "dep:language", "dep:settings", "dep:theme", "dep:ui", "dep:workspace", "dep:db", "dep:dap", "dep:util", "dep:project", "dep:forge-ui", "forge-languages/ui"]
 
 [dependencies]
 forge-process = { path = "../forge-process" }
@@ -24,6 +24,7 @@ forge-ui = { path = "../forge-ui", optional = true }
 gpui = { path = "../../vendor/zed/crates/gpui" }
 language = { path = "../../vendor/zed/crates/language", optional = true }
 log = "0.4"
+markdown = { path = "../../vendor/zed/crates/markdown", optional = true }
 project = { path = "../../vendor/zed/crates/project", optional = true }
 regex = "1.5"
 roxmltree = "0.20"
