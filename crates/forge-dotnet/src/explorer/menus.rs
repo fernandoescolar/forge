@@ -83,7 +83,8 @@ impl SolutionExplorer {
                         .action("Manage NuGet Packages…", Box::new(ManagePackages))
                         .action("Centralize Package Versions", Box::new(CentralizePackageVersions))
                         .action("Customize File Templates", Box::new(CustomizeFileTemplates))
-                        .when(several_solutions, |menu| menu.action("Show Another Solution…", Box::new(SelectSolution)));
+                        .when(several_solutions, |menu| menu.action("Show Another Solution…", Box::new(SelectSolution)))
+                        .action("Open Solution…", Box::new(OpenSolution));
                     let menu = if real_solution { menu.separator().action("Rename", Box::new(Rename)).action("Open Solution File", Box::new(Open)) } else { menu };
                     location_entries(menu)
                 }

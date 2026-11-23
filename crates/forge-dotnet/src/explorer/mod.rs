@@ -48,6 +48,8 @@ actions!(
         RevealActiveFile,
         /// Chooses which solution of the workspace to show.
         SelectSolution,
+        /// Shows a `.sln` or `.slnx` file chosen in the file dialog.
+        OpenSolution,
         NewSolution,
         NewProject,
         AddExistingProject,
@@ -130,6 +132,11 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &SelectSolution, window, cx| {
             if let Some(panel) = workspace.panel::<SolutionExplorer>(cx) {
                 panel.update(cx, |panel, cx| panel.select_solution(&SelectSolution, window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &OpenSolution, window, cx| {
+            if let Some(panel) = workspace.focus_panel::<SolutionExplorer>(window, cx) {
+                panel.update(cx, |panel, cx| panel.open_solution(&OpenSolution, window, cx));
             }
         });
         workspace.register_action(|workspace, _: &NewSolution, window, cx| {
@@ -899,6 +906,11 @@ impl SolutionExplorer {
                 h_flex()
                     .gap_0p5()
                     .child(
+                        IconButton::new("open-solution", IconName::FolderOpen)
+                            .tooltip(Tooltip::text("Open a solution file"))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_solution(&OpenSolution, window, cx))),
+                    )
+                    .child(
                         IconButton::new("manage-packages", IconName::Book)
                             .disabled(model.solution.is_none())
                             .tooltip(Tooltip::text("Manage NuGet packages"))
@@ -946,8 +958,14 @@ impl SolutionExplorer {
                     h_flex()
                         .gap_1()
                         .child(
-                            Button::new("new-solution", "New Solution…")
+                            Button::new("open-solution", "Open Solution…")
                                 .style(ButtonStyle::Filled)
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(|this, _, window, cx| this.open_solution(&OpenSolution, window, cx))),
+                        )
+                        .child(
+                            Button::new("new-solution", "New Solution…")
+                                .style(ButtonStyle::Subtle)
                                 .size(ButtonSize::Compact)
                                 .on_click(cx.listener(|this, _, window, cx| this.new_solution(&NewSolution, window, cx))),
                         )

@@ -55,6 +55,7 @@ pub struct SlnFile {
 impl SlnFile {
     pub fn parse(text: &str) -> Result<Self> {
         let mut sln = SlnFile::default();
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
         if !lines.iter().take(3).any(|l| l.starts_with("Microsoft Visual Studio Solution File")) {
             bail!("not a Visual Studio solution file");
@@ -382,6 +383,13 @@ pub fn empty_solution() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_a_solution_that_starts_with_a_bom() {
+        let text = format!("\u{feff}{}", SAMPLE.trim_start());
+        let sln = SlnFile::parse(&text).unwrap();
+        assert_eq!(sln.projects, SlnFile::parse(SAMPLE).unwrap().projects);
+    }
 
     pub const SAMPLE: &str = "\r
 Microsoft Visual Studio Solution File, Format Version 12.00\r

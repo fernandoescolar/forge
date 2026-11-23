@@ -897,6 +897,32 @@ impl SolutionExplorer {
         });
     }
 
+    pub(super) fn open_solution(&mut self, _: &OpenSolution, window: &mut Window, cx: &mut Context<Self>) {
+        // The file dialog shows this computer's files: on a remote project, pick among the found ones.
+        if forge_ui::is_remote(self.model.read(cx).workspace_project().read(cx)) {
+            self.select_solution(&SelectSolution, window, cx);
+            return;
+        }
+        let roots = self.model.read(cx).roots(cx);
+        let model = self.model.clone();
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Open".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                if !dotnet_model::load::is_solution_file(&path) {
+                    this.show_error(format!("{} is not a .sln or .slnx solution.", paths::file_name(&path)), cx);
+                } else if !roots.iter().any(|root| path.starts_with(root)) {
+                    this.show_error(format!("{} is outside this workspace: open its folder first.", path.display()), cx);
+                } else {
+                    model.update(cx, |model, cx| model.select_solution(path, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn new_solution(&mut self, _: &NewSolution, window: &mut Window, cx: &mut Context<Self>) {
         if self.not_on_remote(cx) {
             return;
